@@ -54,6 +54,8 @@ from .stability   import recommended_dt, check_dt, MassBalanceTracker
 from .lta         import (
     bulk_first_order_multi,
     wall_first_order_multi,
+    combined_decay_factors,
+    apply_combined_decay,
     compute_wall_k,
     advect,
     node_mixing_multi,
@@ -80,6 +82,8 @@ __all__ = [
     # LTA-kernfuncties
     "bulk_first_order_multi",
     "wall_first_order_multi",
+    "combined_decay_factors",
+    "apply_combined_decay",
     "compute_wall_k",
     "advect",
     "node_mixing_multi",
