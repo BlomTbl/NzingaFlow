@@ -1,0 +1,64 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name        = "inzingaflow"
+version     = "1.0.0"
+description = "Lagrangian Transport kwaliteitssimulator voor EPANET-netwerken"
+readme      = "README.md"
+license     = { text = "MIT" }
+requires-python = ">=3.10"
+
+keywords = [
+    "water quality",
+    "EPANET",
+    "Lagrangian transport",
+    "LTA",
+    "drinking water",
+    "hydraulic simulation",
+    "PhreeqPython",
+    "geochemistry",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "epynet>=0.6",
+]
+
+[project.optional-dependencies]
+geochem = [
+    "phreeqpython>=1.5",
+]
+dev = [
+    "pytest>=7",
+    "pytest-cov",
+    "black",
+    "ruff",
+]
+all = [
+    "inzingaflow[geochem,dev]",
+]
+
+[project.urls]
+Repository = "https://github.com/inzingaflow/inzingaflow"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["inzingaflow*"]
+
+[tool.setuptools.package-data]
+inzingaflow = ["py.typed"]
+
+[tool.black]
+line-length    = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+select      = ["E", "F", "W", "I"]
+ignore      = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths   = ["tests"]
+addopts     = "-v --tb=short"

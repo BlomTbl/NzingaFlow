@@ -1,0 +1,694 @@
+# inzingaflow/solver.py
+"""
+InzingaFlowSolver: volledige LTA-solver gekoppeld aan EPANET via epynet.
+
+Nieuw in deze versie
+---------------------
+- Wandreacties via twee-film-model (k_wall per leiding per stof)
+- Tank-knoopmodel (CSTR, impliciet Euler)
+- Automatische CFL-tijdstapcontrole
+- Massabalansregistratie via MassBalanceTracker
+- Pipe-wise parallel segment management via numpy argsort-partitioning
+"""
+
+from __future__ import annotations
+from collections import defaultdict
+import numpy as np
+
+
+class InzingaFlowSolver:
+    """
+    Vectorized Lagrangian Transport Approach solver voor EPANET-netwerken.
+
+    Kenmerken
+    ----------
+    Multi-species     C heeft shape (n, n_species); alle stoffen in één operatie.
+    Wandreacties      Twee-film-model per leiding; afhankelijk van Re en k_wall.
+    Tanks             CSTR-model met impliciet Euler (stabiel voor grote dt).
+    EPS               Hydraulica bijgewerkt via update_hydraulics(simtime).
+    Splitsingen       Segmenten proportioneel opgesplitst naar debiet.
+    Auto-resize       SegmentStore verdubbelt capaciteit automatisch.
+    Stabiliteitscheck CFL + reactie-dt gecontroleerd bij initialisatie en stap.
+    Massabalans       MassBalanceTracker bijgehouden per stap (opt-in).
+
+    Gebruik
+    -------
+        solver = InzingaFlowSolver(
+            "netwerk.inp",
+            n_species=2,
+            k_wall=np.array([[1e-5, 0.0]] * n_pipes),  # [m/s] per pipe per stof
+        )
+        solver.inject("R1", C_vector=[1.0, 0.5], volume=0.05)
+        for step in range(n_steps):
+            node_C = solver.step(dt=5.0, decay_k=[0.001, 0.0])
+    """
+
+    def __init__(
+        self,
+        inp_path:    str,
+        n_species:   int = 1,
+        capacity:    int = 200_000,
+        k_wall:      np.ndarray | None = None,   # (n_pipes, n_species) [m/s]
+        D_mol:       float = 1.3e-9,             # diffusiviteit [m²/s]
+        nu:          float = 1e-6,               # kinematische viscositeit [m²/s]
+        track_mass:  bool = False,
+        geochem      = None,                     # GeochemSolver instantie (optioneel)
+    ):
+        """
+        Parameters
+        ----------
+        inp_path   : pad naar EPANET .inp bestand
+        n_species  : aantal te simuleren stoffen
+        capacity   : initiële SegmentStore capaciteit (auto-resize indien vol)
+        k_wall     : wandreactiesnelheid [m/s]; None = geen wandreacties
+                     shape (n_pipes, n_species) of (n_species,) voor uniform
+        D_mol      : moleculaire diffusiviteit [m²/s] (default: chloor in water)
+        nu         : kinematische viscositeit [m²/s]
+        track_mass : bijhouden van massabalans via MassBalanceTracker
+        geochem    : GeochemSolver instantie voor geochemische reacties.
+                     Als opgegeven, vervangt dit bulk_first_order_multi() in
+                     de simulatielus. Wandreacties (k_wall) blijven apart.
+                     Vereist: pip install phreeqpython
+        """
+        from .hydraulics import HydraulicModel
+        from .segments   import SegmentStore
+        from .stability  import MassBalanceTracker
+
+        self.hyd = HydraulicModel(inp_path)
+        self.hyd.solve()
+
+        (
+            self.pipe_start,
+            self.pipe_end,
+            self.pipe_length,
+            self.pipe_area,
+            self.node_count,
+            self.pipe_ids,
+            self.node_names,
+        ) = self.hyd.get_topology()
+
+        n_pipes = len(self.pipe_ids)
+        self.n_species = n_species
+        self.segments  = SegmentStore(capacity, n_species)
+        self._D_mol    = D_mol
+        self._nu       = nu
+
+        # Naam → index
+        self.node_index = {name: i for i, name in enumerate(self.node_names)}
+        self.pipe_index = {pid:  i for i, pid  in enumerate(self.pipe_ids)}
+
+        # Tank-knoopindices (epynet Tank-objecten)
+        self._tank_nodes = self._detect_tank_nodes()
+        self._tank_V     = self._get_tank_volumes()   # (n_tanks,) m³ — gecached
+        self._tank_C     = np.zeros((len(self._tank_nodes), n_species))  # CSTR toestand
+
+        # Uitgaande leidingen per knoop
+        self._node_outpipes: dict[int, list[int]] = defaultdict(list)
+        for p, s in enumerate(self.pipe_start):
+            self._node_outpipes[int(s)].append(p)
+
+        # Wandreacties
+        self._k_wall_ms  = None    # (n_pipes, n_species) [m/s], None = geen
+        self._k_wall_vol = None    # (n_pipes, n_species) [1/s], berekend bij solve
+        if k_wall is not None:
+            self._k_wall_ms = self._broadcast_kwall(np.asarray(k_wall, dtype=float),
+                                                     n_pipes, n_species)
+
+        # Hydraulica-cache
+        self._flow:     np.ndarray | None = None
+        self._velocity: np.ndarray | None = None
+        self._reversed: np.ndarray | None = None   # (n_pipes,) bool — flow reversal per leiding
+        self._update_kwall_vol()   # bereken initiële k_wall_vol
+
+        # Massabalans
+        self._track_mass = track_mass
+        self._tracker    = MassBalanceTracker(n_species) if track_mass else None
+
+        # Geochemie (PhreeqPython)
+        self._geochem    = geochem   # GeochemSolver of None
+
+        self._step_counter = 0
+
+    # ── Hydraulica ────────────────────────────────────────────────────────────
+
+    def update_hydraulics(self, simtime: int = 0) -> None:
+        """
+        Herbereken hydraulica voor een EPS-tijdstip [s].
+
+        Detecteert automatisch flow reversals en past pipe_start, pipe_end
+        en _node_outpipes aan zodat advectie altijd in de juiste richting loopt.
+        """
+        self.hyd.solve(simtime=simtime)
+        self._flow     = None
+        self._velocity = None
+        self._reversed = None
+        self._apply_flow_reversal()
+        self._update_kwall_vol()
+        # Tankvolumes kunnen veranderen tijdens EPS (peil varieert)
+        if len(self._tank_nodes) > 0:
+            self._tank_V = self._get_tank_volumes()
+
+    def _apply_flow_reversal(self) -> None:
+        """
+        Pas pipe_start, pipe_end en _node_outpipes aan op basis van de
+        actuele stromingsrichting. Wordt aangeroepen na elke hydraulica-update.
+
+        Leidingen waarvan EPANET een negatief debiet rapporteert stromen
+        feitelijk in omgekeerde richting. We wisselen pipe_start/pipe_end om
+        zodat de LTA-advectie (x loopt van 0 naar pipe_length) altijd klopt.
+        """
+        _, _, reversed_mask = self.hyd.get_hydraulic_state()
+
+        if not reversed_mask.any():
+            # Geen reversals: zorg dat topologie terug op EPANET-waarden staat
+            (
+                self.pipe_start, self.pipe_end,
+                self.pipe_length, self.pipe_area,
+                self.node_count, self.pipe_ids, self.node_names,
+            ) = self.hyd.get_topology()
+        else:
+            (
+                self.pipe_start, self.pipe_end,
+                self.pipe_length, self.pipe_area,
+                self.node_count, self.pipe_ids, self.node_names,
+            ) = self.hyd.get_topology_with_reversal()
+
+        # Herbereken uitgaande leidingen per knoop
+        self._node_outpipes.clear()
+        for p, s in enumerate(self.pipe_start):
+            self._node_outpipes[int(s)].append(p)
+
+        self._reversed = reversed_mask
+
+        # Spiegelen van segmentposities in omgekeerde leidingen.
+        # Na een flow reversal loopt x nog steeds van het OUDE startpunt.
+        # Maar pipe_start en pipe_end zijn nu omgewisseld, dus x=0 is nu
+        # het NIEUWE startpunt (= het oude eindpunt).
+        # Correctie: x_new = pipe_length - x_old  voor elk segment in een omgekeerde leiding.
+        n = self.segments.n
+        if n > 0 and reversed_mask.any():
+            seg_pipe = self.segments.pipe[:n]
+            for pipe_idx in np.where(reversed_mask)[0]:
+                in_pipe = seg_pipe == pipe_idx
+                if in_pipe.any():
+                    L = self.pipe_length[pipe_idx]
+                    self.segments.x[:n][in_pipe] = L - self.segments.x[:n][in_pipe]
+                    # Klamp negatieve waarden (numerieke ruis) op 0
+                    np.clip(self.segments.x[:n], 0.0, None,
+                            out=self.segments.x[:n])
+
+    def _get_hydraulics(self) -> tuple:
+        if self._flow is None:
+            self._flow, self._velocity, self._reversed = self.hyd.get_hydraulic_state()
+        return self._flow, self._velocity
+
+    def _update_kwall_vol(self) -> None:
+        """Herbereken k_wall_vol na elke hydraulica-update."""
+        if self._k_wall_ms is None:
+            self._k_wall_vol = None
+            return
+        from .lta import compute_wall_k
+        _, vel = self._get_hydraulics()
+        diam   = np.sqrt(4 * self.pipe_area / np.pi)   # m
+        self._k_wall_vol = compute_wall_k(
+            diam, vel, self._k_wall_ms, self._D_mol, self._nu
+        )
+
+    # ── Tijdstap-stabiliteitscontrole ─────────────────────────────────────────
+
+    def check_stability(self, dt: float, decay_k, warn: bool = True) -> dict:
+        """
+        Controleer CFL en reactie-stabiliteit voor de opgegeven tijdstap.
+
+        Returns een rapport-dict; zie stability.check_dt() voor inhoud.
+        """
+        from .stability import check_dt
+        _, vel = self._get_hydraulics()
+        return check_dt(
+            dt, self.pipe_length, vel,
+            np.asarray(decay_k, dtype=float),
+            self._k_wall_vol, warn=warn,
+        )
+
+    def recommended_dt(self, decay_k) -> float:
+        """Geeft de aanbevolen tijdstap terug op basis van CFL en reactie."""
+        from .stability import recommended_dt
+        _, vel = self._get_hydraulics()
+        return recommended_dt(
+            self.pipe_length, vel,
+            np.asarray(decay_k, dtype=float),
+            self._k_wall_vol,
+        )
+
+    # ── Injectie ──────────────────────────────────────────────────────────────
+
+    def inject(self, node_uid: str, C_vector, volume: float) -> None:
+        """
+        Injecteer vanuit een knoop proportioneel over alle uitgaande leidingen.
+
+        Het opgegeven volume wordt verdeeld naar rato van het debiet per leiding,
+        zodat de massa-injectie overeenkomt met de werkelijke stroomverdeling.
+        Bij slechts één uitgaande leiding gaat het volledige volume daarheen.
+
+        Parameters
+        ----------
+        node_uid : EPANET knoopnaam (bijv. 'R1', 'J1')
+        C_vector : concentraties per stof, lengte n_species
+        volume   : totaal segmentvolume [m³]
+        """
+        node_idx = self.node_index.get(node_uid)
+        if node_idx is None:
+            raise KeyError(f"Onbekende knoopnaam: '{node_uid}'")
+        out = self._node_outpipes.get(node_idx, [])
+        if not out:
+            raise ValueError(f"Knoop '{node_uid}' heeft geen uitgaande leidingen.")
+        flow, _ = self._get_hydraulics()
+        C_arr = np.asarray(C_vector, dtype=np.float64)
+
+        if len(out) == 1:
+            self.segments.add(pipe=out[0], x=0.0, volume=volume, C_vector=C_arr)
+            if self._tracker:
+                self._tracker.record_injection(C_arr, volume)
+        else:
+            # Verdeel volume proportioneel over uitgaande leidingen
+            flows   = np.array([flow[p] for p in out], dtype=np.float64)
+            tot_q   = flows.sum()
+            if tot_q <= 0:
+                # Geen debiet: injecteer in eerste leiding als fallback
+                self.segments.add(pipe=out[0], x=0.0, volume=volume, C_vector=C_arr)
+                if self._tracker:
+                    self._tracker.record_injection(C_arr, volume)
+                return
+            for p, q in zip(out, flows):
+                vol_p = volume * q / tot_q
+                if vol_p > 0:
+                    self.segments.add(pipe=p, x=0.0, volume=vol_p, C_vector=C_arr)
+            if self._tracker:
+                self._tracker.record_injection(C_arr, volume)
+
+    def inject_pipe(self, pipe_uid: str, C_vector, volume: float,
+                    x: float = 0.0) -> None:
+        """Injecteer direct in een leiding op positie x [m]."""
+        pipe_idx = self.pipe_index[pipe_uid]
+        C_arr = np.asarray(C_vector, dtype=np.float64)
+        self.segments.add(pipe=pipe_idx, x=x, volume=volume, C_vector=C_arr)
+        if self._tracker:
+            self._tracker.record_injection(C_arr, volume)
+
+    def booster_inject(
+        self,
+        node_uid:  str,
+        C_set:     np.ndarray | list,
+        flow_frac: float = 1.0,
+    ) -> None:
+        """
+        Booster-injectie op een knoop: stel de concentratie in op een vaste
+        waarde voor alle uitgaande leidingen (zoals een chloor-boosterstation).
+
+        In tegenstelling tot inject() wordt hier geen nieuw segment aangemaakt
+        op basis van een extern volume. In plaats daarvan worden de concentraties
+        van bestaande segmenten aan het begin (x=0) van de uitgaande leidingen
+        van de knoop overschreven.
+
+        Als er nog geen segment aan het begin van een uitgaande leiding staat,
+        wordt er één aangemaakt met een volume gelijk aan flow × qual_dt.
+        Gebruik inject() als je liever een volume-gebaseerde injectie wilt.
+
+        Parameters
+        ----------
+        node_uid  : EPANET knoopnaam (bijv. 'B1', 'J5')
+        C_set     : (n_species,) doelconcentratie per stof [mg/L of dimensieloos]
+                    Stoffen met C_set[s] < 0 worden niet gewijzigd.
+        flow_frac : fractie van de uitgaande debieten waarop de booster werkt
+                    (default 1.0 = alle uitgaande leidingen)
+
+        Raises
+        ------
+        KeyError   : als node_uid niet bestaat
+        ValueError : als de knoop geen uitgaande leidingen heeft
+        """
+        node_idx = self.node_index.get(node_uid)
+        if node_idx is None:
+            raise KeyError(f"Onbekende knoopnaam: '{node_uid}'")
+
+        out = self._node_outpipes.get(node_idx, [])
+        if not out:
+            raise ValueError(f"Knoop '{node_uid}' heeft geen uitgaande leidingen.")
+
+        flow, _ = self._get_hydraulics()
+        C_set   = np.asarray(C_set, dtype=np.float64)
+        active  = C_set >= 0          # stoffen die we wél instellen
+
+        # Selecteer de leidingen met het hoogste debiet (flow_frac)
+        if flow_frac < 1.0:
+            sorted_out = sorted(out, key=lambda p: -flow[p])
+            cum = 0.0
+            tot = sum(flow[p] for p in out)
+            selected = []
+            for p in sorted_out:
+                selected.append(p)
+                cum += flow[p]
+                if cum >= flow_frac * tot:
+                    break
+        else:
+            selected = out
+
+        n = self.segments.n
+        for pipe_idx in selected:
+            # Zoek bestaand segment aan begin (x < kleine drempel)
+            threshold = self.pipe_length[pipe_idx] * 0.01
+            if n > 0:
+                at_start = (
+                    (self.segments.pipe[:n] == pipe_idx) &
+                    (self.segments.x[:n] < threshold)
+                )
+                if at_start.any():
+                    # Overschrijf concentraties voor actieve stoffen.
+                    # Let op: dubbele fancy indexing (C[:n][mask]) levert een
+                    # kopie op — schrijf daarom via expliciete integer-indices.
+                    rows = np.where(at_start)[0]
+                    cols = np.where(active)[0]
+                    self.segments.C[np.ix_(rows, cols)] = C_set[active]
+                    continue
+
+            # Geen bestaand segment: maak nieuw segment aan
+            vol = max(flow[pipe_idx], 1e-6)   # symbolisch volume [m³/s als proxy]
+            C_new = np.zeros(self.n_species, dtype=np.float64)
+            C_new[active] = C_set[active]
+            self.segments.add(pipe=pipe_idx, x=0.0, volume=vol, C_vector=C_new)
+            if self._tracker:
+                self._tracker.record_injection(C_new, vol)
+
+    # ── Tijdstap ──────────────────────────────────────────────────────────────
+
+    def step(
+        self,
+        dt:             float,
+        decay_k,
+        merge_interval: int   = 10,
+        merge_tol:      float = 1e-6,
+        check_cfl:      bool  = False,
+    ) -> np.ndarray:
+        """
+        Voer één kwaliteitstijdstap uit.
+
+        Volgorde
+        --------
+        1. CFL-check (optioneel)
+        2. Bulk + wandverval (in-place)
+        3. Advectie (in-place)
+        4. Exit-detectie
+        5. Knoopmenging → node_C
+        5b. Geochemisch evenwicht na menging (alleen bij geochem ≠ None)
+        6. Tank-update (CSTR)
+        7. Pipe-overgang / splitsing / eindknoop-verwijdering
+        8. Segment merging (elke merge_interval stappen)
+        9. Massabalans registreren (indien track_mass=True)
+
+        Parameters
+        ----------
+        dt             : tijdstap [s]
+        decay_k        : (n_species,) bulkvervalconstanten [1/s]
+        merge_interval : voer merging uit elke N stappen
+        merge_tol      : concentratietolerantie voor merging
+        check_cfl      : als True, controleer CFL en waarschuw indien nodig
+
+        Returns
+        -------
+        node_C : (node_count, n_species)
+        """
+        from .lta     import (bulk_first_order_multi, wall_first_order_multi,
+                             advect, node_mixing_multi, tank_step_implicit)
+        from .merging import merge_segments
+
+        flow, velocity = self._get_hydraulics()
+        decay_k = np.asarray(decay_k, dtype=np.float64)
+        n = self.segments.n
+
+        if check_cfl:
+            self.check_stability(dt, decay_k, warn=True)
+
+        if n == 0:
+            return np.zeros((self.node_count, self.n_species), dtype=np.float64)
+
+        # 1. Bulk verval — via GeochemSolver (PhreeqPython) of eerste-orde
+        if self._geochem is not None:
+            pipe_diam = np.sqrt(4 * self.pipe_area / np.pi)
+            _, velocity = self._get_hydraulics()
+            self._geochem.apply_geochemistry(
+                self.segments, dt,
+                pipe_diam=pipe_diam,
+                pipe_vel=velocity,
+            )
+        else:
+            bulk_first_order_multi(self.segments.C[:n], decay_k, dt)
+
+        # 2. Wandverval
+        if self._k_wall_vol is not None:
+            wall_first_order_multi(self.segments.C[:n],
+                                   self.segments.pipe[:n],
+                                   self._k_wall_vol, dt)
+
+        # 3. Advectie
+        advect(self.segments.x[:n], self.segments.pipe[:n], velocity, dt)
+
+        # 4. Exit-detectie
+        exit_mask = (
+            self.segments.x[:n] >= self.pipe_length[self.segments.pipe[:n]]
+        )
+
+        # 5. Knoopmenging
+        node_C = node_mixing_multi(
+            exit_mask,
+            self.segments.pipe[:n],
+            self.segments.C[:n],
+            flow, self.pipe_end, self.node_count,
+        )
+
+        # 5b. Geochemisch evenwicht na knoopmenging (alleen bij GeochemSolver).
+        #
+        # Lineaire concentratiemenging (stap 5) is exact voor conservatieve
+        # stoffen maar een benadering voor pH en het koolzuursysteem: het
+        # mengsel van twee waters is pas in evenwicht na PHREEQC-berekening.
+        # apply_mixing() corrigeert dit in-place voor knopen met debiet > 0,
+        # analoog aan Victoria's pp.mix_solutions() bij elke uitvraag.
+        if self._geochem is not None:
+            # Totaal inkomend debiet per knoop als gewichtsmaatstaf
+            node_flow = np.zeros(self.node_count, dtype=np.float64)
+            np.add.at(node_flow, self.pipe_end, np.abs(flow))
+            self._geochem.apply_mixing(node_C, node_flow, dt)
+
+        # 6. Tank-update
+        if len(self._tank_nodes) > 0:
+            node_C = self._update_tanks(node_C, flow, decay_k, dt)
+
+        # 7. Pipe-overgang
+        exited_C, exited_V = self._handle_exits(exit_mask, flow)
+
+        # 8. Merging
+        self._step_counter += 1
+        if self._step_counter % merge_interval == 0:
+            merge_segments(self.segments, tol=merge_tol)
+
+        # 9. Massabalans
+        if self._tracker:
+            self._tracker.record_step(
+                self.segments, decay_k, dt,
+                self._k_wall_vol, exited_C, exited_V,
+            )
+
+        return node_C
+
+    # ── Massabalansrapport ────────────────────────────────────────────────────
+
+    def mass_balance(self) -> dict | None:
+        """
+        Geeft het massabalansrapport terug (alleen als track_mass=True).
+        """
+        if not self._tracker:
+            return None
+        return self._tracker.report(self.segments)
+
+    # ── Tank-model ────────────────────────────────────────────────────────────
+
+    def _detect_tank_nodes(self) -> np.ndarray:
+        """Geeft 0-based indices van tankknopen terug."""
+        tank_uids = [n.uid for n in self.hyd.net.tanks]
+        return np.array(
+            [self.node_index[uid] for uid in tank_uids if uid in self.node_index],
+            dtype=np.int32,
+        )
+
+    def _get_tank_volumes(self) -> np.ndarray:
+        """Huidige tankvolumes [m³] via epynet."""
+        volumes = []
+        for n in self.hyd.net.tanks:
+            try:
+                volumes.append(float(n.volume))
+            except Exception:
+                volumes.append(1000.0)   # veilige standaard
+        return np.array(volumes, dtype=np.float64) if volumes else np.array([])
+
+    def _update_tanks(
+        self,
+        node_C:  np.ndarray,   # (node_count, n_species)
+        flow:    np.ndarray,
+        decay_k: np.ndarray,
+        dt:      float,
+    ) -> np.ndarray:
+        """
+        Pas CSTR-tankmodel toe en schrijf tankconcentraties naar node_C.
+
+        Voor elke tank:
+        - Q_in = debiet van alle inkomende leidingen bij de tankknoop
+        - C_in = node_C[tank_node] (resultaat van knoopmenging)
+        - Q_out = debiet van alle uitgaande leidingen
+        """
+        from .lta import tank_step_implicit
+
+        if len(self._tank_nodes) == 0:
+            return node_C
+
+        n_tanks = len(self._tank_nodes)
+        Q_in    = np.zeros(n_tanks)
+        Q_out   = np.zeros(n_tanks)
+        C_in    = np.zeros((n_tanks, self.n_species))
+
+        for ti, tank_node in enumerate(self._tank_nodes):
+            # Inkomende leidingen: pipe_end == tank_node
+            in_pipes  = np.where(self.pipe_end  == tank_node)[0]
+            out_pipes = np.where(self.pipe_start == tank_node)[0]
+            Q_in[ti]  = flow[in_pipes].sum()  if len(in_pipes)  else 0.0
+            Q_out[ti] = flow[out_pipes].sum() if len(out_pipes) else 0.0
+            C_in[ti]  = node_C[tank_node]
+
+        # CSTR update (in-place op self._tank_C) — gebruik gecachede volumes
+        if len(self._tank_V) == len(self._tank_nodes):
+            tank_step_implicit(self._tank_C, Q_in, C_in, Q_out, self._tank_V, decay_k, dt)
+            # Schrij tankconcentraties terug naar node_C
+            node_C[self._tank_nodes] = self._tank_C
+
+        return node_C
+
+    # ── Exit-verwerking ───────────────────────────────────────────────────────
+
+    def _handle_exits(
+        self,
+        exit_mask: np.ndarray,
+        flow:      np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Verwerk segmenten die het einde van hun leiding bereiken.
+
+        Returns
+        -------
+        exited_C : concentraties van verwijderde (eindknoop) segmenten
+        exited_V : volumes van verwijderde segmenten
+        """
+        if not exit_mask.any():
+            return np.empty((0, self.n_species)), np.empty(0)
+
+        n          = self.segments.n
+        exit_idx   = np.where(exit_mask)[0]
+        exit_nodes = self.pipe_end[self.segments.pipe[:n][exit_mask]]
+        to_remove  = []
+        exited_C_list = []
+        exited_V_list = []
+
+        for seg_i, node in zip(exit_idx, exit_nodes):
+            out = self._node_outpipes.get(int(node), [])
+
+            if not out:
+                # Eindknoop: registreer en verwijder
+                exited_C_list.append(self.segments.C[seg_i].copy())
+                exited_V_list.append(self.segments.volume[seg_i])
+                to_remove.append(seg_i)
+
+            elif len(out) == 1:
+                self.segments.pipe[seg_i] = out[0]
+                self.segments.x[seg_i]    = 0.0
+
+            else:
+                # Splitsing proportioneel aan debiet
+                out_s    = sorted(out, key=lambda p: -flow[p])
+                tot_flow = sum(flow[p] for p in out_s)
+                orig_vol = self.segments.volume[seg_i]
+                orig_C   = self.segments.C[seg_i].copy()
+
+                self.segments.pipe[seg_i]   = out_s[0]
+                self.segments.x[seg_i]      = 0.0
+                self.segments.volume[seg_i] = orig_vol * flow[out_s[0]] / tot_flow
+
+                for p in out_s[1:]:
+                    self.segments.add(
+                        pipe=p, x=0.0,
+                        volume=orig_vol * flow[p] / tot_flow,
+                        C_vector=orig_C,
+                    )
+
+        self.segments.remove(to_remove)
+
+        if exited_C_list:
+            return (np.array(exited_C_list),
+                    np.array(exited_V_list))
+        return np.empty((0, self.n_species)), np.empty(0)
+
+    # ── Hulpfuncties ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _broadcast_kwall(k_wall, n_pipes, n_species):
+        if k_wall.ndim == 1:
+            return np.broadcast_to(k_wall[np.newaxis, :], (n_pipes, n_species)).copy()
+        if k_wall.shape == (n_pipes, n_species):
+            return k_wall
+        raise ValueError(
+            f"k_wall shape {k_wall.shape} past niet op "
+            f"(n_pipes={n_pipes}, n_species={n_species})"
+        )
+
+    def geochem_report(self, C_vec: np.ndarray) -> dict:
+        """
+        Geeft geochemisch rapport terug voor een concentratieprofiel.
+
+        Bevat Langelier Saturation Index en verzadigingsindices voor
+        relevante mineralen. Vereist dat geochem is geconfigureerd.
+
+        Parameters
+        ----------
+        C_vec : (n_species,) concentratieprofiel [zelfde eenheden als SpeciesMap]
+
+        Returns
+        -------
+        dict met 'lsi', 'saturation_indices', 'pH', 'species'
+        """
+        if self._geochem is None:
+            return {'error': 'Geen GeochemSolver geconfigureerd (geochem=None)'}
+
+        lsi = self._geochem.langelier_index(C_vec)
+        si  = self._geochem.saturation_indices(C_vec)
+
+        # Lees pH terug als aanwezig in SpeciesMap
+        ph_idx = self._geochem.smap.ph_index
+        pH = float(C_vec[ph_idx]) if ph_idx is not None else None
+
+        return {
+            'lsi':               lsi,
+            'saturation_indices': si,
+            'pH':                pH,
+            'species': {
+                name: float(C_vec[i])
+                for i, name in enumerate(self._geochem.smap.species_names)
+            },
+        }
+
+    def __repr__(self) -> str:
+        geo_str = f" geochem={self._geochem.smap.species_names}" if self._geochem else ''
+        return (
+            f"<InzingaFlowSolver "
+            f"pipes={len(self.pipe_ids)} nodes={self.node_count} "
+            f"n_species={self.n_species} "
+            f"tanks={len(self._tank_nodes)} "
+            f"wall={'yes' if self._k_wall_vol is not None else 'no'}"
+            f"{geo_str} "
+            f"segments={self.segments.n}>"
+        )
