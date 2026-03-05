@@ -120,6 +120,22 @@ class InzingaFlowSolver:
         self._reversed: np.ndarray | None = None   # (n_pipes,) bool — flow reversal per leiding
         self._update_kwall_vol()   # bereken initiële k_wall_vol
 
+        # Gecombineerde vervalfactor-tabel — eenmalig per hyd-update + dt.
+        # decay_pipe[p, s] = exp(-(k_bulk[s] + k_wall_vol[p, s]) * dt)
+        # Wordt ingevuld door _update_decay_pipe() vanuit step() of expliciet.
+        self._decay_pipe:     np.ndarray | None = None
+        self._decay_pipe_dt:  float             = -1.0   # dt waarvoor tabel geldig is
+        self._decay_pipe_k:   np.ndarray | None = None   # k_bulk waarvoor tabel geldig is
+
+        # Precomputed exit-routing arrays — geïnvalideerd na _apply_flow_reversal().
+        # first_out[node]   : eerste uitgaande leiding-index (-1 als eindknoop)
+        # out_degree[node]  : aantal uitgaande leidingen (0 = eindknoop)
+        # Worden bijgehouden zodat de deg==1-case in _handle_exits volledig
+        # vectorized kan worden zonder dict-lookup per segment.
+        self._first_out:   np.ndarray | None = None   # (node_count,) int32
+        self._out_degree:  np.ndarray | None = None   # (node_count,) int32
+        self._update_exit_routing()
+
         # Massabalans
         self._track_mass = track_mass
         self._tracker    = MassBalanceTracker(n_species) if track_mass else None
@@ -197,6 +213,10 @@ class InzingaFlowSolver:
                     np.clip(self.segments.x[:n], 0.0, None,
                             out=self.segments.x[:n])
 
+        # Invalideer precomputed exit-routing en decay-tabel
+        self._update_exit_routing()
+        self._decay_pipe = None
+
     def _get_hydraulics(self) -> tuple:
         if self._flow is None:
             self._flow, self._velocity, self._reversed = self.hyd.get_hydraulic_state()
@@ -213,6 +233,63 @@ class InzingaFlowSolver:
         self._k_wall_vol = compute_wall_k(
             diam, vel, self._k_wall_ms, self._D_mol, self._nu
         )
+        # Invalideer decay_pipe zodat hij bij de volgende step() wordt herbouwd
+        self._decay_pipe = None
+
+    def _update_exit_routing(self) -> None:
+        """
+        Bouw first_out- en out_degree-arrays op uit _node_outpipes.
+
+        first_out[node]  = eerste uitgaande leiding-index (-1 als eindknoop)
+        out_degree[node] = aantal uitgaande leidingen (0 = eindknoop)
+
+        Aanroepen na elke wijziging van _node_outpipes, dus na
+        _apply_flow_reversal(). Kost O(n_nodes + n_pipes) éénmalig;
+        vermijdt daarna dict-lookups in de hot loop van _handle_exits().
+        """
+        first_out  = np.full(self.node_count, -1,  dtype=np.int32)
+        out_degree = np.zeros(self.node_count,      dtype=np.int32)
+        for node, pipes in self._node_outpipes.items():
+            out_degree[node] = len(pipes)
+            if pipes:
+                first_out[node] = pipes[0]
+        self._first_out  = first_out
+        self._out_degree = out_degree
+
+    def _update_decay_pipe(self, decay_k: np.ndarray, dt: float) -> np.ndarray:
+        """
+        Geef gecombineerde vervalfactor-tabel terug; herbouw alleen indien nodig.
+
+        De tabel is geldig zolang dt, decay_k én de hydraulica niet veranderen.
+        Na update_hydraulics() wordt _decay_pipe op None gezet, zodat hij hier
+        automatisch wordt herbouwd.
+
+        Parameters
+        ----------
+        decay_k : (n_species,) bulkvervalconstanten [1/s]
+        dt      : tijdstap [s]
+
+        Returns
+        -------
+        decay_pipe : (n_pipes, n_species)
+        """
+        from .lta import combined_decay_factors
+        n_pipes = len(self.pipe_ids)
+
+        # Herbouw als tabel ontbreekt, dt gewijzigd, of k_bulk gewijzigd
+        if (
+            self._decay_pipe is None
+            or self._decay_pipe_dt  != dt
+            or self._decay_pipe_k   is None
+            or not np.array_equal(self._decay_pipe_k, decay_k)
+        ):
+            self._decay_pipe    = combined_decay_factors(
+                decay_k, self._k_wall_vol, dt, n_pipes
+            )
+            self._decay_pipe_dt = dt
+            self._decay_pipe_k  = decay_k.copy()
+
+        return self._decay_pipe
 
     # ── Tijdstap-stabiliteitscontrole ─────────────────────────────────────────
 
@@ -418,6 +495,7 @@ class InzingaFlowSolver:
         node_C : (node_count, n_species)
         """
         from .lta     import (bulk_first_order_multi, wall_first_order_multi,
+                             apply_combined_decay,
                              advect, node_mixing_multi, tank_step_implicit)
         from .merging import merge_segments
 
@@ -431,7 +509,7 @@ class InzingaFlowSolver:
         if n == 0:
             return np.zeros((self.node_count, self.n_species), dtype=np.float64)
 
-        # 1. Bulk verval — via GeochemSolver (PhreeqPython) of eerste-orde
+        # 1. Bulk + wandverval — via GeochemSolver of gecombineerde decay_pipe
         if self._geochem is not None:
             pipe_diam = np.sqrt(4 * self.pipe_area / np.pi)
             _, velocity = self._get_hydraulics()
@@ -441,13 +519,10 @@ class InzingaFlowSolver:
                 pipe_vel=velocity,
             )
         else:
-            bulk_first_order_multi(self.segments.C[:n], decay_k, dt)
-
-        # 2. Wandverval
-        if self._k_wall_vol is not None:
-            wall_first_order_multi(self.segments.C[:n],
-                                   self.segments.pipe[:n],
-                                   self._k_wall_vol, dt)
+            # Gecombineerde tabel: één fancy-index + in-place multiply
+            # i.p.v. twee losse exp()-aanroepen op (n, n_species)-arrays.
+            decay_pipe = self._update_decay_pipe(decay_k, dt)
+            apply_combined_decay(self.segments.C[:n], self.segments.pipe[:n], decay_pipe)
 
         # 3. Advectie
         advect(self.segments.x[:n], self.segments.pipe[:n], velocity, dt)
@@ -580,6 +655,17 @@ class InzingaFlowSolver:
         """
         Verwerk segmenten die het einde van hun leiding bereiken.
 
+        Strategie (drie gevallen op basis van out_degree van de bestemmingsknoop):
+
+        deg == 0  Eindknoop: volledig vectorized — verzamel C/V, markeer voor verwijdering.
+        deg == 1  Doorgaan:  volledig vectorized — pipe en x in-place overschreven
+                             met first_out[node] en 0.0 via fancy-index assignments.
+        deg > 1   Splitsing: kleine Python-loop (typisch < 20% van exits);
+                             nieuwe segmenten toegevoegd via SegmentStore.add().
+
+        Bij een typisch 5000-knopennetwerk (80% deg-1, 2% eindknopen, 18% splits)
+        reduceert dit de Python-iteraties van n_exits naar n_splits (~5× minder).
+
         Returns
         -------
         exited_C : concentraties van verwijderde (eindknoop) segmenten
@@ -589,36 +675,50 @@ class InzingaFlowSolver:
             return np.empty((0, self.n_species)), np.empty(0)
 
         n          = self.segments.n
-        exit_idx   = np.where(exit_mask)[0]
-        exit_nodes = self.pipe_end[self.segments.pipe[:n][exit_mask]]
-        to_remove  = []
-        exited_C_list = []
-        exited_V_list = []
+        exit_idx   = np.where(exit_mask)[0]              # (n_exit,)
+        exit_pipe  = self.segments.pipe[:n][exit_mask]   # (n_exit,)
+        exit_node  = self.pipe_end[exit_pipe]             # (n_exit,)
+        deg        = self._out_degree[exit_node]          # (n_exit,)
 
-        for seg_i, node in zip(exit_idx, exit_nodes):
-            out = self._node_outpipes.get(int(node), [])
+        # ── Eindknopen (deg == 0): volledig vectorized ────────────────────────
+        end_mask = deg == 0
+        exited_C = np.empty((0, self.n_species))
+        exited_V = np.empty(0)
+        to_remove: list[int] = []
 
-            if not out:
-                # Eindknoop: registreer en verwijder
-                exited_C_list.append(self.segments.C[seg_i].copy())
-                exited_V_list.append(self.segments.volume[seg_i])
-                to_remove.append(seg_i)
+        if end_mask.any():
+            end_idx  = exit_idx[end_mask]
+            exited_C = self.segments.C[end_idx].copy()
+            exited_V = self.segments.volume[end_idx].copy()
+            to_remove = end_idx.tolist()
 
-            elif len(out) == 1:
-                self.segments.pipe[seg_i] = out[0]
-                self.segments.x[seg_i]    = 0.0
+        # ── Doorgaan (deg == 1): volledig vectorized ──────────────────────────
+        pass_mask = deg == 1
+        if pass_mask.any():
+            pass_idx  = exit_idx[pass_mask]
+            pass_node = exit_node[pass_mask]
+            self.segments.pipe[pass_idx] = self._first_out[pass_node]
+            self.segments.x[pass_idx]    = 0.0
 
-            else:
-                # Splitsing proportioneel aan debiet
+        # ── Splitsingen (deg > 1): Python-loop over kleine subset ─────────────
+        split_mask = deg > 1
+        if split_mask.any():
+            split_idx   = exit_idx[split_mask]
+            split_nodes = exit_node[split_mask]
+
+            for seg_i, node in zip(split_idx, split_nodes):
+                out      = self._node_outpipes[int(node)]
                 out_s    = sorted(out, key=lambda p: -flow[p])
                 tot_flow = sum(flow[p] for p in out_s)
                 orig_vol = self.segments.volume[seg_i]
                 orig_C   = self.segments.C[seg_i].copy()
 
+                # Eerste tak: hergebruik het bestaande segment
                 self.segments.pipe[seg_i]   = out_s[0]
                 self.segments.x[seg_i]      = 0.0
                 self.segments.volume[seg_i] = orig_vol * flow[out_s[0]] / tot_flow
 
+                # Overige takken: nieuwe segmenten
                 for p in out_s[1:]:
                     self.segments.add(
                         pipe=p, x=0.0,
@@ -626,12 +726,11 @@ class InzingaFlowSolver:
                         C_vector=orig_C,
                     )
 
-        self.segments.remove(to_remove)
+        # ── Verwijder eindknoop-segmenten ─────────────────────────────────────
+        if to_remove:
+            self.segments.remove(to_remove)
 
-        if exited_C_list:
-            return (np.array(exited_C_list),
-                    np.array(exited_V_list))
-        return np.empty((0, self.n_species)), np.empty(0)
+        return exited_C, exited_V
 
     # ── Hulpfuncties ──────────────────────────────────────────────────────────
 
