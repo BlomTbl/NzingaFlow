@@ -1,4 +1,4 @@
-
+🇳🇱 [Nederlands](README_NL.md) &nbsp;|&nbsp; 🇬🇧 [English](README.md)
 # InzingaFlow
 
 **Lagrangian Transport Kwaliteitssimulator voor EPANET-netwerken**
