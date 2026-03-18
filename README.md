@@ -1,168 +1,234 @@
-# InzingaFlow
+# NzingaFlow
 
-Lagrangian Transport Quality Simulator for EPANET Drinking Water Networks
+**Lagrangian Transport kwaliteitssimulator voor EPANET-drinkwaternetwerken**
 
-InzingaFlow calculates water quality through pipe networks using the Lagrangian Transport Algorithm (LTA). Hydraulics (flow rates, velocities) are provided by EPANET via epynet; the quality calculation is performed entirely within InzingaFlow—not within EPANET. Optionally, full geochemistry is supported via PhreeqPython/PHREEQC.
-
----
-
-## Installation
-
-### Basic installation (conservative transport, first-order decay)
-
-```bash
-pip install inzingaflow
-```
-
-### With geochemistry (PhreeqPython/PHREEQC)
-
-```bash
-pip install "inzingaflow[geochem]"
-```
-
-### From source code
-
-```bash
-git clone https://github.com/inzingaflow/inzingaflow
-cd inzingaflow
-pip install -e ".[geochem,dev]"
-```
+NzingaFlow implementeert de Lagrangian Transport Approach (LTA) voor waterkwaliteitssimulatie in drinkwaternetwerken. Het koppelt aan EPANET via [epynet](https://github.com/vitens/epynet) en ondersteunt multi-species, wandreacties, tanks (CSTR) en volledige geochemie via PhreeqPython.
 
 ---
 
-## Quickstart
+## Installatie
 
-### Conservative transport (tracer)
+### Minimaal (NumPy-only)
+```bash
+pip install nzingaflow
+```
+
+### Met Numba JIT (~4-5× sneller)
+```bash
+pip install "nzingaflow[numba]"
+```
+
+### Met volledige geochemie (PhreeqPython/PHREEQC)
+```bash
+pip install "nzingaflow[geochem]"
+```
+
+### Alles inclusief ontwikkeltools
+```bash
+pip install "nzingaflow[all]"
+```
+
+### Vanuit source (ontwikkeling)
+```bash
+git clone https://github.com/nzingaflow/nzingaflow.git
+cd nzingaflow
+pip install -e ".[dev]"
+```
+
+---
+
+## Snelstart
 
 ```python
 import numpy as np
-from inzingaflow import InzingaFlowSolver, EPSRunner
+from nzingaflow import NzingaFlowSolver, EPSRunner
 
-# Load network and create solver
-solver = InzingaFlowSolver("network.inp", n_species=1)
+# Laad netwerk en maak solver aan
+solver = NzingaFlowSolver("netwerk.inp", n_species=1)
 
-# Automatically determine the stable time step
-qual_dt = solver.recommended_dt(decay_k=np.array([0.0]))
-print(f"Recommended time step: {qual_dt:.1f} s")
+# Optioneel: Numba warmup vóór simulatie (eenmalig ~1s compilatie)
+solver.warmup_numba()
 
-# Set EPS runner
-runner = EPSRunner(
-solver,
-qual_dt = qual_dt,
-hyd_dt = 300.0, # hydraulic time step [s]
-duration = 86400.0, # simulation duration [s]
-)
-
-# Run simulation
-results = runner.run(
-decay_k = np.array([0.0]),
-inject_schedule = {"R1": [(0, 86400, np.array([1.0]))]},
-verbose = True,
-)
-# results.shape == (n_steps, node_count, 1)
-```
-
-### Chlorine with first-order decay
-
-```python
-solver = InzingaFlowSolver("network.inp", n_species=1)
+# Maak EPS-runner aan
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 
+# Voer simulatie uit
 results = runner.run(
-decay_k = np.array([2.0 / 86400]), # k = 2.0 / day
-inject_schedule = {"R1": [(0, 86400, np.array([0.8]))]}, # 0.8 mg/L Cl₂
+    decay_k=np.array([0.001]),               # bulk vervalconstante [1/s]
+    inject_schedule={"R1": [(0, 86400, np.array([1.0]))]},
+    verbose=True,
 )
+# results.shape == (n_stappen, node_count, 1)
 ```
 
-### Complete geochemistry via PhreeqPython
+### Multi-species met wandreacties
 
 ```python
 import numpy as np
-from inzingaflow import InzingaFlowSolver, EPSRunner
-from inzingaflow.geochemistry import full_water_chemistry
+from nzingaflow import NzingaFlowSolver, EPSRunner
 
-# Ready-to-use GeochemSolver: Cl₂ + pH + Alk + Ca + Fe + Mn
-geo = full_water_chemistry( 
-background = {"temp": 12, "pH": 7.8, "Alkalinity": 3e-3, "Ca": 1.5e-3}, 
-equilibrium_minerals = ["Calcite"],
+n_pipes = 150  # aantal leidingen in het netwerk
+
+solver = NzingaFlowSolver(
+    "netwerk.inp",
+    n_species=2,
+    k_wall=np.array([[1e-5, 0.0]] * n_pipes),  # [m/s] per pipe per stof
 )
 
-solver = InzingaFlowSolver("network.inp", n_species=6, geochem=geo)
-runner = EPSRunner(solver, qual_dt=10.0, hyd_dt=300.0, duration=86400.0)
-
+runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(
-decay_k = np.zeros(6),
-inject_schedule = {
-"R1": [(0, 86400, np.array([0.8, 7.8, 3.0, 60.0, 0.05, 0.02]))]
-# Cl₂ pH Alk[meq/L] Ca Fe Mn [mg/L]
-},
+    decay_k=np.array([0.001, 0.0]),
+    inject_schedule={
+        "R1": [(0, 86400, np.array([1.0, 0.5]))],
+    },
 )
 ```
 
-### Booster injection (e.g., chlorine booster)
+### Volledige waterchemie (PhreeqPython)
 
 ```python
-runner.run(
-decay_k = np.array([2.0 / 86400]),
-booster_schedule = {
-"B1": [(3600, 86400, np.array([0.4]))] # Set C to 0.4 mg/L
-},
+from nzingaflow import NzingaFlowSolver, EPSRunner
+from nzingaflow.geochemistry import full_water_chemistry
+
+geo = full_water_chemistry()  # chloor, pH, alkaliniteit, Ca, Fe, Mn
+solver = NzingaFlowSolver("netwerk.inp", n_species=6, geochem=geo)
+runner = EPSRunner(solver, qual_dt=10.0, hyd_dt=300.0, duration=86400.0)
+results = runner.run(decay_k=np.zeros(6))
+```
+
+---
+
+## Performance
+
+| Configuratie | µs/tijdstap | Noot |
+|---|---|---|
+| NumPy (standaard) | ~280 | n=5000 segs, 2 stoffen |
+| Numba JIT | ~60–90 | Na warmup (~1s eenmalig) |
+
+Numba-compilatie vindt plaats bij de eerste aanroep. Gebruik `solver.warmup_numba()` om dit vóór de simulatie te doen.
+
+---
+
+## Architectuur
+
+```
+nzingaflow/
+├── solver.py       NzingaFlowSolver — hoofd-API, EPS-koppeling
+├── lta.py          Kernberekeningen (advect, decay, mixing) met Numba JIT
+├── merging.py      Segment-merging met Numba JIT
+├── segments.py     SegmentStore — Structure-of-Arrays opslag + CSR-index
+├── hydraulics.py   HydraulicModel — epynet koppeling
+├── eps.py          EPSRunner — Extended Period Simulation
+├── stability.py    CFL-check, massabalans
+├── geochemistry.py GeochemSolver — PhreeqPython integratie
+└── parse_inp.py    EPANET .inp parser (fallback zonder epynet)
+```
+
+### Kernprincipes
+
+- **Lagrangiaanse advectie**: segmenten bewegen met de stroming; geen numerieke diffusie voor puls-transport
+- **Vectorized NumPy**: alle operaties zonder Python-loops over segmenten
+- **Numba JIT**: optionele native-code compilatie voor 4-5× speedup
+- **Pre-allocated buffers**: geen heap-allocaties in de hot-path
+- **CSR pipe-index**: gecachede gesorteerde index voor efficiënte merging
+- **Gecombineerde decay**: bulk + wand in één geheugenpass
+
+---
+
+## API-overzicht
+
+### NzingaFlowSolver
+
+```python
+solver = NzingaFlowSolver(
+    inp_path,           # pad naar EPANET .inp bestand
+    n_species=1,        # aantal te simuleren stoffen
+    capacity=200_000,   # initiële segmentcapaciteit
+    k_wall=None,        # (n_pipes, n_species) wandreactiesnelheid [m/s]
+    track_mass=False,   # massabalans bijhouden
+    geochem=None,       # GeochemSolver instantie
+)
+
+solver.warmup_numba()                      # JIT-compilatie triggeren
+solver.inject("R1", C_vector, volume)      # injecteer in knoop
+solver.update_hydraulics(simtime=3600)     # hydraulica bijwerken
+node_C = solver.step(dt=5.0, decay_k=k)   # één kwaliteitstijdstap
+report = solver.mass_balance()             # massabalansrapport
+```
+
+### EPSRunner
+
+```python
+runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
+results = runner.run(
+    decay_k,
+    inject_schedule=None,    # {node: [(t_start, t_end, C_vec), ...]}
+    inject_fn=None,          # callable(t, solver)
+    booster_schedule=None,   # {node: [(t_start, t_end, C_set), ...]}
+    merge_interval=10,
+    merge_tol=1e-6,
+    verbose=False,
+)
+t = runner.time_axis(unit='h')
+```
+
+### LTA-kernfuncties (laag-niveau)
+
+```python
+from nzingaflow import (
+    combined_decay_multi,    # bulk + wand verval in één pass
+    build_combined_exp,      # bereken gecombineerde vervalfactoren
+    advect,                  # x += v[pipe] * dt
+    exit_detect,             # detecteer segmenten die leiding verlaten
+    node_mixing_multi,       # debietgewogen knoopmenging
+    warmup_numba,            # JIT-compilatie triggeren
+    USE_NUMBA,               # True als Numba beschikbaar is
 )
 ```
 
 ---
 
-## Architecture
+## Testen
 
-```
-InzingaFlowSolver ← main API: manages segments, hydraulics, tanks
-│
-├── HydraulicModel ← EPANET ↔ epynet connection; provides numpy arrays
-├── SegmentStore ← SoA storage; O(1) add/remove; Auto-resize
-│
-├── lta.py ← vectorized kernel:
-│ ├── bulk_first_order_multi() first-order bulk decay
-│ ├── wall_first_order_multi() wall decay (two-film model)
-│ ├── advect() segment advection
-│ ├── node_mixing_multi() flow-weighted node mixing
-│ └── tank_step_implicit() CSTR tank (implicit Euler)
-│
-├── merging.py ← segment merging (parallel reduction, O(n log n))
-├── stability.py ← CFL check, recommended dt, mass balance
-│
-└── geochemistry.py ← PhreeqPython integration (optional)
-├── GeochemSolver PHREEQC per segment (kinetics + equilibrium)
-├── SpeciesMap connection InzingaFlow substances ↔ PHREEQC elements
-├── chlorine_decay_geochem() ready-made recipe: Cl₂ + pH
-└── full_water_chemistry() ready-made recipe: Cl₂+pH+Alk+Ca+Fe+Mn
+```bash
+# Alle validatietests (wetenschappelijke verificatie)
+pytest tests/
 
-EPSRunner ← EPS loop: hyd updates, injection, progress
+# Snelle tests
+pytest tests/ -m "not slow"
+
+# Met coverage
+pytest tests/ --cov=nzingaflow --cov-report=html
 ```
+
+De testsuite bevat 10 validatieklassen (V1–V10) met analytische referentieoplossingen:
+
+- **V1**: Enkelvoudige leiding — eerste-orde verval
+- **V2**: Massabehoud — conservatieve tracer
+- **V3**: Knoopmenging — debietgewogen verdunning
+- **V4**: Tankmodel — CSTR steady-state en transiënt
+- **V5**: Wandverval — twee-film model
+- **V6**: CFL-stabiliteit en convergentie
+- **V7**: Serienetwerk — stapelverval
+- **V8**: Splitsingsknoop — massabehoud
+- **V9**: Tijdstap-gevoeligheidsanalyse
+- **V10**: Segmentmerging — massabehoud
 
 ---
 
-## Difference with Victoria
-
-| Aspect | InzingaFlow | Victoria |
-|---|---|---|
-| **Algorithm** | LTA (vectorized NumPy) | LTA (BFS, Python objects) |
-| **Geochemistry moment** | Eager — each time step per segment | Lazy — when queried via fraction mixing |
-| **Node mixing** | Linear + PHREEQC correction (step 5b) | PHREEQC `mix_solutions()` always |
-| **Multi-species** | Yes, NumPy matrix `C[n, n_species]` | Via PHREEQC solution references |
-| **Performance** | High (vectorized) | Lower (Python loop per parcel) |
-| **Geochemistry** | Optional via `GeochemSolver` | Always via `PhreeqPython` |
-
----
-
-## Requirements
+## Vereisten
 
 - Python ≥ 3.10
-- numpy ≥ 1.24
-- epynet ≥ 0.6
-- phreeqpython ≥ 1.5 *(for geochemistry only)*
+- NumPy ≥ 1.24
+- epynet ≥ 2.0
+
+Optioneel:
+- numba ≥ 0.57 — voor ~4-5× snellere kernels
+- phreeqpython ≥ 1.4 — voor volledige geochemie (PHREEQC)
+- scipy ≥ 1.10 — voor validatietests
 
 ---
 
-## License
+## Licentie
 
-MIT
+MIT License — zie [LICENSE](LICENSE) voor details.
