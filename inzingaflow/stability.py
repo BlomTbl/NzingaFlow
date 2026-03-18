@@ -1,4 +1,4 @@
-# inzingaflow/stability.py
+# nzingaflow/stability.py
 """
 Automatische tijdstap-stabiliteitscontrole en massabalansvalidatie.
 
@@ -218,10 +218,17 @@ class MassBalanceTracker:
         self.bulk_decay += mass_bulk
 
         if k_wall_vol is not None and n > 0:
-            k_w_seg = k_wall_vol[store.pipe[:n]]   # (n, n_species)
-            mass_wall = (store.C[:n] * store.volume[:n, np.newaxis]
-                         * (1 - np.exp(-k_w_seg * dt))).sum(axis=0)
-            self.wall_decay += mass_wall
+            # Gebruik _prev_mass als basis voor de schatting (massa vóór de stap),
+            # consistent met de bulk-schatting hierboven. De wandreactiesnelheid
+            # varieert per leiding, dus we berekenen een gewogen gemiddelde k_wall
+            # over alle actieve segmenten en passen dat toe op _prev_mass.
+            k_w_seg = k_wall_vol[store.pipe[:n]]          # (n, n_species)
+            vol_n   = store.volume[:n, np.newaxis]        # (n, 1)
+            tot_vol = vol_n.sum()
+            if tot_vol > 0:
+                k_w_mean = (k_w_seg * vol_n).sum(axis=0) / tot_vol   # (n_species,)
+                mass_wall = self._prev_mass * (1 - np.exp(-k_w_mean * dt))
+                self.wall_decay += mass_wall
 
         if exited_C is not None and exited_V is not None and len(exited_V) > 0:
             self.outflow += (exited_C * exited_V[:, np.newaxis]).sum(axis=0)
