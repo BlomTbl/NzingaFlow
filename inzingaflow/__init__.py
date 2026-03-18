@@ -1,10 +1,10 @@
-# inzingaflow/__init__.py
+# nzingaflow/__init__.py
 """
-InzingaFlow — Lagrangian Transport kwaliteitssimulator voor EPANET-netwerken.
+NzingaFlow — Lagrangian Transport kwaliteitssimulator voor EPANET-netwerken.
 
 Kernklassen
 -----------
-InzingaFlowSolver
+NzingaFlowSolver
     Vectorized LTA-solver; koppeling met EPANET via epynet.
     Ondersteunt multi-species, wandreacties, tanks en (optioneel) volledige
     geochemie via PhreeqPython (GeochemSolver).
@@ -24,9 +24,9 @@ HydraulicModel
 Snelstart
 ---------
     import numpy as np
-    from inzingaflow import InzingaFlowSolver, EPSRunner
+    from nzingaflow import NzingaFlowSolver, EPSRunner
 
-    solver = InzingaFlowSolver("netwerk.inp", n_species=1)
+    solver = NzingaFlowSolver("netwerk.inp", n_species=1)
     runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 
     results = runner.run(
@@ -37,16 +37,16 @@ Snelstart
     # results.shape == (n_stappen, node_count, 1)
 
 Met geochemie (PhreeqPython):
-    from inzingaflow import InzingaFlowSolver, EPSRunner
-    from inzingaflow.geochemistry import GeochemSolver, SpeciesMap, full_water_chemistry
+    from nzingaflow import NzingaFlowSolver, EPSRunner
+    from nzingaflow.geochemistry import GeochemSolver, SpeciesMap, full_water_chemistry
 
     geo = full_water_chemistry()
-    solver = InzingaFlowSolver("netwerk.inp", n_species=6, geochem=geo)
+    solver = NzingaFlowSolver("netwerk.inp", n_species=6, geochem=geo)
     runner = EPSRunner(solver, qual_dt=10.0, hyd_dt=300.0, duration=86400.0)
     results = runner.run(decay_k=np.zeros(6), ...)
 """
 
-from .solver      import InzingaFlowSolver
+from .solver      import NzingaFlowSolver
 from .eps         import EPSRunner
 from .hydraulics  import HydraulicModel
 from .segments    import SegmentStore
@@ -54,8 +54,6 @@ from .stability   import recommended_dt, check_dt, MassBalanceTracker
 from .lta         import (
     bulk_first_order_multi,
     wall_first_order_multi,
-    combined_decay_factors,
-    apply_combined_decay,
     compute_wall_k,
     advect,
     node_mixing_multi,
@@ -63,13 +61,20 @@ from .lta         import (
 )
 from .merging     import merge_segments
 from .geochemistry import GeochemSolver, SpeciesMap, chlorine_decay_geochem, full_water_chemistry
+from .lta          import warmup_numba, USE_NUMBA, combined_decay_multi, build_combined_exp
+from .merging      import warmup_numba_merging
 
 __version__ = "1.0.0"
-__author__  = "InzingaFlow"
+__author__  = "NzingaFlow"
 
 __all__ = [
     # Hoofd-API
-    "InzingaFlowSolver",
+    "NzingaFlowSolver",
+    "warmup_numba",
+    "USE_NUMBA",
+    "warmup_numba_merging",
+    "combined_decay_multi",
+    "build_combined_exp",
     "EPSRunner",
     # Geochemie
     "GeochemSolver",
@@ -82,8 +87,6 @@ __all__ = [
     # LTA-kernfuncties
     "bulk_first_order_multi",
     "wall_first_order_multi",
-    "combined_decay_factors",
-    "apply_combined_decay",
     "compute_wall_k",
     "advect",
     "node_mixing_multi",
