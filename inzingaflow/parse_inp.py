@@ -1,4 +1,4 @@
-# inzingaflow/parse_inp.py
+# nzingaflow/parse_inp.py
 """
 Twee ingangen voor netwerktopologie:
 
@@ -64,16 +64,16 @@ _EN_PATTERNSTEP = 3    # time param
 
 # Flow-eenheden → omzettingsfactor naar m³/s
 _FLOW_TO_M3S = {
-    0: 1 / 448.831,   # CFS → m³/s
-    1: 6.30902e-5,    # GPM → m³/s
-    2: 1 / 3600,      # MGD (approximation via m³/h)
-    3: 1 / 3600,      # IMGD
-    4: 1 / 3600,      # AFD
-    5: 1e-3,          # LPS → m³/s
-    6: 1 / 60_000,    # LPM → m³/s
-    7: 1 / 86_400,    # MLD → m³/s
-    8: 1 / 3600,      # CMH → m³/s   ← meest gebruikelijk in NL
-    9: 1 / 86_400,    # CMD → m³/s
+    0: 0.028317,      # CFS  → m³/s
+    1: 6.30902e-5,    # GPM  → m³/s
+    2: 0.043813,      # MGD  → m³/s  (1 MGD = 0.043813 m³/s)
+    3: 0.052617,      # IMGD → m³/s  (Imperial MGD)
+    4: 1.42764e-5,    # AFD  → m³/s  (acre-feet/day)
+    5: 1e-3,          # LPS  → m³/s
+    6: 1 / 60_000,    # LPM  → m³/s
+    7: 1 / 86_400,    # MLD  → m³/s
+    8: 1 / 3_600,     # CMH  → m³/s   ← meest gebruikelijk in NL
+    9: 1 / 86_400,    # CMD  → m³/s
 }
 
 
@@ -195,7 +195,7 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
             raw_vel  = 0.0
 
         # Stromingsrichting: negatief = omgekeerd t.o.v. from→to
-        # InzingaFlow werkt altijd met positieve flow; richting zit in pipe_start/end
+        # NzingaFlow werkt altijd met positieve flow; richting zit in pipe_start/end
         if raw_flow < 0:
             fn_uid, tn_uid = tn_uid, fn_uid   # draai richting om
 
