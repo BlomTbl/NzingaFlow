@@ -1,64 +1,98 @@
 [build-system]
-requires      = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
 
 [project]
-name        = "inzingaflow"
-version     = "1.0.0"
-description = "Lagrangian Transport kwaliteitssimulator voor EPANET-netwerken"
-readme      = "README.md"
-license     = { text = "MIT" }
-requires-python = ">=3.10"
-
+name = "nzingaflow"
+version = "1.0.0"
+description = "Lagrangian Transport kwaliteitssimulator voor EPANET-drinkwaternetwerken"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "NzingaFlow" },
+]
 keywords = [
     "water quality",
     "EPANET",
     "Lagrangian transport",
-    "LTA",
     "drinking water",
-    "hydraulic simulation",
-    "PhreeqPython",
-    "geochemistry",
+    "LTA",
+    "simulation",
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Hydrology",
+    "Typing :: Typed",
+]
+requires-python = ">=3.10"
 
 dependencies = [
     "numpy>=1.24",
-    "epynet>=0.6",
+    "epynet>=2.0",
 ]
 
 [project.optional-dependencies]
+numba = [
+    "numba>=0.57",
+]
 geochem = [
-    "phreeqpython>=1.5",
+    "phreeqpython>=1.4",
 ]
 dev = [
-    "pytest>=7",
-    "pytest-cov",
-    "black",
-    "ruff",
+    "pytest>=7.0",
+    "scipy>=1.10",
+    "pytest-cov>=4.0",
+    "ruff>=0.4",
+    "mypy>=1.8",
 ]
 all = [
-    "inzingaflow[geochem,dev]",
+    "nzingaflow[numba,geochem,dev]",
 ]
 
 [project.urls]
-Repository = "https://github.com/inzingaflow/inzingaflow"
+Homepage       = "https://github.com/nzingaflow/nzingaflow"
+Repository     = "https://github.com/nzingaflow/nzingaflow"
+Issues         = "https://github.com/nzingaflow/nzingaflow/issues"
+Documentation  = "https://github.com/nzingaflow/nzingaflow#readme"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["inzingaflow*"]
+include = ["nzingaflow*"]
 
 [tool.setuptools.package-data]
-inzingaflow = ["py.typed"]
+nzingaflow = ["py.typed"]
 
-[tool.black]
-line-length    = 100
-target-version = ["py310", "py311", "py312"]
-
+# ── Ruff linter ───────────────────────────────────────────────────────────────
 [tool.ruff]
 line-length = 100
-select      = ["E", "F", "W", "I"]
-ignore      = ["E501"]
+target-version = "py310"
 
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = [
+    "E501",   # line too long (docstrings)
+    "E741",   # ambiguous variable name (l, O, I — ok in wetenschappelijke code)
+]
+
+# ── mypy ──────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true   # epynet heeft geen stubs
+
+# ── pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
-testpaths   = ["tests"]
-addopts     = "-v --tb=short"
+testpaths = ["tests"]
+addopts   = "-v --tb=short"
+markers   = [
+    "slow: tests die > 5 seconden duren",
+    "requires_epynet: tests die een geladen EPANET-netwerk vereisen",
+]
