@@ -1,14 +1,14 @@
 🇳🇱 [Nederlands](README_NL.md) &nbsp;|&nbsp; 🇬🇧 [English](README.md)
-# InzingaFlow
+# NzingaFlow
 
 **Lagrangian Transport Kwaliteitssimulator voor EPANET-netwerken**
 
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
-[![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.21-orange)](https://numpy.org/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Version](https://img.shields.io/badge/version-1.0.0-informational)](CHANGELOG.md)
 
-InzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken via de **Lagrangian Transport Approach (LTA)**. Stoffen reizen als discrete segmenten mee met de waterstroming — zonder de numerieke diffusie van Euleriaanse methoden. Alle kernberekeningen zijn volledig gevectoriseerd met NumPy.
+NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken via de **Lagrangian Transport Approach (LTA)**. Stoffen reizen als discrete segmenten mee met de waterstroming — zonder de numerieke diffusie van Euleriaanse methoden. Alle kernberekeningen zijn volledig gevectoriseerd met NumPy en optioneel versneld met Numba JIT-compilatie.
 
 ---
 
@@ -19,7 +19,7 @@ InzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken
 - [Snelstart](#snelstart)
 - [Architectuur](#architectuur)
 - [API-referentie](#api-referentie)
-  - [InzingaFlowSolver](#inzingaflowsolver)
+  - [NzingaFlowSolver](#nzingaflowsolver)
   - [EPSRunner](#epsrunner)
   - [HydraulicModel](#hydraulicmodel)
   - [SegmentStore](#segmentstore)
@@ -37,7 +37,9 @@ InzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken
 ## Kenmerken
 
 - **Vectorized LTA-solver** — geen Python-lussen over segmenten; alle berekeningen via NumPy
+- **Numba JIT-kernels** — optionele ~4–5× versnelling via `pip install numba`
 - **Multi-species** — meerdere stoffen simultaan in één `C`-matrix `(n_segmenten × n_stoffen)`
+- **Gecombineerd verval** — bulk- en wandverval samengevoegd in één geheugenpass (`combined_decay_multi`)
 - **Wandreacties** — twee-film-model per leiding (Dittus-Boelter / Rossman 1994)
 - **Tanks** — CSTR-model met impliciet Euler (onvoorwaardelijk stabiel)
 - **Extended Period Simulation (EPS)** — automatische hydraulica-updates elke `hyd_dt` seconden
@@ -45,28 +47,48 @@ InzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken
 - **CFL-stabiliteitscontrole** — automatische waarschuwing en `recommended_dt()`
 - **Massabalansregistratie** — via `MassBalanceTracker` (opt-in)
 - **Flow reversal** — detectie en correcte segmentspiegeling
+- **Pre-allocated buffers** — geen heap-allocaties in de hot-path
+- **CSR pipe-index** — gecachede gesorteerde index in `SegmentStore`; lexsort overgeslagen indien geldig
 
 ### Prestatiecijfers
 
-| Operatie | Grootte | Tijd |
-|---|---|---|
-| `apply_combined_decay()` | 50 000 segs, 6000 leidingen, 3 stoffen | ~0.7 ms |
-| `advect()` | 50 000 segs | ~0.2 ms |
-| `node_mixing_multi()` | 50 000 segs, 2500 exits, 5000 knopen | ~0.2 ms |
-| `merge_segments()` | 1000 segs, 3 stoffen | ~260 µs |
+| Operatie | Grootte | Zonder Numba | Met Numba |
+|---|---|---|---|
+| `combined_decay_multi()` | 5.000 segs, 200 leidingen, 2 stoffen | ~63 µs | ~12 µs |
+| `advect()` | 5.000 segs | ~15 µs | ~4 µs |
+| `node_mixing_multi()` | 5.000 segs, 150 knopen | ~32 µs | ~8 µs |
+| `merge_segments()` | 5.000 segs, 2 stoffen | ~2.200 µs | ~90 µs |
+| **Volledige tijdstap** | 5.000 segs, 200 leidingen, 2 stoffen | **~280 µs** | **~60–90 µs** |
 
 ---
 
 ## Installatie
 
-```bash
-pip install numpy epynet
+### Via PyPI
 
-# Optioneel: geochemie via PhreeqPython
-pip install phreeqpython
+```bash
+# Minimaal (alleen NumPy)
+pip install nzingaflow
+
+# Met Numba JIT (~4–5× sneller)
+pip install "nzingaflow[numba]"
+
+# Met volledige geochemie (PhreeqPython/PHREEQC)
+pip install "nzingaflow[geochem]"
+
+# Alles inclusief ontwikkeltools
+pip install "nzingaflow[all]"
 ```
 
-> **Vereisten:** Python ≥ 3.9, NumPy ≥ 1.21, epynet ≥ 2.0 (2025-versie)
+### Vanuit broncode
+
+```bash
+git clone https://github.com/nzingaflow/nzingaflow.git
+cd nzingaflow
+pip install -e ".[dev]"
+```
+
+> **Vereisten:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
 
 ---
 
@@ -76,9 +98,12 @@ pip install phreeqpython
 
 ```python
 import numpy as np
-from inzingaflow import InzingaFlowSolver, EPSRunner
+from nzingaflow import NzingaFlowSolver, EPSRunner
 
-solver = InzingaFlowSolver("netwerk.inp", n_species=1)
+solver = NzingaFlowSolver("netwerk.inp", n_species=1)
+
+# Optioneel: Numba JIT-compilatie triggeren vóór de simulatie (~1 s eenmalig)
+solver.warmup_numba()
 
 runner = EPSRunner(
     solver,
@@ -100,7 +125,7 @@ results = runner.run(
 ### Multi-species
 
 ```python
-solver = InzingaFlowSolver("netwerk.inp", n_species=2)
+solver = NzingaFlowSolver("netwerk.inp", n_species=2)
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 
 results = runner.run(
@@ -119,17 +144,17 @@ results = runner.run(
 n_pipes = len(solver.pipe_ids)
 k_wall = np.full((n_pipes, 1), 1e-5)    # [m/s] — uniform over alle leidingen
 
-solver = InzingaFlowSolver("netwerk.inp", n_species=1, k_wall=k_wall)
+solver = NzingaFlowSolver("netwerk.inp", n_species=1, k_wall=k_wall)
 ```
 
 ### Met geochemie (PhreeqPython)
 
 ```python
-from inzingaflow import InzingaFlowSolver, EPSRunner
-from inzingaflow.geochemistry import full_water_chemistry
+from nzingaflow import NzingaFlowSolver, EPSRunner
+from nzingaflow.geochemistry import full_water_chemistry
 
 geo = full_water_chemistry()
-solver = InzingaFlowSolver("netwerk.inp", n_species=6, geochem=geo)
+solver = NzingaFlowSolver("netwerk.inp", n_species=6, geochem=geo)
 runner = EPSRunner(solver, qual_dt=10.0, hyd_dt=300.0, duration=86400.0)
 
 # Stoffen: [Cl2, pH, Alk, Ca, Fe, Mn]
@@ -150,25 +175,27 @@ results = runner.run(
 Elke tijdstap `dt` doorloopt de solver de volgende fasen:
 
 ```
-1. Verval         C *= exp(-(k_bulk + k_wall_vol) * dt)   [gecombineerde decay_pipe-tabel]
-2. Advectie       x += v[pipe] * dt
-3. Exit-detectie  x >= L[pipe]  →  segment verlaat leiding
-4. Knoopmenging   debietgewogen  →  node_C (n_nodes × n_species)
-5. Tankmodel      CSTR impliciet Euler  →  node_C bijgewerkt
-6. Splitsing      segment naar splitsingknoop  →  proportioneel gesplitst
-7. Merging        aangrenzende segs met |ΔC| < tol  →  samengevoegd
+1. Gecombineerd verval  C *= combined_exp[pipe]   waarbij combined_exp[p,s] = exp(-(k_bulk[s] + k_wall_vol[p,s]) * dt)
+2. Advectie             x += v[pipe] * dt
+3. Exit-detectie        x >= L[pipe]  →  segment verlaat leiding
+4. Knoopmenging         debietgewogen  →  node_C (n_knopen × n_stoffen)
+5. Tankmodel            CSTR impliciet Euler  →  node_C bijgewerkt
+6. Pipe-routing         vectorized: doorgaande knopen in één pass; splitsingen in kleine lus
+7. Merging              aangrenzende segs met |ΔC| < tol  →  samengevoegd (elke merge_interval stappen)
 ```
+
+Stappen 1–4 worden uitgevoerd door Numba JIT-kernels als Numba is geïnstalleerd, zonder tussenliggende array-allocaties.
 
 ### Modulaire opbouw
 
 | Module | Klasse / Functie | Verantwoordelijkheid |
 |---|---|---|
-| `solver.py` | `InzingaFlowSolver` | Volledige LTA-solver; koppeling van alle onderdelen |
+| `solver.py` | `NzingaFlowSolver` | Volledige LTA-solver; koppeling van alle onderdelen |
 | `eps.py` | `EPSRunner` | EPS-tijdlus, injectie, voortgang |
 | `hydraulics.py` | `HydraulicModel` | EPANET-koppeling via epynet |
-| `segments.py` | `SegmentStore` | Structure-of-Arrays opslag |
-| `lta.py` | `advect`, `node_mixing_multi`, … | Vectorized kernberekeningen |
-| `merging.py` | `merge_segments` | Parallel-reductie segmentmerging |
+| `segments.py` | `SegmentStore` | Structure-of-Arrays opslag + CSR pipe-index |
+| `lta.py` | `combined_decay_multi`, `advect`, … | Vectorized kernberekeningen met Numba JIT |
+| `merging.py` | `merge_segments` | Parallel-reductie segmentmerging met Numba JIT |
 | `stability.py` | `recommended_dt`, `MassBalanceTracker` | CFL-controle en massabalans |
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython-integratie |
 
@@ -182,16 +209,16 @@ volume [float64, capacity]          segmentvolume [m³]
 n                                   aantal actieve segmenten
 ```
 
-Pre-allocatie vermijdt heap-allocaties tijdens de simulatie. Capaciteitsoverschrijding triggert automatische verdubbeling.
+Pre-allocatie vermijdt heap-allocaties tijdens de simulatie. Capaciteitsoverschrijding triggert automatische verdubbeling via een `on_resize`-callback die alle solver-buffers synchroon houdt. Een lazy CSR pipe-index (`build_csr()`) cachet de per-leiding gesorteerde volgorde voor `merge_segments`; de lexsort wordt overgeslagen zolang de index geldig is.
 
 ---
 
 ## API-referentie
 
-### InzingaFlowSolver
+### NzingaFlowSolver
 
 ```python
-InzingaFlowSolver(
+NzingaFlowSolver(
     inp_path:   str,
     n_species:  int   = 1,
     capacity:   int   = 200_000,
@@ -221,7 +248,8 @@ InzingaFlowSolver(
 | Methode | Retourtype | Omschrijving |
 |---|---|---|
 | `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Voer één kwaliteitstijdstap uit |
-| `update_hydraulics(simtime=0)` | `None` | Herbereken hydraulica; detecteert flow reversals |
+| `update_hydraulics(simtime=0)` | `None` | Herbereken hydraulica; detecteert flow reversals en herbouwt routing-caches |
+| `warmup_numba()` | `None` | Trigger Numba JIT-compilatie vóór de simulatie (eenmalig aanroepen na init) |
 | `inject(node_uid, C_vector, volume)` | `None` | Injecteer vanuit knoop, proportioneel over uitgaande leidingen |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Injecteer direct in leiding op positie `x` [m] |
 | `booster_inject(node_uid, C_set, flow_frac=1.0)` | `None` | Stel concentratie vast op uitgaande leidingen |
@@ -250,7 +278,7 @@ InzingaFlowSolver(
 
 ```python
 EPSRunner(
-    solver:   InzingaFlowSolver,
+    solver:   NzingaFlowSolver,
     qual_dt:  float,   # kwaliteitstijdstap [s]
     hyd_dt:   float,   # hydraulica-update interval [s]
     duration: float,   # totale simulatieduur [s]
@@ -286,7 +314,7 @@ inject_schedule = {
 **`inject_fn` callback**
 
 ```python
-def mijn_injectie(t: float, solver: InzingaFlowSolver):
+def mijn_injectie(t: float, solver: NzingaFlowSolver):
     if t < 1800:
         solver.inject("R1", [1.0], volume=0.05)
 
@@ -305,7 +333,7 @@ t_uur = runner.time_axis(unit="h")   # "s", "min" of "h"
 
 ### HydraulicModel
 
-Lage-niveau EPANET-koppeling via epynet. Normaliter intern aangemaakt door `InzingaFlowSolver`.
+Lage-niveau EPANET-koppeling via epynet. Normaliter intern aangemaakt door `NzingaFlowSolver`.
 
 ```python
 HydraulicModel(inp_path: str, include_pumps: bool = False)
@@ -338,37 +366,46 @@ SegmentStore(capacity: int = 100_000, n_species: int = 1)
 | `n` | `int` — aantal actieve segmenten |
 | `add(pipe, x, volume, C_vector)` | Voeg segment toe; auto-resize bij capaciteitsoverschrijding |
 | `remove(indices)` | Verwijder via swap-with-last in O(1) |
+| `build_csr(n_pipes)` | Bouw of retourneer gecachede CSR pipe-index `(pipe_order, pipe_ptr)` |
 | `pipe_a`, `x_a`, `C_a`, `volume_a` | Properties die views `[:n]` retourneren |
+| `on_resize` | Callback `(new_capacity) → None`; aangeroepen bij capaciteitsverdubbeling |
 
 ---
 
 ### LTA-kernfuncties
 
-Alle functies in `lta.py` zijn volledig gevectoriseerd met NumPy.
+Alle functies in `lta.py` zijn volledig gevectoriseerd met NumPy en JIT-gecompileerd met Numba indien beschikbaar.
 
 ```python
-from inzingaflow.lta import (
-    bulk_first_order_multi,
-    wall_first_order_multi,
-    combined_decay_factors,
-    apply_combined_decay,
+from nzingaflow.lta import (
+    combined_decay_multi,   # bulk + wandverval gecombineerd in één pass  ← gebruik dit
+    build_combined_exp,     # bereken gecombineerde vervalfactoren
+    bulk_first_order_multi, # alleen bulkverval
+    wall_first_order_multi, # alleen wandverval
     compute_wall_k,
     advect,
+    exit_detect,
     node_mixing_multi,
     tank_step_implicit,
+    warmup_numba,           # JIT-compilatie triggeren
+    USE_NUMBA,              # True als Numba beschikbaar is
 )
 ```
 
 | Functie | Handtekening | Omschrijving |
 |---|---|---|
-| `bulk_first_order_multi` | `(C, k_vec, dt) → None` | `C *= exp(-k_vec * dt)` in-place; broadcasting over segmenten |
-| `wall_first_order_multi` | `(C, pipe, k_wall, dt) → None` | Wandverval per segment in-place |
-| `combined_decay_factors` | `(k_bulk, k_wall_vol, dt, n_pipes) → (n_pipes, n_species)` | Gecombineerde vervalfactoren — eenmalig per hydraulica-update |
-| `apply_combined_decay` | `(C, pipe, decay_pipe) → None` | `C *= decay_pipe[pipe]` in-place |
+| `build_combined_exp` | `(k_bulk, k_wall_vol, dt, n_pipes) → (n_pipes, n_species)` | Bereken `exp(-(k_bulk + k_wall_vol) * dt)`; eenmalig per hydraulica-update of dt-wijziging |
+| `combined_decay_multi` | `(C, pipe, combined_exp, n=None) → None` | `C *= combined_exp[pipe]` in-place; één geheugenpass voor bulk- én wandverval |
+| `bulk_first_order_multi` | `(C, k_vec, dt, n=None) → None` | `C *= exp(-k_vec * dt)` in-place; broadcasting over segmenten |
+| `wall_first_order_multi` | `(C, pipe, k_wall, dt, n=None) → None` | Wandverval per segment in-place |
 | `compute_wall_k` | `(diam, velocity, k_w, D_mol, nu) → (n_pipes, n_species) [1/s]` | Volumetrische wandreactiesnelheid via twee-film-model |
-| `advect` | `(x, pipe, velocity, dt) → None` | `x += velocity[pipe] * dt` in-place |
-| `node_mixing_multi` | `(exit_mask, pipe, C, flow, pipe_end, node_count) → (node_count, n_species)` | Debietgewogen menging via `bincount` |
+| `advect` | `(x, pipe, velocity, dt, n=None) → None` | `x += velocity[pipe] * dt` in-place |
+| `exit_detect` | `(x, pipe, pipe_length, exit_mask, n=None) → int` | Vul `exit_mask` in-place; retourneert aantal exiterende segmenten |
+| `node_mixing_multi` | `(exit_mask, pipe, C, flow, pipe_end, node_count, out=None, wC_buf=None, node_flow_buf=None, n=None) → ndarray` | Debietgewogen menging; geen allocaties als pre-allocated buffers worden meegegeven |
 | `tank_step_implicit` | `(C_tank, Q_in, C_in, Q_out, V_tank, k_b, dt) → None` | CSTR impliciet Euler in-place |
+| `warmup_numba` | `(n_species=1) → None` | Trigger JIT-compilatie; eenmalig aanroepen na aanmaken van de solver |
+
+> **Prestatietip:** gebruik `combined_decay_multi` samen met `build_combined_exp` in plaats van aparte `bulk_first_order_multi` + `wall_first_order_multi` aanroepen. Dit halveert het aantal geheugenpassages over `C` en elimineert de `exp()`-berekening per tijdstap.
 
 ---
 
@@ -376,7 +413,7 @@ from inzingaflow.lta import (
 
 PhreeqPython-integratie die eerste-orde bulkverval vervangt door volledige PHREEQC-geochemie.
 
-> Vereist: `pip install phreeqpython`
+> Vereist: `pip install nzingaflow[geochem]` of `pip install phreeqpython`
 
 #### SpeciesMap
 
@@ -419,7 +456,7 @@ GeochemSolver(
 
 | Methode | Omschrijving |
 |---|---|
-| `apply_geochemistry(store, dt, pipe_diam=None, pipe_vel=None)` | Vervangt `bulk_first_order_multi()`; PHREEQC-reacties per segment in batches |
+| `apply_geochemistry(store, dt, pipe_diam=None, pipe_vel=None)` | Vervangt `combined_decay_multi()`; PHREEQC-reacties per segment in batches |
 | `apply_mixing(node_C, node_flow, dt)` | Geochemisch evenwicht na knoopmenging (pH-correctie) |
 | `make_injection_solution(C_vector)` | Zet concentratieprofiel om naar PHREEQC-oplossingsdict |
 | `langelier_index(C_vec)` | LSI voor CaCO₃ (> 0 = aankorsting, < 0 = corrosief) |
@@ -429,7 +466,7 @@ GeochemSolver(
 #### Voorgeconfigureerde recepten
 
 ```python
-from inzingaflow.geochemistry import chlorine_decay_geochem, full_water_chemistry
+from nzingaflow.geochemistry import chlorine_decay_geochem, full_water_chemistry
 
 # Chloor + pH (n_species=2)
 geo = chlorine_decay_geochem(k_bulk_per_day=0.5)
@@ -443,7 +480,7 @@ geo = full_water_chemistry()
 ### Stabiliteitsfuncties
 
 ```python
-from inzingaflow import recommended_dt, check_dt
+from nzingaflow import recommended_dt, check_dt
 ```
 
 #### `recommended_dt()`
@@ -483,7 +520,7 @@ report = solver.check_stability(dt=5.0, decay_k=np.array([0.001]))
 Activeren met `track_mass=True`:
 
 ```python
-solver = InzingaFlowSolver("netwerk.inp", n_species=1, track_mass=True)
+solver = NzingaFlowSolver("netwerk.inp", n_species=1, track_mass=True)
 # ... simulatie ...
 mb = solver.mass_balance()
 # {
@@ -502,25 +539,46 @@ mb = solver.mass_balance()
 ### `merge_segments()`
 
 ```python
-from inzingaflow import merge_segments
+from nzingaflow import merge_segments
 
 n_verwijderd = merge_segments(
     store,               # SegmentStore
     tol=1e-6,            # concentratietolerantie [mg/L]
     min_volume=1e-12,    # segmenten kleiner dan dit worden altijd verwijderd [m³]
+    n_pipes=0,           # leidingaantal voor CSR-index (0 = auto-detectie)
 )
 ```
 
-Algoritme: iteratieve parallel-reductie (O(n log n)); volledig vectorized. Wordt automatisch uitgevoerd door de solver elke `merge_interval` stappen.
+Algoritme: iteratieve parallel-reductie (O(n log n)); Numba JIT-kernels met early-exit kandidaatdetectie. Wordt automatisch uitgevoerd door de solver elke `merge_interval` stappen.
 
 ---
 
 ## Geavanceerd gebruik
 
+### Numba warmup
+
+```python
+solver = NzingaFlowSolver("netwerk.inp", n_species=2)
+solver.warmup_numba()   # ~1 s eenmalig; daarna zijn stappen snel
+
+runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
+results = runner.run(decay_k=np.array([0.001, 0.0]))
+```
+
+Of gebruik de losse functies:
+
+```python
+from nzingaflow import warmup_numba, warmup_numba_merging, USE_NUMBA
+
+print(f"Numba beschikbaar: {USE_NUMBA}")
+warmup_numba(n_species=2)
+warmup_numba_merging(n_species=2)
+```
+
 ### Tijdvariabele injectie met callback
 
 ```python
-def injectie(t: float, solver: InzingaFlowSolver):
+def injectie(t: float, solver: NzingaFlowSolver):
     """Injecteer alleen als het debiet bij R1 boven 10 L/s ligt."""
     flow, _ = solver._get_hydraulics()
     out_pipes = solver._node_outpipes[solver.node_index["R1"]]
@@ -548,7 +606,7 @@ results = runner.run(
 ### Aanbevolen tijdstap bepalen
 
 ```python
-solver = InzingaFlowSolver("netwerk.inp", n_species=1)
+solver = NzingaFlowSolver("netwerk.inp", n_species=1)
 dt_opt = solver.recommended_dt(decay_k=np.array([0.001]))
 print(f"Aanbevolen tijdstap: {dt_opt:.1f} s")
 
@@ -570,7 +628,7 @@ for mineraal, si in rapport['saturation_indices'].items():
 ### Massabalanscontrole
 
 ```python
-solver = InzingaFlowSolver("netwerk.inp", n_species=1, track_mass=True)
+solver = NzingaFlowSolver("netwerk.inp", n_species=1, track_mass=True)
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=3600.0)
 results = runner.run(
     decay_k=np.array([0.001]),
@@ -596,11 +654,29 @@ solver.inject_pipe(
 )
 ```
 
+### Laag-niveau: gecombineerd verval direct gebruiken
+
+```python
+from nzingaflow.lta import build_combined_exp, combined_decay_multi
+
+# Eenmalig bouwen per hydraulica-update (of bij dt-wijziging)
+cexp = build_combined_exp(
+    k_bulk=np.array([0.001, 0.0]),
+    k_wall_vol=solver._k_wall_vol,   # (n_pipes, n_species) [1/s]
+    dt=5.0,
+    n_pipes=len(solver.pipe_ids),
+)
+
+# Elke tijdstap toepassen — één geheugenpass, geen exp()-berekening
+combined_decay_multi(solver.segments.C, solver.segments.pipe, cexp,
+                     n=solver.segments.n)
+```
+
 ---
 
 ## Wandreacties
 
-InzingaFlow implementeert het twee-film-model van Rossman (1994):
+NzingaFlow implementeert het twee-film-model van Rossman (1994):
 
 ```
 Re    = v · D / ν
@@ -624,7 +700,7 @@ k_wall = np.zeros((n_pipes, 1))
 k_wall[0:20] = 1e-5   # gietijzer
 k_wall[20:]  = 2e-6   # PVC
 
-solver = InzingaFlowSolver("netwerk.inp", n_species=1, k_wall=k_wall)
+solver = NzingaFlowSolver("netwerk.inp", n_species=1, k_wall=k_wall)
 ```
 
 > `k_wall = 0` geeft geen wandreactie, ongeacht de stroomsnelheid.
@@ -642,6 +718,12 @@ Gebruik `solver.recommended_dt()` om de optimale tijdstap te berekenen en geef d
 - De tijdstap is te groot (CFL-schending)
 - Wandreacties zijn actief — de massabalansschatting is een benadering voor wandverval
 - Geochemie is actief: niet-lineaire reacties worden niet bijgehouden in de lineaire massabalans
+
+**Q: Hoe haal ik de beste prestaties?**
+
+1. Installeer Numba: `pip install nzingaflow[numba]`
+2. Roep `solver.warmup_numba()` eenmalig aan na het aanmaken van de solver, vóór de simulatielus
+3. Gebruik `combined_decay_multi` + `build_combined_exp` in plaats van aparte bulk/wand-aanroepen (de solver doet dit automatisch)
 
 **Q: Hoe voeg ik een nieuw PHREEQC-element toe?**
 
@@ -675,6 +757,7 @@ Standaard worden pompen overgeslagen (`include_pumps=False`). U kunt pompen incl
 |---|---|
 | **CFL** | Courant-Friedrichs-Lewy: stabiliteitseis `dt ≤ L/v` voor advectie |
 | **CSTR** | Continuously Stirred Tank Reactor: perfect mengingstankmodel |
+| **CSR** | Compressed Sparse Row: indexformaat van `SegmentStore.build_csr()` voor gecachede per-leiding sortering |
 | **EPS** | Extended Period Simulation: tijdvariabele simulatie met periodiek bijgewerkte hydraulica |
 | **LTA** | Lagrangian Transport Approach: transport vanuit het referentiekader van de vloeistof |
 | **LSI** | Langelier Saturation Index: maat voor CaCO₃-verzadiging |
@@ -682,7 +765,7 @@ Standaard worden pompen overgeslagen (`include_pumps=False`). U kunt pompen incl
 | **SoA** | Structure of Arrays: opslagopzet waarbij elke eigenschap een aparte array is |
 | **`k_bulk`** | Bulkvervalconstante [1/s]: eerste-orde verval in de waterkolom |
 | **`k_wall`** | Wandreactiesnelheid [m/s]: reactie aan de binnenzijde van de leiding |
-| **`decay_pipe`** | Gecombineerde vervalfactor-tabel `(n_pipes × n_species)` = `exp(-(k_bulk + k_wall_vol) × dt)` |
+| **`combined_exp`** | Gecombineerde vervalfactor-tabel `(n_pipes × n_species)` = `exp(-(k_bulk + k_wall_vol) × dt)`; voorberekend door `build_combined_exp()` |
 | **segment** | Lagrangiaans vloeistofelement met vast volume, positie en concentratie |
 
 ---
@@ -697,3 +780,11 @@ Standaard worden pompen overgeslagen (`include_pumps=False`). U kunt pompen incl
 - MassBalanceTracker, CFL-controle
 - Parallel-reductie segmentmerging (O(n log n))
 - Flow reversal detectie en segmentspiegeling
+- Numba JIT-kernels voor alle hot-path operaties (~4–5× sneller)
+- Gecombineerd bulk + wandverval in één geheugenpass (`combined_decay_multi` / `build_combined_exp`)
+- Vectorized junction-routing via `_node_type` / `_node_out0`-cache (~734× t.o.v. Python-lus)
+- CSR pipe-index in `SegmentStore` (gecachede lexsort voor `merge_segments`)
+- Pre-allocated solver-buffers; geen heap-allocaties in hot-path
+- `exit_detect()` als expliciete pre-allocated functie
+- `warmup_numba()` / `warmup_numba_merging()` voor voorspelbare opstarttijd
+- `on_resize`-callback op `SegmentStore` voor synchronisatie van externe buffers

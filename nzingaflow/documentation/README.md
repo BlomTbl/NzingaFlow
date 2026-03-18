@@ -1,14 +1,14 @@
 🇳🇱 [Nederlands](README_NL.md) &nbsp;|&nbsp; 🇬🇧 [English](README.md)
-# InzingaFlow
+# NzingaFlow
 
 **Lagrangian Transport Water Quality Simulator for EPANET Networks**
 
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
-[![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.21-orange)](https://numpy.org/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Version](https://img.shields.io/badge/version-1.0.0-informational)](CHANGELOG.md)
 
-InzingaFlow simulates water quality in drinking water distribution networks using the **Lagrangian Transport Approach (LTA)**. Chemical species are transported as discrete segments carried along with the flow — eliminating the numerical diffusion inherent to Eulerian methods. All core calculations are fully vectorized with NumPy.
+NzingaFlow simulates water quality in drinking water distribution networks using the **Lagrangian Transport Approach (LTA)**. Chemical species are transported as discrete segments carried along with the flow — eliminating the numerical diffusion inherent to Eulerian methods. All core calculations are fully vectorized with NumPy and optionally accelerated with Numba JIT compilation.
 
 ---
 
@@ -19,7 +19,7 @@ InzingaFlow simulates water quality in drinking water distribution networks usin
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
 - [API Reference](#api-reference)
-  - [InzingaFlowSolver](#inzingaflowsolver)
+  - [NzingaFlowSolver](#nzingaflowsolver)
   - [EPSRunner](#epsrunner)
   - [HydraulicModel](#hydraulicmodel)
   - [SegmentStore](#segmentstore)
@@ -37,7 +37,9 @@ InzingaFlow simulates water quality in drinking water distribution networks usin
 ## Features
 
 - **Vectorized LTA solver** — no Python loops over segments; all calculations via NumPy
+- **Numba JIT kernels** — optional ~4–5× speedup via `pip install numba`
 - **Multi-species** — multiple species simultaneously in a single `C` matrix `(n_segments × n_species)`
+- **Combined decay** — bulk and wall decay fused into one memory pass (`combined_decay_multi`)
 - **Wall reactions** — two-film model per pipe (Dittus-Boelter / Rossman 1994)
 - **Tanks** — CSTR model with implicit Euler integration (unconditionally stable)
 - **Extended Period Simulation (EPS)** — automatic hydraulic updates every `hyd_dt` seconds
@@ -45,28 +47,48 @@ InzingaFlow simulates water quality in drinking water distribution networks usin
 - **CFL stability check** — automatic warning and `recommended_dt()`
 - **Mass balance tracking** — via `MassBalanceTracker` (opt-in)
 - **Flow reversal** — detection and correct segment mirroring
+- **Pre-allocated buffers** — zero heap allocations in the hot path
+- **CSR pipe-index** — cached sorted index in `SegmentStore`; lexsort skipped when valid
 
 ### Performance Benchmarks
 
-| Operation | Scale | Time |
-|---|---|---|
-| `apply_combined_decay()` | 50,000 segs, 6,000 pipes, 3 species | ~0.7 ms |
-| `advect()` | 50,000 segs | ~0.2 ms |
-| `node_mixing_multi()` | 50,000 segs, 2,500 exits, 5,000 nodes | ~0.2 ms |
-| `merge_segments()` | 1,000 segs, 3 species | ~260 µs |
+| Operation | Scale | Without Numba | With Numba |
+|---|---|---|---|
+| `combined_decay_multi()` | 5,000 segs, 200 pipes, 2 species | ~63 µs | ~12 µs |
+| `advect()` | 5,000 segs | ~15 µs | ~4 µs |
+| `node_mixing_multi()` | 5,000 segs, 150 nodes | ~32 µs | ~8 µs |
+| `merge_segments()` | 5,000 segs, 2 species | ~2,200 µs | ~90 µs |
+| **Full time step** | 5,000 segs, 200 pipes, 2 species | **~280 µs** | **~60–90 µs** |
 
 ---
 
 ## Installation
 
-```bash
-pip install numpy epynet
+### From PyPI
 
-# Optional: full geochemistry via PhreeqPython
-pip install phreeqpython
+```bash
+# Minimal (NumPy only)
+pip install nzingaflow
+
+# With Numba JIT (~4–5× faster)
+pip install "nzingaflow[numba]"
+
+# With full geochemistry (PhreeqPython/PHREEQC)
+pip install "nzingaflow[geochem]"
+
+# Everything including dev tools
+pip install "nzingaflow[all]"
 ```
 
-> **Requirements:** Python ≥ 3.9, NumPy ≥ 1.21, epynet ≥ 2.0 (2025 release)
+### From source
+
+```bash
+git clone https://github.com/nzingaflow/nzingaflow.git
+cd nzingaflow
+pip install -e ".[dev]"
+```
+
+> **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
 
 ---
 
@@ -76,9 +98,12 @@ pip install phreeqpython
 
 ```python
 import numpy as np
-from inzingaflow import InzingaFlowSolver, EPSRunner
+from nzingaflow import NzingaFlowSolver, EPSRunner
 
-solver = InzingaFlowSolver("network.inp", n_species=1)
+solver = NzingaFlowSolver("network.inp", n_species=1)
+
+# Optional: trigger Numba JIT compilation before the simulation (~1 s once)
+solver.warmup_numba()
 
 runner = EPSRunner(
     solver,
@@ -100,7 +125,7 @@ results = runner.run(
 ### Multi-species
 
 ```python
-solver = InzingaFlowSolver("network.inp", n_species=2)
+solver = NzingaFlowSolver("network.inp", n_species=2)
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 
 results = runner.run(
@@ -119,17 +144,17 @@ results = runner.run(
 n_pipes = len(solver.pipe_ids)
 k_wall = np.full((n_pipes, 1), 1e-5)   # [m/s] — uniform across all pipes
 
-solver = InzingaFlowSolver("network.inp", n_species=1, k_wall=k_wall)
+solver = NzingaFlowSolver("network.inp", n_species=1, k_wall=k_wall)
 ```
 
 ### With geochemistry (PhreeqPython)
 
 ```python
-from inzingaflow import InzingaFlowSolver, EPSRunner
-from inzingaflow.geochemistry import full_water_chemistry
+from nzingaflow import NzingaFlowSolver, EPSRunner
+from nzingaflow.geochemistry import full_water_chemistry
 
 geo = full_water_chemistry()
-solver = InzingaFlowSolver("network.inp", n_species=6, geochem=geo)
+solver = NzingaFlowSolver("network.inp", n_species=6, geochem=geo)
 runner = EPSRunner(solver, qual_dt=10.0, hyd_dt=300.0, duration=86400.0)
 
 # Species: [Cl2, pH, Alk, Ca, Fe, Mn]
@@ -150,25 +175,27 @@ results = runner.run(
 Each time step `dt`, the solver executes the following phases:
 
 ```
-1. Decay          C *= exp(-(k_bulk + k_wall_vol) * dt)   [combined decay_pipe table]
-2. Advection      x += v[pipe] * dt
-3. Exit detection x >= L[pipe]  →  segment leaves pipe
-4. Node mixing    flow-weighted  →  node_C (n_nodes × n_species)
-5. Tank model     CSTR implicit Euler  →  node_C updated
-6. Splitting      segment reaches junction  →  split proportionally by flow
-7. Merging        adjacent segs with |ΔC| < tol  →  merged
+1. Combined decay  C *= combined_exp[pipe]   where combined_exp[p,s] = exp(-(k_bulk[s] + k_wall_vol[p,s]) * dt)
+2. Advection       x += v[pipe] * dt
+3. Exit detection  x >= L[pipe]  →  segment leaves pipe
+4. Node mixing     flow-weighted  →  node_C (n_nodes × n_species)
+5. Tank model      CSTR implicit Euler  →  node_C updated
+6. Pipe routing    vectorized: through-nodes updated in one pass; splits in small loop
+7. Merging         adjacent segs with |ΔC| < tol  →  merged (every merge_interval steps)
 ```
+
+Steps 1–4 are executed by Numba JIT kernels when Numba is installed, with no intermediate array allocations.
 
 ### Module Overview
 
 | Module | Class / Function | Responsibility |
 |---|---|---|
-| `solver.py` | `InzingaFlowSolver` | Full LTA solver; integrates all components |
+| `solver.py` | `NzingaFlowSolver` | Full LTA solver; integrates all components |
 | `eps.py` | `EPSRunner` | EPS time loop, injection, progress reporting |
 | `hydraulics.py` | `HydraulicModel` | EPANET coupling via epynet |
-| `segments.py` | `SegmentStore` | Structure-of-Arrays storage |
-| `lta.py` | `advect`, `node_mixing_multi`, … | Vectorized core calculations |
-| `merging.py` | `merge_segments` | Parallel-reduction segment merging |
+| `segments.py` | `SegmentStore` | Structure-of-Arrays storage + CSR pipe-index |
+| `lta.py` | `combined_decay_multi`, `advect`, … | Vectorized core calculations with Numba JIT |
+| `merging.py` | `merge_segments` | Parallel-reduction segment merging with Numba JIT |
 | `stability.py` | `recommended_dt`, `MassBalanceTracker` | CFL check and mass balance |
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython integration |
 
@@ -182,16 +209,16 @@ volume [float64, capacity]          segment volume [m³]
 n                                   number of active segments
 ```
 
-Pre-allocation avoids heap allocations during the simulation. Capacity overflow triggers automatic doubling.
+Pre-allocation avoids heap allocations during the simulation. Capacity overflow triggers automatic doubling with an `on_resize` callback that keeps all solver buffers in sync. A lazy CSR pipe-index (`build_csr()`) caches the sorted-by-pipe order used by `merge_segments`; the sort is skipped when the index is still valid.
 
 ---
 
 ## API Reference
 
-### InzingaFlowSolver
+### NzingaFlowSolver
 
 ```python
-InzingaFlowSolver(
+NzingaFlowSolver(
     inp_path:   str,
     n_species:  int   = 1,
     capacity:   int   = 200_000,
@@ -221,7 +248,8 @@ InzingaFlowSolver(
 | Method | Return type | Description |
 |---|---|---|
 | `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Execute one water quality time step |
-| `update_hydraulics(simtime=0)` | `None` | Recompute hydraulics; detects flow reversals automatically |
+| `update_hydraulics(simtime=0)` | `None` | Recompute hydraulics; detects flow reversals and rebuilds routing caches |
+| `warmup_numba()` | `None` | Trigger Numba JIT compilation before the simulation (call once after init) |
 | `inject(node_uid, C_vector, volume)` | `None` | Inject from a node, distributed proportionally over outgoing pipes |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Inject directly into a pipe at position `x` [m] |
 | `booster_inject(node_uid, C_set, flow_frac=1.0)` | `None` | Fix concentration at a set value on outgoing pipes |
@@ -250,7 +278,7 @@ InzingaFlowSolver(
 
 ```python
 EPSRunner(
-    solver:   InzingaFlowSolver,
+    solver:   NzingaFlowSolver,
     qual_dt:  float,   # water quality time step [s]
     hyd_dt:   float,   # hydraulic update interval [s]
     duration: float,   # total simulation duration [s]
@@ -286,7 +314,7 @@ inject_schedule = {
 **`inject_fn` callback**
 
 ```python
-def my_injection(t: float, solver: InzingaFlowSolver):
+def my_injection(t: float, solver: NzingaFlowSolver):
     if t < 1800:
         solver.inject("R1", [1.0], volume=0.05)
 
@@ -305,7 +333,7 @@ t_hours = runner.time_axis(unit="h")   # "s", "min", or "h"
 
 ### HydraulicModel
 
-Low-level EPANET coupling via epynet. Normally instantiated internally by `InzingaFlowSolver`.
+Low-level EPANET coupling via epynet. Normally instantiated internally by `NzingaFlowSolver`.
 
 ```python
 HydraulicModel(inp_path: str, include_pumps: bool = False)
@@ -338,37 +366,46 @@ SegmentStore(capacity: int = 100_000, n_species: int = 1)
 | `n` | `int` — number of active segments |
 | `add(pipe, x, volume, C_vector)` | Add a segment; auto-resize on capacity overflow |
 | `remove(indices)` | Remove via swap-with-last in O(1) |
+| `build_csr(n_pipes)` | Build or return cached CSR pipe-index `(pipe_order, pipe_ptr)` |
 | `pipe_a`, `x_a`, `C_a`, `volume_a` | Properties returning views `[:n]` |
+| `on_resize` | Callback `(new_capacity) → None`; called when capacity doubles |
 
 ---
 
 ### LTA Core Functions
 
-All functions in `lta.py` are fully vectorized with NumPy.
+All functions in `lta.py` are fully vectorized with NumPy and JIT-compiled with Numba when available.
 
 ```python
-from inzingaflow.lta import (
-    bulk_first_order_multi,
-    wall_first_order_multi,
-    combined_decay_factors,
-    apply_combined_decay,
+from nzingaflow.lta import (
+    combined_decay_multi,   # bulk + wall decay fused in one pass  ← use this
+    build_combined_exp,     # pre-compute combined decay factors
+    bulk_first_order_multi, # bulk decay only
+    wall_first_order_multi, # wall decay only
     compute_wall_k,
     advect,
+    exit_detect,
     node_mixing_multi,
     tank_step_implicit,
+    warmup_numba,           # trigger JIT compilation
+    USE_NUMBA,              # True if Numba is available
 )
 ```
 
 | Function | Signature | Description |
 |---|---|---|
-| `bulk_first_order_multi` | `(C, k_vec, dt) → None` | `C *= exp(-k_vec * dt)` in-place; broadcasts over all segments |
-| `wall_first_order_multi` | `(C, pipe, k_wall, dt) → None` | Wall decay per segment in-place |
-| `combined_decay_factors` | `(k_bulk, k_wall_vol, dt, n_pipes) → (n_pipes, n_species)` | Combined decay factors — computed once per hydraulic update |
-| `apply_combined_decay` | `(C, pipe, decay_pipe) → None` | `C *= decay_pipe[pipe]` in-place |
+| `build_combined_exp` | `(k_bulk, k_wall_vol, dt, n_pipes) → (n_pipes, n_species)` | Pre-compute `exp(-(k_bulk + k_wall_vol) * dt)`; call once per hydraulic update or dt change |
+| `combined_decay_multi` | `(C, pipe, combined_exp, n=None) → None` | `C *= combined_exp[pipe]` in-place; one memory pass for both bulk and wall decay |
+| `bulk_first_order_multi` | `(C, k_vec, dt, n=None) → None` | `C *= exp(-k_vec * dt)` in-place; broadcasts over all segments |
+| `wall_first_order_multi` | `(C, pipe, k_wall, dt, n=None) → None` | Wall decay per segment in-place |
 | `compute_wall_k` | `(diam, velocity, k_w, D_mol, nu) → (n_pipes, n_species) [1/s]` | Volumetric wall reaction rate via two-film model |
-| `advect` | `(x, pipe, velocity, dt) → None` | `x += velocity[pipe] * dt` in-place |
-| `node_mixing_multi` | `(exit_mask, pipe, C, flow, pipe_end, node_count) → (node_count, n_species)` | Flow-weighted mixing via `bincount` |
+| `advect` | `(x, pipe, velocity, dt, n=None) → None` | `x += velocity[pipe] * dt` in-place |
+| `exit_detect` | `(x, pipe, pipe_length, exit_mask, n=None) → int` | Fill `exit_mask` in-place; returns number of exiting segments |
+| `node_mixing_multi` | `(exit_mask, pipe, C, flow, pipe_end, node_count, out=None, wC_buf=None, node_flow_buf=None, n=None) → ndarray` | Flow-weighted mixing; zero allocations when pre-allocated buffers are provided |
 | `tank_step_implicit` | `(C_tank, Q_in, C_in, Q_out, V_tank, k_b, dt) → None` | CSTR implicit Euler in-place |
+| `warmup_numba` | `(n_species=1) → None` | Trigger JIT compilation; call once after creating the solver |
+
+> **Performance tip:** use `combined_decay_multi` together with `build_combined_exp` instead of separate `bulk_first_order_multi` + `wall_first_order_multi` calls. This halves the number of memory passes over `C` and eliminates the per-step `exp()` computation.
 
 ---
 
@@ -376,7 +413,7 @@ from inzingaflow.lta import (
 
 PhreeqPython integration that replaces first-order bulk decay with full PHREEQC geochemistry.
 
-> Requires: `pip install phreeqpython`
+> Requires: `pip install nzingaflow[geochem]` or `pip install phreeqpython`
 
 #### SpeciesMap
 
@@ -419,7 +456,7 @@ GeochemSolver(
 
 | Method | Description |
 |---|---|
-| `apply_geochemistry(store, dt, pipe_diam=None, pipe_vel=None)` | Replaces `bulk_first_order_multi()`; runs PHREEQC reactions per segment in batches |
+| `apply_geochemistry(store, dt, pipe_diam=None, pipe_vel=None)` | Replaces `combined_decay_multi()`; runs PHREEQC reactions per segment in batches |
 | `apply_mixing(node_C, node_flow, dt)` | Chemical equilibrium after node mixing (pH correction) |
 | `make_injection_solution(C_vector)` | Convert a concentration vector to a PHREEQC solution dict |
 | `langelier_index(C_vec)` | Langelier Saturation Index for CaCO₃ (> 0 = scaling, < 0 = corrosive) |
@@ -429,7 +466,7 @@ GeochemSolver(
 #### Pre-configured recipes
 
 ```python
-from inzingaflow.geochemistry import chlorine_decay_geochem, full_water_chemistry
+from nzingaflow.geochemistry import chlorine_decay_geochem, full_water_chemistry
 
 # Chlorine + pH (n_species=2)
 geo = chlorine_decay_geochem(k_bulk_per_day=0.5)
@@ -443,7 +480,7 @@ geo = full_water_chemistry()
 ### Stability Functions
 
 ```python
-from inzingaflow import recommended_dt, check_dt
+from nzingaflow import recommended_dt, check_dt
 ```
 
 #### `recommended_dt()`
@@ -483,7 +520,7 @@ report = solver.check_stability(dt=5.0, decay_k=np.array([0.001]))
 Enable with `track_mass=True`:
 
 ```python
-solver = InzingaFlowSolver("network.inp", n_species=1, track_mass=True)
+solver = NzingaFlowSolver("network.inp", n_species=1, track_mass=True)
 # ... run simulation ...
 mb = solver.mass_balance()
 # {
@@ -502,25 +539,46 @@ mb = solver.mass_balance()
 ### `merge_segments()`
 
 ```python
-from inzingaflow import merge_segments
+from nzingaflow import merge_segments
 
 n_removed = merge_segments(
     store,               # SegmentStore
     tol=1e-6,            # concentration tolerance [mg/L]
     min_volume=1e-12,    # segments smaller than this are always removed [m³]
+    n_pipes=0,           # pipe count for CSR index (0 = auto-detect)
 )
 ```
 
-Algorithm: iterative parallel reduction (O(n log n)); fully vectorized. Called automatically by the solver every `merge_interval` steps.
+Algorithm: iterative parallel reduction (O(n log n)); Numba JIT kernels with early-exit candidate detection. Called automatically by the solver every `merge_interval` steps.
 
 ---
 
 ## Advanced Usage
 
+### Numba warmup
+
+```python
+solver = NzingaFlowSolver("network.inp", n_species=2)
+solver.warmup_numba()   # ~1 s once; subsequent steps are fast
+
+runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
+results = runner.run(decay_k=np.array([0.001, 0.0]))
+```
+
+Or use the standalone function:
+
+```python
+from nzingaflow import warmup_numba, warmup_numba_merging, USE_NUMBA
+
+print(f"Numba available: {USE_NUMBA}")
+warmup_numba(n_species=2)
+warmup_numba_merging(n_species=2)
+```
+
 ### Time-varying injection with a callback
 
 ```python
-def injection(t: float, solver: InzingaFlowSolver):
+def injection(t: float, solver: NzingaFlowSolver):
     """Inject only when flow at R1 exceeds 10 L/s."""
     flow, _ = solver._get_hydraulics()
     out_pipes = solver._node_outpipes[solver.node_index["R1"]]
@@ -548,7 +606,7 @@ results = runner.run(
 ### Determining the recommended time step
 
 ```python
-solver = InzingaFlowSolver("network.inp", n_species=1)
+solver = NzingaFlowSolver("network.inp", n_species=1)
 dt_opt = solver.recommended_dt(decay_k=np.array([0.001]))
 print(f"Recommended time step: {dt_opt:.1f} s")
 
@@ -570,7 +628,7 @@ for mineral, si in report['saturation_indices'].items():
 ### Mass balance verification
 
 ```python
-solver = InzingaFlowSolver("network.inp", n_species=1, track_mass=True)
+solver = NzingaFlowSolver("network.inp", n_species=1, track_mass=True)
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=3600.0)
 results = runner.run(
     decay_k=np.array([0.001]),
@@ -596,11 +654,29 @@ solver.inject_pipe(
 )
 ```
 
+### Low-level: using combined decay directly
+
+```python
+from nzingaflow.lta import build_combined_exp, combined_decay_multi
+
+# Build once per hydraulic update (or when dt changes)
+cexp = build_combined_exp(
+    k_bulk=np.array([0.001, 0.0]),
+    k_wall_vol=solver._k_wall_vol,   # (n_pipes, n_species) [1/s]
+    dt=5.0,
+    n_pipes=len(solver.pipe_ids),
+)
+
+# Apply every time step — one memory pass, no exp() call
+combined_decay_multi(solver.segments.C, solver.segments.pipe, cexp,
+                     n=solver.segments.n)
+```
+
 ---
 
 ## Wall Reactions
 
-InzingaFlow implements the two-film model from Rossman (1994):
+NzingaFlow implements the two-film model from Rossman (1994):
 
 ```
 Re    = v · D / ν
@@ -624,7 +700,7 @@ k_wall = np.zeros((n_pipes, 1))
 k_wall[0:20] = 1e-5   # cast iron
 k_wall[20:]  = 2e-6   # PVC
 
-solver = InzingaFlowSolver("network.inp", n_species=1, k_wall=k_wall)
+solver = NzingaFlowSolver("network.inp", n_species=1, k_wall=k_wall)
 ```
 
 > `k_wall = 0` disables wall reactions regardless of flow velocity.
@@ -642,6 +718,12 @@ Use `solver.recommended_dt()` to compute the optimal time step and pass it as `q
 - The time step is too large (CFL violation)
 - Wall reactions are active — the mass balance estimate is an approximation for wall decay
 - Geochemistry is active: non-linear reactions are not tracked by the linear mass balance
+
+**Q: How do I get the best performance?**
+
+1. Install Numba: `pip install nzingaflow[numba]`
+2. Call `solver.warmup_numba()` once after creating the solver, before the simulation loop
+3. Use `combined_decay_multi` + `build_combined_exp` instead of separate bulk/wall calls (done automatically by the solver)
 
 **Q: How do I add a new PHREEQC element?**
 
@@ -675,6 +757,7 @@ Pumps are excluded by default (`include_pumps=False`). You can include them via 
 |---|---|
 | **CFL** | Courant-Friedrichs-Lewy condition: stability requirement `dt ≤ L/v` for advection |
 | **CSTR** | Continuously Stirred Tank Reactor: perfect mixing tank model |
+| **CSR** | Compressed Sparse Row: index format used by `SegmentStore.build_csr()` to cache per-pipe segment order |
 | **EPS** | Extended Period Simulation: time-varying simulation with periodically updated hydraulics |
 | **LTA** | Lagrangian Transport Approach: transport described in the reference frame of the fluid |
 | **LSI** | Langelier Saturation Index: measure of CaCO₃ saturation in water |
@@ -682,7 +765,7 @@ Pumps are excluded by default (`include_pumps=False`). You can include them via 
 | **SoA** | Structure of Arrays: memory layout where each property occupies a separate array |
 | **`k_bulk`** | Bulk decay constant [1/s]: first-order decay in the water column |
 | **`k_wall`** | Wall reaction rate [m/s]: chemical reaction at the inner pipe surface |
-| **`decay_pipe`** | Combined decay factor table `(n_pipes × n_species)` = `exp(-(k_bulk + k_wall_vol) × dt)` |
+| **`combined_exp`** | Combined decay factor table `(n_pipes × n_species)` = `exp(-(k_bulk + k_wall_vol) × dt)`; pre-computed by `build_combined_exp()` |
 | **segment** | Lagrangian fluid parcel with fixed volume, position, and concentration vector |
 
 ---
@@ -697,3 +780,11 @@ Pumps are excluded by default (`include_pumps=False`). You can include them via 
 - MassBalanceTracker, CFL stability check
 - Parallel-reduction segment merging (O(n log n))
 - Flow reversal detection and segment mirroring
+- Numba JIT kernels for all hot-path operations (~4–5× speedup)
+- Combined bulk + wall decay in one memory pass (`combined_decay_multi` / `build_combined_exp`)
+- Vectorized junction routing via `_node_type` / `_node_out0` cache (~734× vs Python loop)
+- CSR pipe-index in `SegmentStore` (cached lexsort for `merge_segments`)
+- Pre-allocated solver buffers; zero heap allocations in hot path
+- `exit_detect()` as explicit pre-allocated function
+- `warmup_numba()` / `warmup_numba_merging()` for predictable startup latency
+- `on_resize` callback on `SegmentStore` to keep external buffers in sync
