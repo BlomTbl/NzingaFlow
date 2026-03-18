@@ -1,4 +1,4 @@
-# inzingaflow/eps.py
+# nzingaflow/eps.py
 from __future__ import annotations
 import numpy as np
 from typing import Callable
@@ -6,7 +6,7 @@ from typing import Callable
 
 class EPSRunner:
     """
-    Extended Period Simulation (EPS) runner voor inzingaflow.
+    Extended Period Simulation (EPS) runner voor nzingaflow.
 
     Kenmerken
     ---------
@@ -175,6 +175,7 @@ class EPSRunner:
                 if vol_total > 0:
                     C_arr = np.asarray(C_vec, dtype=np.float64)
                     self.solver.inject(node_uid, C_arr, vol_total)
+                # vol_total == 0: geen debiet op dit tijdstip, injectie overgeslagen
 
     def time_axis(self, unit: str = 's') -> np.ndarray:
         """Tijdas van simulatieresultaten. unit: 's', 'min' of 'h'."""
