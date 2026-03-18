@@ -1,6 +1,6 @@
-# inzingaflow/hydraulics.py
+# nzingaflow/hydraulics.py
 """
-Koppeling tussen epynet (EPANET via Python) en InzingaFlow.
+Koppeling tussen epynet (EPANET via Python) en NzingaFlow.
 
 Wijzigingen t.o.v. vorige versie
 ──────────────────────────────────
@@ -83,7 +83,7 @@ _FT_S_TO_M_S = 0.3048
 
 class HydraulicModel:
     """
-    Koppeling tussen epynet (EPANET via Python) en InzingaFlow.
+    Koppeling tussen epynet (EPANET via Python) en NzingaFlow.
 
     Verantwoordelijkheden
     ──────────────────────
@@ -325,10 +325,18 @@ class HydraulicModel:
         """
         Converteer flow-array naar m³/s.
 
-        Behouden voor achterwaartse compatibiliteit met solver.py.
-        Gebruik bij voorkeur get_hydraulic_state() voor gecombineerde
-        flow + velocity conversie.
+        .. deprecated::
+            Niet meer gebruikt binnen HydraulicModel. Gebruik get_hydraulic_state()
+            voor gecombineerde flow + velocity conversie. Deze methode wordt in een
+            toekomstige versie verwijderd.
         """
+        import warnings
+        warnings.warn(
+            "HydraulicModel._to_cms() is deprecated en wordt in een toekomstige "
+            "versie verwijderd. Gebruik get_hydraulic_state() als alternatief.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return flow * _FLOW_TO_CMS.get(units.upper(), 1.0 / 3600.0)
 
     # ═══════════════════════════════════════════════════════════════════════════
