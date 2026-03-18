@@ -1,6 +1,6 @@
-# inzingaflow/solver.py
+# nzingaflow/solver.py
 """
-InzingaFlowSolver: volledige LTA-solver gekoppeld aan EPANET via epynet.
+NzingaFlowSolver: volledige LTA-solver gekoppeld aan EPANET via epynet.
 
 Nieuw in deze versie
 ---------------------
@@ -8,7 +8,7 @@ Nieuw in deze versie
 - Tank-knoopmodel (CSTR, impliciet Euler)
 - Automatische CFL-tijdstapcontrole
 - Massabalansregistratie via MassBalanceTracker
-- Pipe-wise parallel segment management via numpy argsort-partitioning
+- Pipe-overgang via vectorized routing (node_type/node_out0 cache)
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from collections import defaultdict
 import numpy as np
 
 
-class InzingaFlowSolver:
+class NzingaFlowSolver:
     """
     Vectorized Lagrangian Transport Approach solver voor EPANET-netwerken.
 
@@ -33,7 +33,7 @@ class InzingaFlowSolver:
 
     Gebruik
     -------
-        solver = InzingaFlowSolver(
+        solver = NzingaFlowSolver(
             "netwerk.inp",
             n_species=2,
             k_wall=np.array([[1e-5, 0.0]] * n_pipes),  # [m/s] per pipe per stof
@@ -107,6 +107,19 @@ class InzingaFlowSolver:
         for p, s in enumerate(self.pipe_start):
             self._node_outpipes[int(s)].append(p)
 
+        # Cache van in/out leidingen per tank — herbouwd bij update_hydraulics()
+        self._tank_in_pipes:  list[np.ndarray] = []   # per tank: array van inkomende pipe-indices
+        self._tank_out_pipes: list[np.ndarray] = []   # per tank: array van uitgaande pipe-indices
+        self._rebuild_tank_pipe_cache()
+
+        # Per-knoop exit-routing caches (herbouwd bij update_hydraulics)
+        # _node_type[nd]  : 0=eindknoop, 1=doorgaand, >=2=splitsing
+        # _node_out0[nd]  : index van eerste (hoogste-debiet) uitgangsleiding
+        # Hiermee wordt het dominante pad in _handle_exits volledig vectorized.
+        self._node_type: np.ndarray | None = None   # (node_count,) int32
+        self._node_out0: np.ndarray | None = None   # (node_count,) int32
+        self._rebuild_node_routing_cache()
+
         # Wandreacties
         self._k_wall_ms  = None    # (n_pipes, n_species) [m/s], None = geen
         self._k_wall_vol = None    # (n_pipes, n_species) [1/s], berekend bij solve
@@ -114,27 +127,16 @@ class InzingaFlowSolver:
             self._k_wall_ms = self._broadcast_kwall(np.asarray(k_wall, dtype=float),
                                                      n_pipes, n_species)
 
+        # Gecombineerde decay-factoren: exp(-(k_bulk + k_wall) * dt)
+        # Gecached per (n_pipes, n_species); herbouwd bij nieuwe dt of hydraulica.
+        self._combined_exp: np.ndarray | None = None
+        self._combined_exp_dt: float = -1.0   # dt waarvoor gecached
+
         # Hydraulica-cache
         self._flow:     np.ndarray | None = None
         self._velocity: np.ndarray | None = None
         self._reversed: np.ndarray | None = None   # (n_pipes,) bool — flow reversal per leiding
         self._update_kwall_vol()   # bereken initiële k_wall_vol
-
-        # Gecombineerde vervalfactor-tabel — eenmalig per hyd-update + dt.
-        # decay_pipe[p, s] = exp(-(k_bulk[s] + k_wall_vol[p, s]) * dt)
-        # Wordt ingevuld door _update_decay_pipe() vanuit step() of expliciet.
-        self._decay_pipe:     np.ndarray | None = None
-        self._decay_pipe_dt:  float             = -1.0   # dt waarvoor tabel geldig is
-        self._decay_pipe_k:   np.ndarray | None = None   # k_bulk waarvoor tabel geldig is
-
-        # Precomputed exit-routing arrays — geïnvalideerd na _apply_flow_reversal().
-        # first_out[node]   : eerste uitgaande leiding-index (-1 als eindknoop)
-        # out_degree[node]  : aantal uitgaande leidingen (0 = eindknoop)
-        # Worden bijgehouden zodat de deg==1-case in _handle_exits volledig
-        # vectorized kan worden zonder dict-lookup per segment.
-        self._first_out:   np.ndarray | None = None   # (node_count,) int32
-        self._out_degree:  np.ndarray | None = None   # (node_count,) int32
-        self._update_exit_routing()
 
         # Massabalans
         self._track_mass = track_mass
@@ -144,6 +146,44 @@ class InzingaFlowSolver:
         self._geochem    = geochem   # GeochemSolver of None
 
         self._step_counter = 0
+        self._last_dt: float = 1.0   # bijgehouden per step()-aanroep; gebruikt door booster_inject()
+
+        # ── Pre-allocatie van herbruikbare werkbuffers ────────────────────────
+        # Doel: geen heap-allocaties meer in de hot-path (step() per tijdstap).
+        # Alle buffers worden aangemaakt op basis van de maximale verwachte grootte;
+        # ze worden in-place overschreven zonder nieuwe array-objecten aan te maken.
+        nc = self.node_count
+        self._buf_node_C    = np.zeros((nc, n_species), dtype=np.float64)  # node_mixing uitvoer
+        self._buf_node_flow = np.zeros(nc,              dtype=np.float64)  # debiet per knoop (geochem)
+        self._buf_exit_C    = np.zeros((capacity, n_species), dtype=np.float64)  # geëxiteerde concentraties
+        self._buf_exit_V    = np.zeros(capacity,              dtype=np.float64)  # geëxiteerde volumes
+        self._buf_n_exit    = 0   # aantal geldig gevulde rijen in _buf_exit_*
+        self._buf_wC        = np.zeros((capacity, n_species), dtype=np.float64)  # gewogen massa in node_mixing
+        self._buf_exit_mask = np.zeros(capacity, dtype=np.bool_)                  # exit-detectie resultaat
+        # Tank-buffers (klein; n_tanks typisch < 10)
+        n_tanks = len(self._tank_nodes)
+        self._buf_Q_in  = np.zeros(max(n_tanks, 1), dtype=np.float64)
+        self._buf_Q_out = np.zeros(max(n_tanks, 1), dtype=np.float64)
+        self._buf_C_in  = np.zeros((max(n_tanks, 1), n_species), dtype=np.float64)
+
+        # Koppel resize-callback: als SegmentStore zijn capaciteit verdubbelt,
+        # schalen de exit-buffers mee zodat ze nooit te klein zijn.
+        self.segments.on_resize = self._on_store_resize
+
+    # ── Numba JIT warmup ──────────────────────────────────────────────────────
+
+    def warmup_numba(self) -> None:
+        """
+        Trigger Numba JIT-compilatie vóór de eerste simulatiestap.
+
+        Roep eenmalig aan na het aanmaken van de solver (~0.5-2 s eenmalig).
+        Daarna start elke tijdstap zonder compilatie-overhead.
+        Doet niets als Numba niet geïnstalleerd is.
+        """
+        from .lta     import warmup_numba as _warmup
+        from .merging import warmup_numba_merging as _warmup_merge
+        _warmup(self.n_species)
+        _warmup_merge(self.n_species)
 
     # ── Hydraulica ────────────────────────────────────────────────────────────
 
@@ -160,9 +200,12 @@ class InzingaFlowSolver:
         self._reversed = None
         self._apply_flow_reversal()
         self._update_kwall_vol()
+        self._combined_exp_dt = -1.0   # invalideer na hydraulica-update
         # Tankvolumes kunnen veranderen tijdens EPS (peil varieert)
         if len(self._tank_nodes) > 0:
             self._tank_V = self._get_tank_volumes()
+            self._rebuild_tank_pipe_cache()
+        self._rebuild_node_routing_cache()
 
     def _apply_flow_reversal(self) -> None:
         """
@@ -203,19 +246,15 @@ class InzingaFlowSolver:
         # Correctie: x_new = pipe_length - x_old  voor elk segment in een omgekeerde leiding.
         n = self.segments.n
         if n > 0 and reversed_mask.any():
-            seg_pipe = self.segments.pipe[:n]
-            for pipe_idx in np.where(reversed_mask)[0]:
-                in_pipe = seg_pipe == pipe_idx
-                if in_pipe.any():
-                    L = self.pipe_length[pipe_idx]
-                    self.segments.x[:n][in_pipe] = L - self.segments.x[:n][in_pipe]
-                    # Klamp negatieve waarden (numerieke ruis) op 0
-                    np.clip(self.segments.x[:n], 0.0, None,
-                            out=self.segments.x[:n])
-
-        # Invalideer precomputed exit-routing en decay-tabel
-        self._update_exit_routing()
-        self._decay_pipe = None
+            seg_pipe   = self.segments.pipe[:n]
+            rev_pipes  = np.where(reversed_mask)[0]
+            in_rev     = np.isin(seg_pipe, rev_pipes)
+            if in_rev.any():
+                L_seg = self.pipe_length[seg_pipe[in_rev]]
+                self.segments.x[:n][in_rev] = L_seg - self.segments.x[:n][in_rev]
+                # Klamp negatieve waarden (numerieke ruis) op 0
+                np.clip(self.segments.x[:n], 0.0, None,
+                        out=self.segments.x[:n])
 
     def _get_hydraulics(self) -> tuple:
         if self._flow is None:
@@ -233,63 +272,6 @@ class InzingaFlowSolver:
         self._k_wall_vol = compute_wall_k(
             diam, vel, self._k_wall_ms, self._D_mol, self._nu
         )
-        # Invalideer decay_pipe zodat hij bij de volgende step() wordt herbouwd
-        self._decay_pipe = None
-
-    def _update_exit_routing(self) -> None:
-        """
-        Bouw first_out- en out_degree-arrays op uit _node_outpipes.
-
-        first_out[node]  = eerste uitgaande leiding-index (-1 als eindknoop)
-        out_degree[node] = aantal uitgaande leidingen (0 = eindknoop)
-
-        Aanroepen na elke wijziging van _node_outpipes, dus na
-        _apply_flow_reversal(). Kost O(n_nodes + n_pipes) éénmalig;
-        vermijdt daarna dict-lookups in de hot loop van _handle_exits().
-        """
-        first_out  = np.full(self.node_count, -1,  dtype=np.int32)
-        out_degree = np.zeros(self.node_count,      dtype=np.int32)
-        for node, pipes in self._node_outpipes.items():
-            out_degree[node] = len(pipes)
-            if pipes:
-                first_out[node] = pipes[0]
-        self._first_out  = first_out
-        self._out_degree = out_degree
-
-    def _update_decay_pipe(self, decay_k: np.ndarray, dt: float) -> np.ndarray:
-        """
-        Geef gecombineerde vervalfactor-tabel terug; herbouw alleen indien nodig.
-
-        De tabel is geldig zolang dt, decay_k én de hydraulica niet veranderen.
-        Na update_hydraulics() wordt _decay_pipe op None gezet, zodat hij hier
-        automatisch wordt herbouwd.
-
-        Parameters
-        ----------
-        decay_k : (n_species,) bulkvervalconstanten [1/s]
-        dt      : tijdstap [s]
-
-        Returns
-        -------
-        decay_pipe : (n_pipes, n_species)
-        """
-        from .lta import combined_decay_factors
-        n_pipes = len(self.pipe_ids)
-
-        # Herbouw als tabel ontbreekt, dt gewijzigd, of k_bulk gewijzigd
-        if (
-            self._decay_pipe is None
-            or self._decay_pipe_dt  != dt
-            or self._decay_pipe_k   is None
-            or not np.array_equal(self._decay_pipe_k, decay_k)
-        ):
-            self._decay_pipe    = combined_decay_factors(
-                decay_k, self._k_wall_vol, dt, n_pipes
-            )
-            self._decay_pipe_dt = dt
-            self._decay_pipe_k  = decay_k.copy()
-
-        return self._decay_pipe
 
     # ── Tijdstap-stabiliteitscontrole ─────────────────────────────────────────
 
@@ -448,8 +430,11 @@ class InzingaFlowSolver:
                     self.segments.C[np.ix_(rows, cols)] = C_set[active]
                     continue
 
-            # Geen bestaand segment: maak nieuw segment aan
-            vol = max(flow[pipe_idx], 1e-6)   # symbolisch volume [m³/s als proxy]
+            # Geen bestaand segment: maak nieuw segment aan.
+            # Volume = flow [m³/s] × tijdstap [s] → correcte eenheid [m³].
+            # _last_dt wordt bijgehouden door step(); vóór de eerste step()-aanroep
+            # is _last_dt=1.0 (conservatieve standaard).
+            vol = max(flow[pipe_idx] * self._last_dt, 1e-9)
             C_new = np.zeros(self.n_species, dtype=np.float64)
             C_new[active] = C_set[active]
             self.segments.add(pipe=pipe_idx, x=0.0, volume=vol, C_vector=C_new)
@@ -495,13 +480,15 @@ class InzingaFlowSolver:
         node_C : (node_count, n_species)
         """
         from .lta     import (bulk_first_order_multi, wall_first_order_multi,
-                             apply_combined_decay,
-                             advect, node_mixing_multi, tank_step_implicit)
+                             combined_decay_multi, build_combined_exp,
+                             advect, exit_detect, node_mixing_multi,
+                             tank_step_implicit)
         from .merging import merge_segments
 
         flow, velocity = self._get_hydraulics()
         decay_k = np.asarray(decay_k, dtype=np.float64)
         n = self.segments.n
+        self._last_dt = float(dt)   # bewaar voor gebruik in booster_inject()
 
         if check_cfl:
             self.check_stability(dt, decay_k, warn=True)
@@ -509,7 +496,9 @@ class InzingaFlowSolver:
         if n == 0:
             return np.zeros((self.node_count, self.n_species), dtype=np.float64)
 
-        # 1. Bulk + wandverval — via GeochemSolver of gecombineerde decay_pipe
+        # 1+2. Bulk + wandverval gecombineerd in één pass
+        # combined_exp[p,s] = exp(-(k_bulk[s] + k_wall[p,s]) * dt)
+        # Gecached; alleen herbouwd als dt of hydraulica verandert.
         if self._geochem is not None:
             pipe_diam = np.sqrt(4 * self.pipe_area / np.pi)
             _, velocity = self._get_hydraulics()
@@ -519,25 +508,36 @@ class InzingaFlowSolver:
                 pipe_vel=velocity,
             )
         else:
-            # Gecombineerde tabel: één fancy-index + in-place multiply
-            # i.p.v. twee losse exp()-aanroepen op (n, n_species)-arrays.
-            decay_pipe = self._update_decay_pipe(decay_k, dt)
-            apply_combined_decay(self.segments.C[:n], self.segments.pipe[:n], decay_pipe)
+            if self._combined_exp is None or self._combined_exp_dt != dt:
+                self._combined_exp    = build_combined_exp(
+                    decay_k, self._k_wall_vol, dt, len(self.pipe_ids)
+                )
+                self._combined_exp_dt = dt
+            combined_decay_multi(
+                self.segments.C, self.segments.pipe,
+                self._combined_exp, n=n,
+            )
 
         # 3. Advectie
-        advect(self.segments.x[:n], self.segments.pipe[:n], velocity, dt)
+        advect(self.segments.x, self.segments.pipe, velocity, dt, n=n)
 
-        # 4. Exit-detectie
-        exit_mask = (
-            self.segments.x[:n] >= self.pipe_length[self.segments.pipe[:n]]
+        # 4. Exit-detectie — in-place in pre-allocated buffer
+        exit_detect(
+            self.segments.x, self.segments.pipe, self.pipe_length,
+            self._buf_exit_mask, n=n,
         )
+        exit_mask = self._buf_exit_mask
 
-        # 5. Knoopmenging
+        # 5. Knoopmenging — schrijf in pre-allocated buffer, geen nieuwe array
         node_C = node_mixing_multi(
             exit_mask,
-            self.segments.pipe[:n],
-            self.segments.C[:n],
+            self.segments.pipe,
+            self.segments.C,
             flow, self.pipe_end, self.node_count,
+            out=self._buf_node_C,
+            wC_buf=self._buf_wC,
+            node_flow_buf=self._buf_node_flow,
+            n=n,
         )
 
         # 5b. Geochemisch evenwicht na knoopmenging (alleen bij GeochemSolver).
@@ -548,8 +548,9 @@ class InzingaFlowSolver:
         # apply_mixing() corrigeert dit in-place voor knopen met debiet > 0,
         # analoog aan Victoria's pp.mix_solutions() bij elke uitvraag.
         if self._geochem is not None:
-            # Totaal inkomend debiet per knoop als gewichtsmaatstaf
-            node_flow = np.zeros(self.node_count, dtype=np.float64)
+            # Totaal inkomend debiet per knoop — gebruik pre-allocated buffer
+            node_flow = self._buf_node_flow
+            node_flow[:] = 0.0
             np.add.at(node_flow, self.pipe_end, np.abs(flow))
             self._geochem.apply_mixing(node_C, node_flow, dt)
 
@@ -563,7 +564,8 @@ class InzingaFlowSolver:
         # 8. Merging
         self._step_counter += 1
         if self._step_counter % merge_interval == 0:
-            merge_segments(self.segments, tol=merge_tol)
+            merge_segments(self.segments, tol=merge_tol,
+                          n_pipes=len(self.pipe_ids))
 
         # 9. Massabalans
         if self._tracker:
@@ -594,6 +596,34 @@ class InzingaFlowSolver:
             dtype=np.int32,
         )
 
+    def _on_store_resize(self, new_capacity: int) -> None:
+        """
+        Wordt aangeroepen door SegmentStore._resize() als de capaciteit verdubbelt.
+        Schaalt alle exit- en werkbuffers mee zodat ze nooit te klein zijn.
+        """
+        self._buf_exit_C    = np.zeros((new_capacity, self.n_species), dtype=np.float64)
+        self._buf_exit_V    = np.zeros(new_capacity,                   dtype=np.float64)
+        self._buf_wC        = np.zeros((new_capacity, self.n_species), dtype=np.float64)
+        self._buf_exit_mask = np.zeros(new_capacity,                   dtype=np.bool_)
+
+    def _rebuild_tank_pipe_cache(self) -> None:
+        """
+        Herbouw cache van inkomende/uitgaande leidingen per tank.
+
+        Wordt aangeroepen bij __init__ en na elke update_hydraulics(), omdat
+        flow reversals de topologie (pipe_start/pipe_end) kunnen wijzigen.
+        Voorkomt O(n_tanks × n_pipes) np.where()-aanroepen per tijdstap.
+        """
+        self._tank_in_pipes  = []
+        self._tank_out_pipes = []
+        for tank_node in self._tank_nodes:
+            self._tank_in_pipes.append(
+                np.where(self.pipe_end   == tank_node)[0]
+            )
+            self._tank_out_pipes.append(
+                np.where(self.pipe_start == tank_node)[0]
+            )
+
     def _get_tank_volumes(self) -> np.ndarray:
         """Huidige tankvolumes [m³] via epynet."""
         volumes = []
@@ -614,10 +644,8 @@ class InzingaFlowSolver:
         """
         Pas CSTR-tankmodel toe en schrijf tankconcentraties naar node_C.
 
-        Voor elke tank:
-        - Q_in = debiet van alle inkomende leidingen bij de tankknoop
-        - C_in = node_C[tank_node] (resultaat van knoopmenging)
-        - Q_out = debiet van alle uitgaande leidingen
+        Gebruikt gecachede in/out pipe-lijsten per tank (zie _rebuild_tank_pipe_cache)
+        zodat geen O(n_tanks × n_pipes) np.where()-aanroepen nodig zijn per tijdstap.
         """
         from .lta import tank_step_implicit
 
@@ -625,14 +653,14 @@ class InzingaFlowSolver:
             return node_C
 
         n_tanks = len(self._tank_nodes)
-        Q_in    = np.zeros(n_tanks)
-        Q_out   = np.zeros(n_tanks)
-        C_in    = np.zeros((n_tanks, self.n_species))
+        # Gebruik pre-allocated buffers — geen nieuwe arrays per tijdstap
+        Q_in  = self._buf_Q_in[:n_tanks];  Q_in[:]  = 0.0
+        Q_out = self._buf_Q_out[:n_tanks]; Q_out[:] = 0.0
+        C_in  = self._buf_C_in[:n_tanks];  C_in[:]  = 0.0
 
         for ti, tank_node in enumerate(self._tank_nodes):
-            # Inkomende leidingen: pipe_end == tank_node
-            in_pipes  = np.where(self.pipe_end  == tank_node)[0]
-            out_pipes = np.where(self.pipe_start == tank_node)[0]
+            in_pipes  = self._tank_in_pipes[ti]
+            out_pipes = self._tank_out_pipes[ti]
             Q_in[ti]  = flow[in_pipes].sum()  if len(in_pipes)  else 0.0
             Q_out[ti] = flow[out_pipes].sum() if len(out_pipes) else 0.0
             C_in[ti]  = node_C[tank_node]
@@ -640,12 +668,36 @@ class InzingaFlowSolver:
         # CSTR update (in-place op self._tank_C) — gebruik gecachede volumes
         if len(self._tank_V) == len(self._tank_nodes):
             tank_step_implicit(self._tank_C, Q_in, C_in, Q_out, self._tank_V, decay_k, dt)
-            # Schrij tankconcentraties terug naar node_C
+            # Schrijf tankconcentraties terug naar node_C
             node_C[self._tank_nodes] = self._tank_C
 
         return node_C
 
     # ── Exit-verwerking ───────────────────────────────────────────────────────
+
+    def _rebuild_node_routing_cache(self) -> None:
+        """
+        Bouw gecachede routing-arrays per knoop.
+
+        _node_type[nd] : 0 = eindknoop, 1 = doorgaand, >=2 = splitsing
+        _node_out0[nd] : index van de uitgangsleiding met het hoogste debiet
+                         (of 0 voor eindknopen — nooit gebruikt).
+
+        Aanroepen bij __init__ en na elke update_hydraulics().
+        Maakt het dominante pad in _handle_exits (doorgaand + eindknoop)
+        volledig vectoriseerbaar zonder Python-loop.
+        """
+        nc = self.node_count
+        node_type = np.array(
+            [len(self._node_outpipes.get(i, [])) for i in range(nc)],
+            dtype=np.int32,
+        )
+        node_out0 = np.array(
+            [self._node_outpipes.get(i, [0])[0] for i in range(nc)],
+            dtype=np.int32,
+        )
+        self._node_type = node_type
+        self._node_out0 = node_out0
 
     def _handle_exits(
         self,
@@ -655,70 +707,82 @@ class InzingaFlowSolver:
         """
         Verwerk segmenten die het einde van hun leiding bereiken.
 
-        Strategie (drie gevallen op basis van out_degree van de bestemmingsknoop):
+        Strategie (drie paden, oplopend in complexiteit):
 
-        deg == 0  Eindknoop: volledig vectorized — verzamel C/V, markeer voor verwijdering.
-        deg == 1  Doorgaan:  volledig vectorized — pipe en x in-place overschreven
-                             met first_out[node] en 0.0 via fancy-index assignments.
-        deg > 1   Splitsing: kleine Python-loop (typisch < 20% van exits);
-                             nieuwe segmenten toegevoegd via SegmentStore.add().
+        1. Doorgaand (node_type == 1) — vectorized
+           Segment krijgt nieuwe pipe = node_out0[node] en x = 0.
+           Geen Python-loop, geen allocaties.
 
-        Bij een typisch 5000-knopennetwerk (80% deg-1, 2% eindknopen, 18% splits)
-        reduceert dit de Python-iteraties van n_exits naar n_splits (~5× minder).
+        2. Eindknoop (node_type == 0) — vectorized kopieer + swap-with-last
+           Concentraties/volumes naar exit-buffers; segmenten verwijderd via
+           bulk swap-with-last in één vectorized pass.
+
+        3. Splitsing (node_type >= 2) — kleine Python-loop
+           Alleen voor splitsingspunten; typisch < 5% van alle exits.
+           Segment wordt proportioneel opgesplist naar debiet.
 
         Returns
         -------
-        exited_C : concentraties van verwijderde (eindknoop) segmenten
-        exited_V : volumes van verwijderde segmenten
+        exited_C : view op _buf_exit_C[:n_exit]  (geen nieuwe array)
+        exited_V : view op _buf_exit_V[:n_exit]  (geen nieuwe array)
         """
-        if not exit_mask.any():
-            return np.empty((0, self.n_species)), np.empty(0)
+        n = self.segments.n
+        em = exit_mask[:n]
 
-        n          = self.segments.n
-        exit_idx   = np.where(exit_mask)[0]              # (n_exit,)
-        exit_pipe  = self.segments.pipe[:n][exit_mask]   # (n_exit,)
-        exit_node  = self.pipe_end[exit_pipe]             # (n_exit,)
-        deg        = self._out_degree[exit_node]          # (n_exit,)
+        if not em.any():
+            return self._buf_exit_C[:0], self._buf_exit_V[:0]
 
-        # ── Eindknopen (deg == 0): volledig vectorized ────────────────────────
-        end_mask = deg == 0
-        exited_C = np.empty((0, self.n_species))
-        exited_V = np.empty(0)
-        to_remove: list[int] = []
+        exit_idx   = np.where(em)[0]                              # (n_exit,)
+        exit_pipes = self.segments.pipe[exit_idx]                 # (n_exit,)
+        exit_nodes = self.pipe_end[exit_pipes]                    # (n_exit,)
+        nd_type    = self._node_type[exit_nodes]                  # (n_exit,)
 
-        if end_mask.any():
-            end_idx  = exit_idx[end_mask]
-            exited_C = self.segments.C[end_idx].copy()
-            exited_V = self.segments.volume[end_idx].copy()
-            to_remove = end_idx.tolist()
+        # ── 1. Doorgaand: volledig vectorized ─────────────────────────────
+        thru_sel = nd_type == 1
+        if thru_sel.any():
+            thru_idx = exit_idx[thru_sel]
+            thru_nd  = exit_nodes[thru_sel]
+            self.segments.pipe[thru_idx] = self._node_out0[thru_nd]
+            self.segments.x[thru_idx]    = 0.0
 
-        # ── Doorgaan (deg == 1): volledig vectorized ──────────────────────────
-        pass_mask = deg == 1
-        if pass_mask.any():
-            pass_idx  = exit_idx[pass_mask]
-            pass_node = exit_node[pass_mask]
-            self.segments.pipe[pass_idx] = self._first_out[pass_node]
-            self.segments.x[pass_idx]    = 0.0
+        # ── 2. Eindknopen: vectorized kopieer, dan bulk-remove ─────────────
+        end_sel = nd_type == 0
+        n_end   = int(end_sel.sum())
+        if n_end > 0:
+            end_idx = exit_idx[end_sel]
+            # Kopieer naar exit-buffers in één bulk-operatie (geen loop)
+            self._buf_exit_C[:n_end] = self.segments.C[end_idx]
+            self._buf_exit_V[:n_end] = self.segments.volume[end_idx]
+            # Verwijder via swap-with-last
+            self.segments.remove(end_idx.tolist())
 
-        # ── Splitsingen (deg > 1): Python-loop over kleine subset ─────────────
-        split_mask = deg > 1
-        if split_mask.any():
-            split_idx   = exit_idx[split_mask]
-            split_nodes = exit_node[split_mask]
+        # ── 3. Splitsingen: kleine Python-loop ────────────────────────────
+        split_sel = nd_type >= 2
+        orig_C    = np.empty(self.n_species, dtype=np.float64)
+        if split_sel.any():
+            # Herbereken exit_idx na mogelijke remove() hierboven:
+            # remove() gebruikt swap-with-last waardoor indices kunnen zijn
+            # verschoven. Herdetecteer splitsingen op basis van x >= L.
+            n2     = self.segments.n
+            em2    = self.segments.x[:n2] >= self.pipe_length[self.segments.pipe[:n2]]
+            s_idx  = np.where(em2)[0]
+            s_pipe = self.segments.pipe[s_idx]
+            s_nd   = self.pipe_end[s_pipe]
+            s_type = self._node_type[s_nd]
+            split_only = s_idx[s_type >= 2]
 
-            for seg_i, node in zip(split_idx, split_nodes):
-                out      = self._node_outpipes[int(node)]
+            for seg_i in split_only:
+                nd    = int(self.pipe_end[self.segments.pipe[seg_i]])
+                out   = self._node_outpipes.get(nd, [])
+                if not out:
+                    continue
                 out_s    = sorted(out, key=lambda p: -flow[p])
                 tot_flow = sum(flow[p] for p in out_s)
                 orig_vol = self.segments.volume[seg_i]
-                orig_C   = self.segments.C[seg_i].copy()
-
-                # Eerste tak: hergebruik het bestaande segment
+                orig_C[:]                   = self.segments.C[seg_i]
                 self.segments.pipe[seg_i]   = out_s[0]
                 self.segments.x[seg_i]      = 0.0
                 self.segments.volume[seg_i] = orig_vol * flow[out_s[0]] / tot_flow
-
-                # Overige takken: nieuwe segmenten
                 for p in out_s[1:]:
                     self.segments.add(
                         pipe=p, x=0.0,
@@ -726,11 +790,7 @@ class InzingaFlowSolver:
                         C_vector=orig_C,
                     )
 
-        # ── Verwijder eindknoop-segmenten ─────────────────────────────────────
-        if to_remove:
-            self.segments.remove(to_remove)
-
-        return exited_C, exited_V
+        return self._buf_exit_C[:n_end], self._buf_exit_V[:n_end]
 
     # ── Hulpfuncties ──────────────────────────────────────────────────────────
 
@@ -783,7 +843,7 @@ class InzingaFlowSolver:
     def __repr__(self) -> str:
         geo_str = f" geochem={self._geochem.smap.species_names}" if self._geochem else ''
         return (
-            f"<InzingaFlowSolver "
+            f"<NzingaFlowSolver "
             f"pipes={len(self.pipe_ids)} nodes={self.node_count} "
             f"n_species={self.n_species} "
             f"tanks={len(self._tank_nodes)} "
