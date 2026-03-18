@@ -1,6 +1,6 @@
-# inzingaflow/geochemistry.py
+# nzingaflow/geochemistry.py
 """
-PhreeqPython-integratie voor inzingaflow.
+PhreeqPython-integratie voor nzingaflow.
 
 Vervangt de eenvoudige eerste-orde bulkverval (bulk_first_order_multi) door
 volledige geochemische reacties per segment via PHREEQC/PhreeqPython.
@@ -24,7 +24,7 @@ Ontwerp
 - Vectorisatie: PHREEQC-oplossingen worden in bulk aangemaakt via
   pp.add_solution_simple(); de Python-loop over segmenten is onvermijdelijk
   maar wordt beperkt door segmentmerging (typisch < 5000 segs).
-- species_map koppelt InzingaFlow-stofindices aan PHREEQC-elementnamen.
+- species_map koppelt NzingaFlow-stofindices aan PHREEQC-elementnamen.
 
 Vereisten
 ---------
@@ -34,7 +34,7 @@ Gebruik
 -------
     from geochemistry import GeochemSolver, SpeciesMap
 
-    # Definieer welke InzingaFlow-stoffen overeenkomen met PHREEQC-elementen
+    # Definieer welke NzingaFlow-stoffen overeenkomen met PHREEQC-elementen
     smap = SpeciesMap(
         species_names=['Cl2', 'pH', 'Alk', 'Ca', 'Fe'],
         phreeqc_names=['Cl',  None, 'Alk', 'Ca', 'Fe'],   # None = geen PHREEQC-koppeling
@@ -70,7 +70,7 @@ from typing import Optional
 @dataclass
 class SpeciesMap:
     """
-    Koppeling tussen InzingaFlow-stofindices en PHREEQC-elementnamen.
+    Koppeling tussen NzingaFlow-stofindices en PHREEQC-elementnamen.
 
     Parameters
     ----------
@@ -104,9 +104,21 @@ class SpeciesMap:
         n = len(self.species_names)
         if not self.is_pH:
             self.is_pH = [False] * n
-        assert len(self.phreeqc_names) == n, "phreeqc_names moet zelfde lengte hebben als species_names"
-        assert len(self.units)         == n, "units moet zelfde lengte hebben als species_names"
-        assert len(self.is_pH)         == n, "is_pH moet zelfde lengte hebben als species_names"
+        if len(self.phreeqc_names) != n:
+            raise ValueError(
+                f"phreeqc_names heeft {len(self.phreeqc_names)} elementen, "
+                f"verwacht {n} (gelijk aan species_names)"
+            )
+        if len(self.units) != n:
+            raise ValueError(
+                f"units heeft {len(self.units)} elementen, "
+                f"verwacht {n} (gelijk aan species_names)"
+            )
+        if len(self.is_pH) != n:
+            raise ValueError(
+                f"is_pH heeft {len(self.is_pH)} elementen, "
+                f"verwacht {n} (gelijk aan species_names)"
+            )
 
     @property
     def n_species(self) -> int:
@@ -153,7 +165,7 @@ class GeochemSolver:
 
     Parameters
     ----------
-    species_map        : SpeciesMap — koppeling InzingaFlow ↔ PHREEQC
+    species_map        : SpeciesMap — koppeling NzingaFlow ↔ PHREEQC
     background_solution: achtergrond-watersamenstelling als dict
                          (zie DEFAULT_BACKGROUND voor formaat)
     kinetics_script    : PHREEQC KINETICS-blok als string (optioneel)
@@ -177,7 +189,7 @@ class GeochemSolver:
         geo.apply_geochemistry(store, dt=5.0)
 
         # Of via de solver (solver.py integreert dit automatisch):
-        solver = InzingaFlowSolver(..., geochem=geo)
+        solver = NzingaFlowSolver(..., geochem=geo)
     """
 
     def __init__(
@@ -479,7 +491,7 @@ class GeochemSolver:
 
     def _read_back(self, C_vec: np.ndarray, sol) -> np.ndarray:
         """
-        Lees PHREEQC-resultaten terug naar de InzingaFlow-concentratiematrix.
+        Lees PHREEQC-resultaten terug naar de NzingaFlow-concentratiematrix.
 
         Eenheden worden omgezet vanuit PHREEQC (mol/L) naar de eenheden
         in SpeciesMap.units.
@@ -609,18 +621,15 @@ def chlorine_decay_geochem(
     Voorbeeld
     ---------
         geo = chlorine_decay_geochem(k_bulk_per_day=0.5)
-        solver = InzingaFlowSolver("net.inp", n_species=2, geochem=geo)
+        solver = NzingaFlowSolver("net.inp", n_species=2, geochem=geo)
         solver.inject("R1", C_vector=[1.0, 7.5], volume=0.05)
     """
     smap = SpeciesMap(
         species_names=['Cl2_total', 'pH'],
-        phreeqc_names=['Cl',        None],   # pH wordt via is_pH gelezen
+        phreeqc_names=['Cl',        None],   # pH wordt via sol.pH gelezen, niet via sol.total()
         units        =['mg/L',      ''],
         is_pH        =[False,       True],
     )
-    # Voeg pH toe als expliciete stof die PHREEQC teruggeeft
-    smap.phreeqc_names[1] = None   # pH via sol.pH, niet via sol.total()
-    smap.is_pH[1]         = True
 
     # Eenvoudige kinetische beschrijving van chloor-verval
     # PHREEQC RATE voor chloor: dC/dt = -k * C
