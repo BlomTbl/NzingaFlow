@@ -56,7 +56,6 @@ from .lta         import (
     wall_first_order_multi,
     compute_wall_k,
     advect,
-    exit_detect,
     node_mixing_multi,
     tank_step_implicit,
 )
@@ -65,7 +64,7 @@ from .geochemistry import GeochemSolver, SpeciesMap, chlorine_decay_geochem, ful
 from .lta          import warmup_numba, USE_NUMBA, combined_decay_multi, build_combined_exp
 from .merging      import warmup_numba_merging
 
-__version__ = "1.1.0"
+__version__ = "1.0.0"
 __author__  = "NzingaFlow"
 
 __all__ = [
@@ -90,7 +89,6 @@ __all__ = [
     "wall_first_order_multi",
     "compute_wall_k",
     "advect",
-    "exit_detect",
     "node_mixing_multi",
     "tank_step_implicit",
     "merge_segments",
