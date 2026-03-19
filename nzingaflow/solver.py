@@ -45,43 +45,30 @@ class NzingaFlowSolver:
 
     def __init__(
         self,
-        inp_path:         str,
-        n_species:        int = 1,
-        capacity:         int = 200_000,
-        k_wall:           np.ndarray | None = None,
-        D_mol:            float = 1.3e-9,
-        nu:               float = 1e-6,
-        track_mass:       bool = False,
-        geochem           = None,
-        temperature:      float | None = None,
-        leakage_fraction: float = 0.0,
-        wall_mode:        str   = 'two_film',
+        inp_path:    str,
+        n_species:   int = 1,
+        capacity:    int = 200_000,
+        k_wall:      np.ndarray | None = None,   # (n_pipes, n_species) [m/s]
+        D_mol:       float = 1.3e-9,             # diffusiviteit [m²/s]
+        nu:          float = 1e-6,               # kinematische viscositeit [m²/s]
+        track_mass:  bool = False,
+        geochem      = None,                     # GeochemSolver instantie (optioneel)
     ):
         """
         Parameters
         ----------
-        inp_path          : pad naar EPANET .inp bestand
-        n_species         : aantal te simuleren stoffen
-        capacity          : initiële SegmentStore capaciteit (auto-resize)
-        k_wall            : wandreactiesnelheid [m/s]; None = geen wandreacties.
-                            shape (n_pipes, n_species) of (n_species,) voor uniform
-        D_mol             : moleculaire diffusiviteit bij 20°C [m²/s]
-        nu                : kinematische viscositeit [m²/s]
-        track_mass        : bijhouden van massabalans via MassBalanceTracker
-        geochem           : GeochemSolver instantie; vervangt eerste-orde bulkverval.
-                            Vereist: pip install phreeqpython
-        temperature       : watertemperatuur [°C]. Activeert Arrhenius/Hayduk-Laudie
-                            correctie op D_mol en k_wall (Ea_D≈17 kJ/mol, θ_w=1.047).
-                            None = geen temperatuurcorrectie (Rossman 1994-compatibel).
-        leakage_fraction  : fractie van leiding-debiet dat lekt (0.0–1.0).
-                            Elk segment verliest per tijdstap proportioneel volume
-                            zonder chemicaliënadditie (concentratie onveranderd).
-                            Typisch 0.05–0.20 voor NL-distributienetwerken.
-        wall_mode         : hoe k_wall wordt geïnterpreteerd:
-            'two_film' (standaard) — EPANET-compatibel: k_eff=k_f·k_w/(k_f+k_w).
-                Gebruik als k_wall uit EPANET-kalibratie komt.
-            'direct' — k_wall is al k_eff: k_vol=k_wall·4/D, geen filmweerstand.
-                Gebruik als k_wall al een effectieve waarde is.
+        inp_path   : pad naar EPANET .inp bestand
+        n_species  : aantal te simuleren stoffen
+        capacity   : initiële SegmentStore capaciteit (auto-resize indien vol)
+        k_wall     : wandreactiesnelheid [m/s]; None = geen wandreacties
+                     shape (n_pipes, n_species) of (n_species,) voor uniform
+        D_mol      : moleculaire diffusiviteit [m²/s] (default: chloor in water)
+        nu         : kinematische viscositeit [m²/s]
+        track_mass : bijhouden van massabalans via MassBalanceTracker
+        geochem    : GeochemSolver instantie voor geochemische reacties.
+                     Als opgegeven, vervangt dit bulk_first_order_multi() in
+                     de simulatielus. Wandreacties (k_wall) blijven apart.
+                     Vereist: pip install phreeqpython
         """
         from .hydraulics import HydraulicModel
         from .segments   import SegmentStore
@@ -103,15 +90,8 @@ class NzingaFlowSolver:
         n_pipes = len(self.pipe_ids)
         self.n_species = n_species
         self.segments  = SegmentStore(capacity, n_species)
-        self._D_mol            = D_mol
-        self._nu               = nu
-        self._temperature      = temperature          # [°C] of None
-        self._leakage_fraction = float(leakage_fraction)  # 0.0 = geen lekkage
-        if wall_mode not in ('two_film', 'direct'):
-            raise ValueError(
-                f"wall_mode moet 'two_film' of 'direct' zijn, niet {wall_mode!r}"
-            )
-        self._wall_mode = wall_mode
+        self._D_mol    = D_mol
+        self._nu       = nu
 
         # Naam → index
         self.node_index = {name: i for i, name in enumerate(self.node_names)}
@@ -282,44 +262,15 @@ class NzingaFlowSolver:
         return self._flow, self._velocity
 
     def _update_kwall_vol(self) -> None:
-        """
-        Herbereken k_wall_vol [1/s] na elke hydraulica-update.
-
-        wall_mode='two_film'  (standaard, EPANET-compatibel):
-            Twee-film serieweerstand: k_eff = k_f·k_w/(k_f+k_w)
-            k_f afhankelijk van Re via Sherwood-correlatie.
-            Gebruik als k_wall afkomstig is uit EPANET-kalibratie —
-            EPANET past intern hetzelfde model toe bij orde-1 wandreacties.
-
-        wall_mode='direct':
-            k_wall direct als k_eff: k_vol = k_wall·4/D, geen filmweerstand.
-            Gebruik als k_wall al een effectieve waarde is (bijv. teruggerekend
-            zonder twee-film model). Voorkomt dubbele filmweerstand.
-        """
+        """Herbereken k_wall_vol na elke hydraulica-update."""
         if self._k_wall_ms is None:
             self._k_wall_vol = None
             return
-
-        diam = np.sqrt(4 * self.pipe_area / np.pi)   # m
-
-        if self._wall_mode == 'direct':
-            # k_wall is al k_eff — geen filmweerstand berekenen.
-            # Optioneel: temperatuurcorrectie θ_w=1.047 (Rossman 2000).
-            k_w = np.asarray(self._k_wall_ms, dtype=np.float64).copy()
-            if self._temperature is not None:
-                k_w *= 1.047 ** (self._temperature - 20.0)
-            self._k_wall_vol = k_w * (4.0 / diam[:, np.newaxis])
-            return
-
-        # two_film (standaard): serieweerstand film + wandreactie
         from .lta import compute_wall_k
         _, vel = self._get_hydraulics()
+        diam   = np.sqrt(4 * self.pipe_area / np.pi)   # m
         self._k_wall_vol = compute_wall_k(
-            diam, vel, self._k_wall_ms,
-            D_mol        = self._D_mol,
-            nu           = self._nu,
-            pipe_length  = self.pipe_length,
-            temperature  = self._temperature,
+            diam, vel, self._k_wall_ms, self._D_mol, self._nu
         )
 
     # ── Tijdstap-stabiliteitscontrole ─────────────────────────────────────────
@@ -569,23 +520,6 @@ class NzingaFlowSolver:
 
         # 3. Advectie
         advect(self.segments.x, self.segments.pipe, velocity, dt, n=n)
-
-        # 3b. Lekkage: proportioneel volume-verlies per segment
-        # Elk segment verliest een fractie _leakage_fraction van zijn volume
-        # per tijdstap, overeenkomend met het debietverlies door emitters/lekkage.
-        # De concentratie blijft constant (geconserveerd mengmodel): het segment
-        # krimpt, maar er stroomt geen extern water in. Bij zuigslag (negatief
-        # druk) zou concentratie stijgen — dat is buiten het bereik van dit model.
-        if self._leakage_fraction > 0.0:
-            # Effectieve lekfractie per tijdstap: f_lek = Q_lek/Q * dt/T_verblijf
-            # Benadering: proportioneel aan verblijftijd in het segment
-            # volume_nieuw = volume_oud * exp(-lambda_lek * dt)
-            # lambda_lek = leakage_fraction / verblijftijd_leiding
-            # verblijftijd ≈ pipe_length[pipe] / velocity[pipe]
-            safe_vel = np.maximum(velocity[self.segments.pipe[:n]], 1e-6)
-            t_verblijf = self.pipe_length[self.segments.pipe[:n]] / safe_vel
-            lam_lek    = self._leakage_fraction / np.maximum(t_verblijf, 1.0)
-            self.segments.volume[:n] *= np.exp(-lam_lek * dt)
 
         # 4. Exit-detectie — in-place in pre-allocated buffer
         exit_detect(
@@ -908,8 +842,6 @@ class NzingaFlowSolver:
 
     def __repr__(self) -> str:
         geo_str = f" geochem={self._geochem.smap.species_names}" if self._geochem else ''
-        T_str = f" T={self._temperature}°C" if self._temperature is not None else ""
-        L_str = f" lek={self._leakage_fraction:.0%}" if self._leakage_fraction > 0 else ""
         return (
             f"<NzingaFlowSolver "
             f"pipes={len(self.pipe_ids)} nodes={self.node_count} "
