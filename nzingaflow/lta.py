@@ -378,113 +378,30 @@ def compute_wall_k(
     k_w:           np.ndarray,
     D_mol:         float = 1.3e-9,
     nu:            float = 1e-6,
-    pipe_length:   np.ndarray | None = None,
-    temperature:   float | None = None,
 ) -> np.ndarray:
     """
-    Volumetrische wandreactiesnelheid [1/s] via verbeterd twee-film-model.
+    Volumetrische wandreactiesnelheid [1/s] via twee-film-model (Rossman 1994).
 
-    Verbeteringen t.o.v. Rossman (1994) — drie correcties met meetbaar effect:
-
-    1. Sherwood-correlatie met drie regimes (was: harde drempel bij Re=4000):
-       - Laminair  (Re < 2300): Sh = Sh_Graetz(Re, Sc, L/D)  [Graetz 1885]
-         Basis: Sh_inf = 3.66 (uniforme wandconcentratie, volledig ontwikkeld)
-         Entry-length correctie: Sh = (3.66³ + max(1.615*(Re·Sc·D/L)^(1/3)-0.7, 0)³)^(1/3)
-         Dit corrigeert de vroegere Sh=3.65 (thermische uniforme flux) en
-         voegt entry-length correctie toe voor korte leidingen (L/D < 100).
-       - Transitie (2300 ≤ Re ≤ 4000): lineaire interpolatie Sh_lam↔Sh_turb.
-         De vroegere implementatie sprong discontinu van Sh≈3.65 naar Sh>>100
-         bij Re=4000, wat bij nachtsituaties (lage belasting) een grote fout gaf.
-       - Turbulent (Re > 4000): Sh = 0.023·Re^0.83·Sc^(1/3)  [Dittus-Boelter]
-         Onveranderd ten opzichte van Rossman (1994).
-
-    2. Temperatuurafhankelijkheid van D_mol en k_w (optioneel, via `temperature`):
-       - D_mol(T) = D_mol_20 · exp(17000/R · (1/293.15 - 1/(T+273.15)))
-         (Hayduk & Laudie 1974; Ea ≈ 17 kJ/mol)
-       - k_w(T) = k_w · θ_w^(T-20)  met θ_w = 1.047 (Rossman 2000)
-       Relevant bij seizoensvaratie: factor 1.6–2.0 tussen zomer en winter.
-
-    3. Stagnatie-zone correctie: bij Re < 10 (vrijwel stilstaand water) wordt
-       de snelheid geclampt op een equivalent van puur moleculaire diffusie
-       in een cylinder: k_f_min = 4·D_mol/D (tijdgemiddeld).
-       Dit voorkomt overschatting van filmtransport in dead-end takken.
-
-    Parameters
-    ----------
-    pipe_diameter : (n_pipes,)  inwendige diameter [m]
-    pipe_velocity : (n_pipes,)  gemiddelde stroomsnelheid [m/s]
-    k_w           : (n_pipes, n_species) of (n_species,)  wandreactiesnelheid [m/s]
-    D_mol         : moleculaire diffusiviteit bij 20 °C [m²/s]
-    nu            : kinematische viscositeit [m²/s]
-    pipe_length   : (n_pipes,)  leidinglengte [m]; None = geen entry-length correctie
-    temperature   : watertemperatuur [°C]; None = geen temperatuurcorrectie
-
-    Returns
-    -------
-    k_wall_vol : (n_pipes, n_species) volumetrische wandreactiesnelheid [1/s]
+        Re    = v*D/nu
+        Sh    = 0.023*Re^0.83*Sc^(1/3)  (turbulent) of 3.65 (laminair)
+        k_f   = Sh*D_mol/D
+        k_eff = k_f*k_w/(k_f+k_w)
+        k_vol = k_eff*4/D
     """
-    D = np.asarray(pipe_diameter,  dtype=np.float64)
-    v = np.asarray(pipe_velocity,  dtype=np.float64)
-
-    # ── Temperatuurcorrectie D_mol en k_w ────────────────────────────────────
-    if temperature is not None:
-        T    = float(temperature)
-        R    = 8.314            # J/mol/K
-        Ea_D = 17_000.0         # J/mol  (Hayduk & Laudie 1974)
-        D_mol = D_mol * np.exp(Ea_D / R * (1.0 / 293.15 - 1.0 / (T + 273.15)))
-        theta_w = 1.047
-        k_w = np.asarray(k_w, dtype=np.float64) * theta_w ** (T - 20.0)
-
-    # ── Dimensieloze getallen ─────────────────────────────────────────────────
+    D = pipe_diameter
+    v = np.maximum(pipe_velocity, 1e-4)
     Sc = nu / D_mol
-    Re = v * D / nu                                        # (n_pipes,)
+    Re = v * D / nu
+    Sh = np.where(Re > 4000, 0.023 * Re**0.83 * Sc**(1/3), 3.65)
+    k_f = (Sh * D_mol / D)[:, np.newaxis]
 
-    # ── Sherwood-getal: drie regimes ─────────────────────────────────────────
-    # Laminaire basiswaarde: Graetz-oplossing voor uniforme wandconcentratie.
-    # Volledig ontwikkeld laminair: Sh_inf = 3.66 (Graetz 1885).
-    # Entry-length correctie actief ALLEEN als pipe_length opgegeven:
-    #   Sh = (3.66³ + max(1.615·(Re·Sc·D/L)^(1/3) - 0.7, 0)³)^(1/3)
-    # Zonder pipe_length: Sh_lam = 3.66 (volledig ontwikkeld, conservatief).
-    if pipe_length is not None:
-        L_over_D = pipe_length / np.maximum(D, 1e-6)
-        L_over_D  = np.maximum(L_over_D, 1.0)
-        Gz        = Re * Sc / L_over_D                    # Graetz getal
-        entry     = np.maximum(1.615 * Gz**(1.0/3.0) - 0.7, 0.0)
-        Sh_lam    = (3.66**3 + entry**3)**(1.0/3.0)
-    else:
-        Sh_lam    = np.full_like(D, 3.66)                 # volledig ontwikkeld laminair
-
-    # Turbulente Nusselt (Dittus-Boelter, onveranderd)
-    Sh_turb = 0.023 * Re**0.83 * Sc**(1.0/3.0)
-
-    # Transitie: lineaire interpolatie over Re ∈ [2300, 4000]
-    f_trans = np.clip((Re - 2300.0) / 1700.0, 0.0, 1.0)
-    Sh      = np.where(
-        Re >= 4000.0, Sh_turb,
-        np.where(Re < 2300.0, Sh_lam, Sh_lam + f_trans * (Sh_turb - Sh_lam)),
-    )
-
-    # ── Filmtransport-coëfficiënt k_f [m/s] ──────────────────────────────────
-    k_f_conv = Sh * D_mol / D                             # convectief (Sh-gebaseerd)
-
-    # Stagnatie-zone correctie: bij Re < 10 domineert moleculaire diffusie.
-    # In een stilstaande cilinder is het tijdgemiddelde k_f ≈ 4·D_mol/D
-    # (eerste term Bessel-reeks voor diffusie in een eindige cilinder).
-    k_f_diff = 4.0 * D_mol / D                            # puur diffusief minimum
-    # Geleidelijke overgang: gebruik max(convectief, diffusief) — beide zijn
-    # correct in hun regime; het maximum geeft de juiste fysische limiet.
-    k_f = np.maximum(k_f_conv, k_f_diff)[:, np.newaxis]   # (n_pipes, 1)
-
-    # ── Serieweerstand: film + wandreactie ────────────────────────────────────
-    k_w_arr   = np.atleast_2d(np.asarray(k_w, dtype=np.float64))
+    k_w_arr = np.atleast_2d(k_w)
     if k_w_arr.shape[0] == 1:
         k_w_arr = np.broadcast_to(k_w_arr, (len(D), k_w_arr.shape[1]))
 
     zero_mask = k_w_arr == 0.0
     denom     = np.where(zero_mask, 1.0, k_f + k_w_arr)
     k_eff     = np.where(zero_mask, 0.0, k_f * k_w_arr / denom)
-
-    # k_vol [1/s]: k_eff × (A/V per lengte) = k_eff × 4/D  voor een cilinder
     return (k_eff * (4.0 / D[:, np.newaxis])).astype(np.float64)
 
 
