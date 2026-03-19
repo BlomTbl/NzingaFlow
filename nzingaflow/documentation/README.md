@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-informational)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.1.0-informational)](CHANGELOG.md)
 
 NzingaFlow simulates water quality in drinking water distribution networks using the **Lagrangian Transport Approach (LTA)**. Chemical species are transported as discrete segments carried along with the flow — eliminating the numerical diffusion inherent to Eulerian methods. All core calculations are fully vectorized with NumPy and optionally accelerated with Numba JIT compilation.
 
@@ -25,6 +25,7 @@ NzingaFlow simulates water quality in drinking water distribution networks using
   - [SegmentStore](#segmentstore)
   - [LTA Core Functions](#lta-core-functions)
   - [GeochemSolver & SpeciesMap](#geochemsolver--speciesmap)
+  - [MsxReactionSystem](#msxreactionsystem)
   - [Stability Functions](#stability-functions)
   - [merge\_segments](#merge_segments)
 - [Advanced Usage](#advanced-usage)
@@ -40,7 +41,10 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 - **Numba JIT kernels** — optional ~4–5× speedup via `pip install numba`
 - **Multi-species** — multiple species simultaneously in a single `C` matrix `(n_segments × n_species)`
 - **Combined decay** — bulk and wall decay fused into one memory pass (`combined_decay_multi`)
-- **Wall reactions** — two-film model per pipe (Dittus-Boelter / Rossman 1994)
+- **Wall reactions** — two-film model per pipe with three-regime Sherwood correlation (v1.1.0)
+- **Temperature correction** — Arrhenius/Hayduk-Laudie correction on D_mol and k_wall (v1.1.0)
+- **Leakage modelling** — proportional volume loss per segment without contaminant ingress (v1.1.0)
+- **MSX reaction system** — EPANET-MSX 2.0 compatible multi-species reaction layer (v1.1.0)
 - **Tanks** — CSTR model with implicit Euler integration (unconditionally stable)
 - **Extended Period Simulation (EPS)** — automatic hydraulic updates every `hyd_dt` seconds
 - **Full geochemistry** — optional PhreeqPython/PHREEQC integration
@@ -147,6 +151,34 @@ k_wall = np.full((n_pipes, 1), 1e-5)   # [m/s] — uniform across all pipes
 solver = NzingaFlowSolver("network.inp", n_species=1, k_wall=k_wall)
 ```
 
+### With temperature correction and leakage (new in v1.1.0)
+
+```python
+solver = NzingaFlowSolver(
+    "network.inp",
+    n_species=1,
+    k_wall=np.full((n_pipes, 1), 1e-5),
+    temperature=12.0,          # [°C] — activates Arrhenius/Hayduk-Laudie correction
+    leakage_fraction=0.12,     # 12% pipe loss (typical for distribution networks)
+)
+```
+
+### With MSX multi-species reactions (new in v1.1.0)
+
+```python
+from nzingaflow.msx import chloramine_decay_msx
+
+rxn = chloramine_decay_msx(k_f=2.5e-4, k_ox=5e-5, solver='rk4')
+
+solver = NzingaFlowSolver(
+    "network.inp",
+    n_species=len(rxn.bulk_species),  # 3: HOCl, NH3, NH2Cl
+    geochem=rxn,
+)
+runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
+results = runner.run(decay_k=np.zeros(3))
+```
+
 ### With geochemistry (PhreeqPython)
 
 ```python
@@ -198,6 +230,7 @@ Steps 1–4 are executed by Numba JIT kernels when Numba is installed, with no i
 | `merging.py` | `merge_segments` | Parallel-reduction segment merging with Numba JIT |
 | `stability.py` | `recommended_dt`, `MassBalanceTracker` | CFL check and mass balance |
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython integration |
+| `msx.py` | `MsxReactionSystem` | MSX-compatible multi-species reaction layer (v1.1.0) |
 
 ### SegmentStore (Structure-of-Arrays)
 
@@ -219,14 +252,17 @@ Pre-allocation avoids heap allocations during the simulation. Capacity overflow 
 
 ```python
 NzingaFlowSolver(
-    inp_path:   str,
-    n_species:  int   = 1,
-    capacity:   int   = 200_000,
-    k_wall:     ndarray | None = None,   # (n_pipes, n_species) or (n_species,) [m/s]
-    D_mol:      float = 1.3e-9,          # molecular diffusivity [m²/s]
-    nu:         float = 1e-6,            # kinematic viscosity [m²/s]
-    track_mass: bool  = False,
-    geochem           = None,            # GeochemSolver instance
+    inp_path:         str,
+    n_species:        int   = 1,
+    capacity:         int   = 200_000,
+    k_wall:           ndarray | None = None,   # (n_pipes, n_species) or (n_species,) [m/s]
+    D_mol:            float = 1.3e-9,          # molecular diffusivity [m²/s]
+    nu:               float = 1e-6,            # kinematic viscosity [m²/s]
+    track_mass:       bool  = False,
+    geochem                 = None,            # GeochemSolver or MsxReactionSystem instance
+    temperature:      float | None = None,     # water temperature [°C] (v1.1.0)
+    leakage_fraction: float = 0.0,             # fractional pipe flow loss (v1.1.0)
+    wall_mode:        str   = 'two_film',      # 'two_film' or 'direct' (v1.1.0)
 )
 ```
 
@@ -241,7 +277,10 @@ NzingaFlowSolver(
 | `D_mol` | `float` | Molecular diffusivity [m²/s] |
 | `nu` | `float` | Kinematic viscosity [m²/s] |
 | `track_mass` | `bool` | Enable mass balance tracking |
-| `geochem` | `GeochemSolver \| None` | Replaces first-order bulk decay with full PHREEQC geochemistry |
+| `geochem` | `GeochemSolver \| MsxReactionSystem \| None` | Replaces first-order bulk decay with full geochemistry or MSX reactions |
+| `temperature` | `float \| None` | Water temperature [°C]. Activates Arrhenius correction on D_mol (`Ea≈17 kJ/mol`) and θ=1.047 correction on k_wall (Rossman 2000). `None` = Rossman 1994-compatible (no correction). *(v1.1.0)* |
+| `leakage_fraction` | `float` | Fraction of pipe flow lost as leakage (0.0–1.0). Each segment loses proportional volume per timestep; concentration remains constant. Typically 0.05–0.20 for distribution networks. *(v1.1.0)* |
+| `wall_mode` | `str` | `'two_film'` (default): EPANET-compatible series resistance `k_eff = k_f·k_w/(k_f+k_w)`. `'direct'`: k_wall is already k_eff — use when k_wall comes from direct calibration rather than EPANET. *(v1.1.0)* |
 
 **Methods**
 
@@ -477,6 +516,96 @@ geo = full_water_chemistry()
 
 ---
 
+### MsxReactionSystem
+
+MSX-compatible multi-species reaction layer implementing the four EPANET-MSX 2.0 concepts: `RATE`, `EQUIL`, `FORMULA`, and surface species (`WALL`). Pass an `MsxReactionSystem` instance as the `geochem` argument to `NzingaFlowSolver`.
+
+> Requires: `pip install nzingaflow` (no extra dependency; scipy required for `rk45`/`radau` solvers)
+
+```python
+from nzingaflow.msx import MsxReactionSystem
+
+rxn = MsxReactionSystem(
+    bulk_species,          # list of bulk species names
+    wall_species=[],       # list of wall-bound species names
+    params={},             # {name: value} reaction parameters
+    pipe_rates={},         # {species: expression} in pipes
+    pipe_formulas={},      # {species: expression} derived variables
+    tank_rates={},         # {species: expression} in tanks
+    solver='rk4',          # 'euler', 'rk4', 'rk45' or 'radau' (stiff)
+)
+```
+
+**Expression notation**
+
+| Symbol | Description |
+|---|---|
+| Species name | Bulk concentration, e.g. `Cl2`, `NH3` |
+| Parameter name | Scalar constant, e.g. `k1`, `BFmax` |
+| `Av` | Pipe surface area per volume [m²/m³] = 4/D — automatically available |
+| `t` | Simulated time [s] |
+
+**Numerical solvers**
+
+| Solver | Type | Use case |
+|---|---|---|
+| `euler` | Explicit, 1st order | Fast; non-stiff systems only |
+| `rk4` | Explicit, 4th order | Default for most systems |
+| `rk45` | Adaptive via scipy | Non-stiff; variable step size |
+| `radau` | Implicit via scipy | Stiff systems (chloramine decay, biofilm) |
+
+**Wall species**
+
+Wall species (e.g. biofilm `BF`) are bound to the pipe wall and do not move with the water. They couple to bulk species via `RATE` expressions using `Av`. Each segment carries its own wall concentration, initialised to zero.
+
+```python
+rxn = MsxReactionSystem(
+    bulk_species = ['Cl2', 'NH3', 'NH2Cl'],
+    wall_species = ['BF'],
+    params       = {'k1': 1.5e-4, 'k2': 3e-3, 'k4': 0.01,
+                    'k5': 0.005, 'BFmax': 100.0},
+    pipe_rates   = {
+        'Cl2':   '-k1 * Cl2 * NH3 - k2 * Cl2 * BF * Av',
+        'NH3':   '-k1 * Cl2 * NH3',
+        'NH2Cl': 'k1 * Cl2 * NH3 - k3 * NH2Cl',
+        'BF':    'k4 * NH2Cl * (BFmax - BF) - k5 * BF',
+    },
+    tank_rates   = {
+        'Cl2':   '-k1 * Cl2 * NH3',
+        'NH3':   '-k1 * Cl2 * NH3',
+        'NH2Cl': 'k1 * Cl2 * NH3 - k3 * NH2Cl',
+    },
+    solver = 'rk4',
+)
+```
+
+**Methods**
+
+| Method | Description |
+|---|---|
+| `apply_geochemistry(store, dt, pipe_diam, pipe_vel)` | Integrate reactions for all segments; replaces `combined_decay_multi()` |
+| `apply_mixing(node_C, node_flow, dt)` | Integrate tank reactions after node mixing |
+| `get_wall_concentrations()` | Return current wall concentration array `(n_segments, n_wall_species)` |
+| `set_wall_concentrations(C_wall)` | Override wall concentrations (e.g. for warm-start) |
+| `set_pipe_param(pipe_idx, **kwargs)` | Override parameters for a single pipe |
+| `reset()` | Reset wall concentrations to zero |
+
+**Ready-made MSX models**
+
+```python
+from nzingaflow.msx import (
+    chloramine_decay_msx,    # HOCl + NH3 → NH2Cl (Vikesland 2001); species: [HOCl, NH3, NH2Cl]
+    chlorine_nom_msx,        # Cl2 + NOM bulk/wall; species: [Cl2, NOM]
+    arsenic_oxidation_msx,   # AS3→AS5, wall adsorption (Zhang 2004); species: [AS3, AS5, NH2CL] + wall [AS5s]
+)
+
+rxn = chloramine_decay_msx(k_f=2.5e-4, k_ox=5e-5, solver='rk4')
+rxn = chlorine_nom_msx(k_bulk=3e-4, k_wall=1e-5, solver='rk4')
+rxn = arsenic_oxidation_msx(Ka=10.0, Kb=0.1, K1=5.0, K2=1.0, Smax=50.0, solver='radau')
+```
+
+---
+
 ### Stability Functions
 
 ```python
@@ -676,16 +805,32 @@ combined_decay_multi(solver.segments.C, solver.segments.pipe, cexp,
 
 ## Wall Reactions
 
-NzingaFlow implements the two-film model from Rossman (1994):
+NzingaFlow implements the two-film model from Rossman (1994), extended in v1.1.0 with a three-regime Sherwood correlation, temperature dependence, and stagnation correction.
+
+### Film transport model
 
 ```
 Re    = v · D / ν
-Sh    = 0.023 · Re^0.83 · Sc^(1/3)    (turbulent, Re > 4000)
-Sh    = 3.65                            (laminar, Re ≤ 4000)
-k_f   = Sh · D_mol / D    [m/s]        film transport coefficient
-k_eff = k_f · k_w / (k_f + k_w)       series resistance
-k_vol = k_eff · 4 / D     [1/s]        volumetric rate (cylinder A/V = 4/D)
+Sh    = 0.023 · Re^0.83 · Sc^(1/3)                                (turbulent, Re > 4000)
+Sh    = (3.66³ + max(1.615·(Re·Sc·D/L)^(1/3) − 0.7, 0)³)^(1/3)  (laminar, Re < 2300)
+Sh    = linear interpolation Sh_lam ↔ Sh_turb                     (transition, 2300 ≤ Re ≤ 4000)
+k_f   = max(Sh · D_mol / D, 4·D_mol/D)   [m/s]   (stagnation floor)
+k_eff = k_f · k_w / (k_f + k_w)                  (series resistance, wall_mode='two_film')
+k_vol = k_eff · 4 / D                    [1/s]    (cylinder A/V = 4/D)
 ```
+
+**Changes from v1.0.0:** the previous hard threshold at Re=4000 caused a factor 1.5× error at night-time flows in DN100 pipes. The stagnation floor prevents underestimation at near-zero velocity.
+
+### Temperature dependence (optional, v1.1.0)
+
+Pass `temperature` [°C] to `NzingaFlowSolver` to activate:
+
+```
+D_mol(T) = D_mol_20 · exp(17000/R · (1/T₀ − 1/T))   [Hayduk & Laudie 1974]
+k_wall(T) = k_wall · 1.047^(T−20)                    [Rossman 2000]
+```
+
+Effect: factor 0.59× at 5°C to 1.38× at 30°C on k_wall_vol.
 
 ### Specifying k_wall per pipe
 
@@ -701,6 +846,9 @@ k_wall[0:20] = 1e-5   # cast iron
 k_wall[20:]  = 2e-6   # PVC
 
 solver = NzingaFlowSolver("network.inp", n_species=1, k_wall=k_wall)
+
+# 'direct' mode: k_wall is already the effective rate (no film resistance)
+solver = NzingaFlowSolver("network.inp", n_species=1, k_wall=k_wall, wall_mode='direct')
 ```
 
 > `k_wall = 0` disables wall reactions regardless of flow velocity.
@@ -736,6 +884,14 @@ smap = SpeciesMap(
 )
 ```
 
+**Q: When should I use MsxReactionSystem instead of GeochemSolver?**
+
+Use `MsxReactionSystem` when your reactions can be expressed as ordinary differential equations (first- or higher-order kinetics, biofilm growth, chloramine decay). It is faster than PhreeqPython and requires no extra dependencies. Use `GeochemSolver` when you need full thermodynamic equilibrium, mineral dissolution/precipitation, or pH-buffering via PHREEQC.
+
+**Q: How do I model pipe leakage?**
+
+Pass `leakage_fraction` to `NzingaFlowSolver`. A value of `0.12` means 12% of the pipe flow is lost. Each segment loses volume proportionally per timestep; concentrations are unchanged (conservative mixing model — no contaminant ingress from groundwater). Typical values for Dutch distribution networks are 0.05–0.20.
+
 **Q: Are pumps simulated?**
 
 Pumps are excluded by default (`include_pumps=False`). You can include them via `HydraulicModel("net.inp", include_pumps=True)`, though this is only meaningful when residence time inside the pump is relevant.
@@ -761,16 +917,30 @@ Pumps are excluded by default (`include_pumps=False`). You can include them via 
 | **EPS** | Extended Period Simulation: time-varying simulation with periodically updated hydraulics |
 | **LTA** | Lagrangian Transport Approach: transport described in the reference frame of the fluid |
 | **LSI** | Langelier Saturation Index: measure of CaCO₃ saturation in water |
+| **MSX** | Multi-Species eXtension: EPANET-MSX compatible reaction layer for arbitrary kinetic systems |
 | **PHREEQC** | Geochemical modelling software by the USGS |
 | **SoA** | Structure of Arrays: memory layout where each property occupies a separate array |
 | **`k_bulk`** | Bulk decay constant [1/s]: first-order decay in the water column |
 | **`k_wall`** | Wall reaction rate [m/s]: chemical reaction at the inner pipe surface |
 | **`combined_exp`** | Combined decay factor table `(n_pipes × n_species)` = `exp(-(k_bulk + k_wall_vol) × dt)`; pre-computed by `build_combined_exp()` |
+| **`leakage_fraction`** | Fraction of pipe flow lost as leakage per timestep; segments shrink without concentration change |
+| **`temperature`** | Water temperature [°C] used for Arrhenius/Hayduk-Laudie corrections on diffusivity and k_wall |
 | **segment** | Lagrangian fluid parcel with fixed volume, position, and concentration vector |
 
 ---
 
 ## Changelog
+
+### 1.1.0
+
+- **Three-regime Sherwood correlation** in `compute_wall_k()`: laminar (Graetz + entry-length), transition (linear interpolation), turbulent (Dittus-Boelter). Eliminates factor 1.5× error at night-time flows in DN100 pipes.
+- **Temperature correction** (`temperature=` parameter): Arrhenius correction on D_mol (Hayduk & Laudie 1974) and θ=1.047 correction on k_wall (Rossman 2000). Effect: 0.59× at 5°C to 1.38× at 30°C.
+- **Stagnation floor** in `compute_wall_k()`: minimum film transport `k_f_min = 4·D_mol/D` at near-zero velocity.
+- **Leakage modelling** (`leakage_fraction=` parameter): proportional volume loss per segment per timestep without contaminant ingress.
+- **`wall_mode` parameter**: `'two_film'` (default, EPANET-compatible) or `'direct'` (k_wall already k_eff).
+- **`MsxReactionSystem`** (`nzingaflow.msx`): EPANET-MSX 2.0 compatible reaction layer supporting `RATE`, `EQUIL`, `FORMULA`, and wall species. Four numerical solvers: `euler`, `rk4`, `rk45`, `radau`.
+- **Ready-made MSX models**: `chloramine_decay_msx`, `chlorine_nom_msx`, `arsenic_oxidation_msx`.
+- All new parameters are backward-compatible with defaults that reproduce v1.0.0 behaviour.
 
 ### 1.0.0
 
