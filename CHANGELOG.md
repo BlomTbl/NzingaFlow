@@ -31,12 +31,38 @@
 **Nieuwe API-parameters voor `NzingaFlowSolver.__init__()`:**
 - `temperature: float | None = None` — watertemperatuur [°C]; None = Rossman 1994-compatibel
 - `leakage_fraction: float = 0.0` — fractie debiet dat lekt als massaverlies per leiding
+- `wall_mode: str = 'two_film'` — interpretatie van k_wall:
+  - `'two_film'` (standaard): EPANET-compatibel serieschakeling `k_eff = k_f·k_w/(k_f+k_w)`
+  - `'direct'`: k_wall is al k_eff; geen filmweerstand toegepast
 
 **Lekkage-modellering in `solver.py` — `step()`:**
 - Elk segment verliest per tijdstap proportioneel volume: `V(t+dt) = V(t)·exp(−λ·dt)`
 - `λ = leakage_fraction / verblijftijd_leiding` (tijdschaalonafhankelijk)
 - Concentratie blijft constant (conservatief mengmodel, geen contaminant-instroming)
 - Typische waarde voor NL-netwerken: `leakage_fraction=0.10–0.15`
+
+---
+
+### MSX multi-species reactielaag — nieuw module `nzingaflow/msx.py`
+
+Implementeert de vier kernconcepten van EPANET-MSX 2.0:
+
+- **`RATE`** — kinetische ODE: `dC/dt = f(C_bulk, C_wall, params)`
+- **`EQUIL`** — evenwichtsconditie: `0 = g(C_bulk, C_wall, params)`
+- **`FORMULA`** — afgeleide variabele: `C = h(C_bulk, C_wall, params)`
+- **`WALL`-soorten** — wandgebonden stoffen (bijv. biofilm); bewegen niet mee met het water
+
+**`MsxReactionSystem` — nieuwe klasse:**
+- Expressies als Python-string of directe callable; strings worden via `sympy.lambdify` gecompileerd
+- Vier numerieke ODE-solvers: `euler`, `rk4`, `rk45` (scipy), `radau` (scipy, stijf)
+- `Av = 4/D [m²/m³]` automatisch beschikbaar in alle pipe-expressies
+- Per-leiding parameter-overschrijving via `set_pipe_param(pipe_idx, **kwargs)`
+- Volledig compatibel met de `geochem`-interface van `NzingaFlowSolver`
+
+**Kant-en-klare modellen:**
+- `chloramine_decay_msx(k_f, k_ox, solver)` — HOCl + NH3 → NH2Cl (Vikesland 2001); 3 stoffen
+- `chlorine_nom_msx(k_bulk, k_wall, solver)` — Cl2 + NOM bulk/wand; 2 stoffen
+- `arsenic_oxidation_msx(Ka, Kb, K1, K2, Smax, solver)` — AS3→AS5 + wandadsorptie (Zhang 2004); 3 bulk + 1 wandsoort
 
 **Achterwaartse compatibiliteit:** volledig behouden. Alle nieuwe parameters hebben
 defaults die het oude gedrag reproduceren.
