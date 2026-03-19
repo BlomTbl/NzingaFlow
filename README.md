@@ -35,6 +35,12 @@ cd nzingaflow
 pip install -e ".[dev]"
 ```
 
+> **Setuptools < 68.2 (bijv. Ubuntu 24.04 systeempython)**  
+> Als je `ModuleNotFoundError: No module named 'setuptools.backends'` krijgt, voeg dan `--no-build-isolation` toe:
+> ```bash
+> pip install --no-build-isolation -e ".[dev]"
+> ```
+
 ---
 
 ## Snelstart

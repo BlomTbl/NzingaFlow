@@ -61,7 +61,7 @@ from .lta         import (
     tank_step_implicit,
 )
 from .merging     import merge_segments
-from .geochemistry import GeochemSolver, SpeciesMap, chlorine_decay_geochem, full_water_chemistry
+from .geochemistry import GeochemSolver, SpeciesMap, chlorine_decay_geochem, full_water_chemistry, PhreeqSolutionMode
 from .msx import (
     MsxReactionSystem,
     chloramine_decay_msx,
@@ -88,6 +88,7 @@ __all__ = [
     "SpeciesMap",
     "chlorine_decay_geochem",
     "full_water_chemistry",
+    "PhreeqSolutionMode",
     # MSX multi-species reactielaag
     "MsxReactionSystem",
     "chloramine_decay_msx",
