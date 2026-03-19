@@ -56,15 +56,22 @@ from .lta         import (
     wall_first_order_multi,
     compute_wall_k,
     advect,
+    exit_detect,
     node_mixing_multi,
     tank_step_implicit,
 )
 from .merging     import merge_segments
 from .geochemistry import GeochemSolver, SpeciesMap, chlorine_decay_geochem, full_water_chemistry
+from .msx import (
+    MsxReactionSystem,
+    chloramine_decay_msx,
+    chlorine_nom_msx,
+    arsenic_oxidation_msx,
+)
 from .lta          import warmup_numba, USE_NUMBA, combined_decay_multi, build_combined_exp
 from .merging      import warmup_numba_merging
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__  = "NzingaFlow"
 
 __all__ = [
@@ -76,11 +83,16 @@ __all__ = [
     "combined_decay_multi",
     "build_combined_exp",
     "EPSRunner",
-    # Geochemie
+    # Geochemie (PhreeqPython)
     "GeochemSolver",
     "SpeciesMap",
     "chlorine_decay_geochem",
     "full_water_chemistry",
+    # MSX multi-species reactielaag
+    "MsxReactionSystem",
+    "chloramine_decay_msx",
+    "chlorine_nom_msx",
+    "arsenic_oxidation_msx",
     # Bouwstenen
     "HydraulicModel",
     "SegmentStore",
@@ -89,6 +101,7 @@ __all__ = [
     "wall_first_order_multi",
     "compute_wall_k",
     "advect",
+    "exit_detect",
     "node_mixing_multi",
     "tank_step_implicit",
     "merge_segments",
