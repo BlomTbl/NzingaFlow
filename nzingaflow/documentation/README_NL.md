@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-informational)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.1.0-informational)](CHANGELOG.md)
 
 NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken via de **Lagrangian Transport Approach (LTA)**. Stoffen reizen als discrete segmenten mee met de waterstroming — zonder de numerieke diffusie van Euleriaanse methoden. Alle kernberekeningen zijn volledig gevectoriseerd met NumPy en optioneel versneld met Numba JIT-compilatie.
 
@@ -25,6 +25,7 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
   - [SegmentStore](#segmentstore)
   - [LTA-kernfuncties](#lta-kernfuncties)
   - [GeochemSolver & SpeciesMap](#geochemsolver--speciesmap)
+  - [MsxReactionSystem](#msxreactionsystem)
   - [Stabiliteitsfuncties](#stabiliteitsfuncties)
   - [merge\_segments](#merge_segments)
 - [Geavanceerd gebruik](#geavanceerd-gebruik)
@@ -40,7 +41,10 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
 - **Numba JIT-kernels** — optionele ~4–5× versnelling via `pip install numba`
 - **Multi-species** — meerdere stoffen simultaan in één `C`-matrix `(n_segmenten × n_stoffen)`
 - **Gecombineerd verval** — bulk- en wandverval samengevoegd in één geheugenpass (`combined_decay_multi`)
-- **Wandreacties** — twee-film-model per leiding (Dittus-Boelter / Rossman 1994)
+- **Wandreacties** — twee-film-model per leiding met drieregime Sherwood-correlatie (v1.1.0)
+- **Temperatuurcorrectie** — Arrhenius/Hayduk-Laudie correctie op D_mol en k_wall (v1.1.0)
+- **Lekkagemodellering** — proportioneel volumeverlies per segment zonder contaminantinstroom (v1.1.0)
+- **MSX-reactiesysteem** — EPANET-MSX 2.0-compatibele multi-species reactielaag (v1.1.0)
 - **Tanks** — CSTR-model met impliciet Euler (onvoorwaardelijk stabiel)
 - **Extended Period Simulation (EPS)** — automatische hydraulica-updates elke `hyd_dt` seconden
 - **Volledige geochemie** — optionele PhreeqPython/PHREEQC-integratie
@@ -147,6 +151,34 @@ k_wall = np.full((n_pipes, 1), 1e-5)    # [m/s] — uniform over alle leidingen
 solver = NzingaFlowSolver("netwerk.inp", n_species=1, k_wall=k_wall)
 ```
 
+### Met temperatuurcorrectie en lekkage (nieuw in v1.1.0)
+
+```python
+solver = NzingaFlowSolver(
+    "netwerk.inp",
+    n_species=1,
+    k_wall=np.full((n_pipes, 1), 1e-5),
+    temperature=12.0,          # [°C] — activeert Arrhenius/Hayduk-Laudie correctie
+    leakage_fraction=0.12,     # 12% leidingverlies (typisch voor distributienetwerken)
+)
+```
+
+### Met MSX multi-species reacties (nieuw in v1.1.0)
+
+```python
+from nzingaflow.msx import chloramine_decay_msx
+
+rxn = chloramine_decay_msx(k_f=2.5e-4, k_ox=5e-5, solver='rk4')
+
+solver = NzingaFlowSolver(
+    "netwerk.inp",
+    n_species=len(rxn.bulk_species),  # 3: HOCl, NH3, NH2Cl
+    geochem=rxn,
+)
+runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
+results = runner.run(decay_k=np.zeros(3))
+```
+
 ### Met geochemie (PhreeqPython)
 
 ```python
@@ -198,6 +230,7 @@ Stappen 1–4 worden uitgevoerd door Numba JIT-kernels als Numba is geïnstallee
 | `merging.py` | `merge_segments` | Parallel-reductie segmentmerging met Numba JIT |
 | `stability.py` | `recommended_dt`, `MassBalanceTracker` | CFL-controle en massabalans |
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython-integratie |
+| `msx.py` | `MsxReactionSystem` | MSX-compatibele multi-species reactielaag (v1.1.0) |
 
 ### SegmentStore (Structure-of-Arrays)
 
@@ -219,14 +252,17 @@ Pre-allocatie vermijdt heap-allocaties tijdens de simulatie. Capaciteitsoverschr
 
 ```python
 NzingaFlowSolver(
-    inp_path:   str,
-    n_species:  int   = 1,
-    capacity:   int   = 200_000,
-    k_wall:     ndarray | None = None,   # (n_pipes, n_species) of (n_species,) [m/s]
-    D_mol:      float = 1.3e-9,          # moleculaire diffusiviteit [m²/s]
-    nu:         float = 1e-6,            # kinematische viscositeit [m²/s]
-    track_mass: bool  = False,
-    geochem           = None,            # GeochemSolver instantie
+    inp_path:         str,
+    n_species:        int   = 1,
+    capacity:         int   = 200_000,
+    k_wall:           ndarray | None = None,   # (n_pipes, n_species) of (n_species,) [m/s]
+    D_mol:            float = 1.3e-9,          # moleculaire diffusiviteit [m²/s]
+    nu:               float = 1e-6,            # kinematische viscositeit [m²/s]
+    track_mass:       bool  = False,
+    geochem                 = None,            # GeochemSolver of MsxReactionSystem instantie
+    temperature:      float | None = None,     # watertemperatuur [°C] (v1.1.0)
+    leakage_fraction: float = 0.0,             # fractioneel leidingverlies (v1.1.0)
+    wall_mode:        str   = 'two_film',      # 'two_film' of 'direct' (v1.1.0)
 )
 ```
 
@@ -241,7 +277,10 @@ NzingaFlowSolver(
 | `D_mol` | `float` | Moleculaire diffusiviteit [m²/s] |
 | `nu` | `float` | Kinematische viscositeit [m²/s] |
 | `track_mass` | `bool` | Activeer massabalansregistratie |
-| `geochem` | `GeochemSolver \| None` | Vervangt eerste-orde bulkverval door PHREEQC-geochemie |
+| `geochem` | `GeochemSolver \| MsxReactionSystem \| None` | Vervangt eerste-orde bulkverval door volledige geochemie of MSX-reacties |
+| `temperature` | `float \| None` | Watertemperatuur [°C]. Activeert Arrhenius-correctie op D_mol (`Ea≈17 kJ/mol`) en θ=1.047-correctie op k_wall (Rossman 2000). `None` = Rossman 1994-compatibel (geen correctie). *(v1.1.0)* |
+| `leakage_fraction` | `float` | Fractie van leidingdebiet dat lekt (0.0–1.0). Elk segment verliest per tijdstap proportioneel volume; concentratie blijft constant. Typisch 0.05–0.20 voor distributienetwerken. *(v1.1.0)* |
+| `wall_mode` | `str` | `'two_film'` (standaard): EPANET-compatibel serieschakeling `k_eff = k_f·k_w/(k_f+k_w)`. `'direct'`: k_wall is al k_eff — gebruik als k_wall uit directe kalibratie komt. *(v1.1.0)* |
 
 **Methoden**
 
@@ -477,6 +516,96 @@ geo = full_water_chemistry()
 
 ---
 
+### MsxReactionSystem
+
+MSX-compatibele multi-species reactielaag die de vier EPANET-MSX 2.0 concepten implementeert: `RATE`, `EQUIL`, `FORMULA` en oppervlaktesoorten (`WALL`). Geef een `MsxReactionSystem`-instantie mee als `geochem`-argument aan `NzingaFlowSolver`.
+
+> Vereist: `pip install nzingaflow` (geen extra afhankelijkheid; scipy nodig voor `rk45`/`radau`-solvers)
+
+```python
+from nzingaflow.msx import MsxReactionSystem
+
+rxn = MsxReactionSystem(
+    bulk_species,          # lijst van bulk-soortsnamen
+    wall_species=[],       # lijst van wandgebonden soortsnamen
+    params={},             # {naam: waarde} reactieparameters
+    pipe_rates={},         # {soort: expressie} in leidingen
+    pipe_formulas={},      # {soort: expressie} afgeleide variabelen
+    tank_rates={},         # {soort: expressie} in tanks
+    solver='rk4',          # 'euler', 'rk4', 'rk45' of 'radau' (stijf)
+)
+```
+
+**Expressienotatie**
+
+| Symbool | Omschrijving |
+|---|---|
+| Soortnaam | Bulkconcentratie, bijv. `Cl2`, `NH3` |
+| Parameternaam | Scalaire constante, bijv. `k1`, `BFmax` |
+| `Av` | Leidingoppervlak per volume [m²/m³] = 4/D — automatisch beschikbaar |
+| `t` | Gesimuleerde tijd [s] |
+
+**Numerieke solvers**
+
+| Solver | Type | Gebruik |
+|---|---|---|
+| `euler` | Expliciet, 1e orde | Snel; alleen niet-stijve systemen |
+| `rk4` | Expliciet, 4e orde | Standaard voor de meeste systemen |
+| `rk45` | Adaptief via scipy | Niet-stijf; variabele stapgrootte |
+| `radau` | Impliciet via scipy | Stijve systemen (chloramineverval, biofilm) |
+
+**Wandsoorten**
+
+Wandsoorten (bijv. biofilm `BF`) zijn gebonden aan de leidingwand en bewegen niet mee met het water. Ze koppelen aan bulksoorten via `RATE`-expressies met `Av`. Elk segment draagt zijn eigen wandconcentratie, geïnitialiseerd op nul.
+
+```python
+rxn = MsxReactionSystem(
+    bulk_species = ['Cl2', 'NH3', 'NH2Cl'],
+    wall_species = ['BF'],
+    params       = {'k1': 1.5e-4, 'k2': 3e-3, 'k4': 0.01,
+                    'k5': 0.005, 'BFmax': 100.0},
+    pipe_rates   = {
+        'Cl2':   '-k1 * Cl2 * NH3 - k2 * Cl2 * BF * Av',
+        'NH3':   '-k1 * Cl2 * NH3',
+        'NH2Cl': 'k1 * Cl2 * NH3 - k3 * NH2Cl',
+        'BF':    'k4 * NH2Cl * (BFmax - BF) - k5 * BF',
+    },
+    tank_rates   = {
+        'Cl2':   '-k1 * Cl2 * NH3',
+        'NH3':   '-k1 * Cl2 * NH3',
+        'NH2Cl': 'k1 * Cl2 * NH3 - k3 * NH2Cl',
+    },
+    solver = 'rk4',
+)
+```
+
+**Methoden**
+
+| Methode | Omschrijving |
+|---|---|
+| `apply_geochemistry(store, dt, pipe_diam, pipe_vel)` | Integreer reacties voor alle segmenten; vervangt `combined_decay_multi()` |
+| `apply_mixing(node_C, node_flow, dt)` | Integreer tankreacties na knoopmenging |
+| `get_wall_concentrations()` | Retourneer huidige wandconcentratie-array `(n_segmenten, n_wandsoorten)` |
+| `set_wall_concentrations(C_wall)` | Overschrijf wandconcentraties (bijv. voor warm-start) |
+| `set_pipe_param(pipe_idx, **kwargs)` | Overschrijf parameters voor één leiding |
+| `reset()` | Reset wandconcentraties naar nul |
+
+**Kant-en-klare MSX-modellen**
+
+```python
+from nzingaflow.msx import (
+    chloramine_decay_msx,    # HOCl + NH3 → NH2Cl (Vikesland 2001); stoffen: [HOCl, NH3, NH2Cl]
+    chlorine_nom_msx,        # Cl2 + NOM bulk/wand; stoffen: [Cl2, NOM]
+    arsenic_oxidation_msx,   # AS3→AS5, wandadsorptie (Zhang 2004); stoffen: [AS3, AS5, NH2CL] + wand [AS5s]
+)
+
+rxn = chloramine_decay_msx(k_f=2.5e-4, k_ox=5e-5, solver='rk4')
+rxn = chlorine_nom_msx(k_bulk=3e-4, k_wall=1e-5, solver='rk4')
+rxn = arsenic_oxidation_msx(Ka=10.0, Kb=0.1, K1=5.0, K2=1.0, Smax=50.0, solver='radau')
+```
+
+---
+
 ### Stabiliteitsfuncties
 
 ```python
@@ -676,16 +805,32 @@ combined_decay_multi(solver.segments.C, solver.segments.pipe, cexp,
 
 ## Wandreacties
 
-NzingaFlow implementeert het twee-film-model van Rossman (1994):
+NzingaFlow implementeert het twee-film-model van Rossman (1994), uitgebreid in v1.1.0 met een drieregime Sherwood-correlatie, temperatuurafhankelijkheid en stagnatie-correctie.
+
+### Filmtransportmodel
 
 ```
 Re    = v · D / ν
-Sh    = 0.023 · Re^0.83 · Sc^(1/3)    (turbulent, Re > 4000)
-Sh    = 3.65                            (laminair, Re ≤ 4000)
-k_f   = Sh · D_mol / D    [m/s]        filmtransport
-k_eff = k_f · k_w / (k_f + k_w)       serieschakeling
-k_vol = k_eff · 4 / D     [1/s]        volumetrisch (cilinder A/V = 4/D)
+Sh    = 0.023 · Re^0.83 · Sc^(1/3)                                (turbulent, Re > 4000)
+Sh    = (3.66³ + max(1.615·(Re·Sc·D/L)^(1/3) − 0.7, 0)³)^(1/3)  (laminair, Re < 2300)
+Sh    = lineaire interpolatie Sh_lam ↔ Sh_turb                    (transitie, 2300 ≤ Re ≤ 4000)
+k_f   = max(Sh · D_mol / D, 4·D_mol/D)   [m/s]   (stagnatie-minimum)
+k_eff = k_f · k_w / (k_f + k_w)                  (serieschakeling, wall_mode='two_film')
+k_vol = k_eff · 4 / D                    [1/s]    (cilinder A/V = 4/D)
 ```
+
+**Wijzigingen t.o.v. v1.0.0:** de vroegere harde drempel bij Re=4000 gaf bij nachtsituaties in DN100-leidingen een factor 1.5× fout. Het stagnatie-minimum voorkomt onderschatting bij nagenoeg nul-snelheid.
+
+### Temperatuurafhankelijkheid (optioneel, v1.1.0)
+
+Geef `temperature` [°C] mee aan `NzingaFlowSolver` om te activeren:
+
+```
+D_mol(T) = D_mol_20 · exp(17000/R · (1/T₀ − 1/T))   [Hayduk & Laudie 1974]
+k_wall(T) = k_wall · 1.047^(T−20)                    [Rossman 2000]
+```
+
+Effect: factor 0.59× bij 5°C tot 1.38× bij 30°C op k_wall_vol.
 
 ### k_wall per leiding opgeven
 
@@ -701,6 +846,9 @@ k_wall[0:20] = 1e-5   # gietijzer
 k_wall[20:]  = 2e-6   # PVC
 
 solver = NzingaFlowSolver("netwerk.inp", n_species=1, k_wall=k_wall)
+
+# 'direct' modus: k_wall is al de effectieve snelheid (geen filmweerstand)
+solver = NzingaFlowSolver("netwerk.inp", n_species=1, k_wall=k_wall, wall_mode='direct')
 ```
 
 > `k_wall = 0` geeft geen wandreactie, ongeacht de stroomsnelheid.
@@ -736,6 +884,14 @@ smap = SpeciesMap(
 )
 ```
 
+**Q: Wanneer gebruik ik MsxReactionSystem in plaats van GeochemSolver?**
+
+Gebruik `MsxReactionSystem` als uw reacties uit te drukken zijn als gewone differentiaalvergelijkingen (eerste- of hogere-orde kinetiek, biofilmgroei, chloramineverval). Het is sneller dan PhreeqPython en vereist geen extra afhankelijkheden. Gebruik `GeochemSolver` als u volledige thermodynamisch evenwicht, mineraaloplossing/-precipitatie of pH-buffering via PHREEQC nodig heeft.
+
+**Q: Hoe modelleer ik leidinglekkage?**
+
+Geef `leakage_fraction` mee aan `NzingaFlowSolver`. Een waarde van `0.12` betekent 12% volumeverlies per leiding. Elk segment verliest per tijdstap proportioneel volume; concentraties blijven ongewijzigd (conservatief mengmodel — geen contaminantinstroom vanuit grondwater). Typische waarden voor Nederlandse distributienetwerken liggen tussen 0.05 en 0.20.
+
 **Q: Worden pompen gesimuleerd?**
 
 Standaard worden pompen overgeslagen (`include_pumps=False`). U kunt pompen includeren via `HydraulicModel("net.inp", include_pumps=True)`, maar dit heeft doorgaans alleen zin als de verblijftijd in de pomp relevant is.
@@ -761,16 +917,30 @@ Standaard worden pompen overgeslagen (`include_pumps=False`). U kunt pompen incl
 | **EPS** | Extended Period Simulation: tijdvariabele simulatie met periodiek bijgewerkte hydraulica |
 | **LTA** | Lagrangian Transport Approach: transport vanuit het referentiekader van de vloeistof |
 | **LSI** | Langelier Saturation Index: maat voor CaCO₃-verzadiging |
+| **MSX** | Multi-Species eXtension: EPANET-MSX-compatibele reactielaag voor willekeurige kinetische systemen |
 | **PHREEQC** | Geochemisch rekenprogramma van de USGS |
 | **SoA** | Structure of Arrays: opslagopzet waarbij elke eigenschap een aparte array is |
 | **`k_bulk`** | Bulkvervalconstante [1/s]: eerste-orde verval in de waterkolom |
 | **`k_wall`** | Wandreactiesnelheid [m/s]: reactie aan de binnenzijde van de leiding |
 | **`combined_exp`** | Gecombineerde vervalfactor-tabel `(n_pipes × n_species)` = `exp(-(k_bulk + k_wall_vol) × dt)`; voorberekend door `build_combined_exp()` |
-| **segment** | Lagrangiaans vloeistofelement met vast volume, positie en concentratie |
+| **`leakage_fraction`** | Fractie van leidingdebiet dat per tijdstap lekt; segmenten krimpen zonder concentratieverandering |
+| **`temperature`** | Watertemperatuur [°C] voor Arrhenius/Hayduk-Laudie correcties op diffusiviteit en k_wall |
+| **segment** | Lagrangiaans vloeistofelement met vast volume, positie en concentratieprofiel |
 
 ---
 
 ## Versiehistorie
+
+### 1.1.0
+
+- **Drieregime Sherwood-correlatie** in `compute_wall_k()`: laminair (Graetz + entry-length), transitie (lineaire interpolatie), turbulent (Dittus-Boelter). Elimineert factor 1.5× fout bij nachtsituaties in DN100-leidingen.
+- **Temperatuurcorrectie** (`temperature=`-parameter): Arrhenius-correctie op D_mol (Hayduk & Laudie 1974) en θ=1.047-correctie op k_wall (Rossman 2000). Effect: 0.59× bij 5°C tot 1.38× bij 30°C.
+- **Stagnatie-minimum** in `compute_wall_k()`: minimaal filmtransport `k_f_min = 4·D_mol/D` bij nagenoeg nul-snelheid.
+- **Lekkagemodellering** (`leakage_fraction=`-parameter): proportioneel volumeverlies per segment per tijdstap zonder contaminantinstroom.
+- **`wall_mode`-parameter**: `'two_film'` (standaard, EPANET-compatibel) of `'direct'` (k_wall is al k_eff).
+- **`MsxReactionSystem`** (`nzingaflow.msx`): EPANET-MSX 2.0-compatibele reactielaag met `RATE`, `EQUIL`, `FORMULA` en wandsoorten. Vier numerieke solvers: `euler`, `rk4`, `rk45`, `radau`.
+- **Kant-en-klare MSX-modellen**: `chloramine_decay_msx`, `chlorine_nom_msx`, `arsenic_oxidation_msx`.
+- Alle nieuwe parameters zijn achterwaarts compatibel; defaults reproduceren v1.0.0-gedrag.
 
 ### 1.0.0
 
