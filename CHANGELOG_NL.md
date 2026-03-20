@@ -53,19 +53,30 @@ Implementeert de vier kernconcepten van EPANET-MSX 2.0:
 - **`WALL`-soorten** — wandgebonden stoffen (bijv. biofilm); bewegen niet mee met het water
 
 **`MsxReactionSystem` — nieuwe klasse:**
-- Expressies als Python-string of directe callable; strings worden via `sympy.lambdify` gecompileerd
-- Vier numerieke ODE-solvers: `euler`, `rk4`, `rk45` (scipy), `radau` (scipy, stijf)
+- Expressies als Python-string of directe callable; strings gecompileerd via ingebouwde parser (geen sympy/eval nodig)
+- Vijf numerieke ODE-solvers: `euler`, `rk4`, `ros2` (stijf, geen scipy), `rk45` (scipy), `radau` (scipy, legacy)
 - `Av = 4/D [m²/m³]` automatisch beschikbaar in alle pipe-expressies
 - Per-leiding parameter-overschrijving via `set_pipe_param(pipe_idx, **kwargs)`
 - Volledig compatibel met de `geochem`-interface van `NzingaFlowSolver`
 
+**Ingebouwde expressie-parser** (gebaseerd op EPANET-MSX `mathexpr.c`, Rossman/Shang/Uber — US EPA):
+- Tokenizer + postfix-evaluator; geen externe afhankelijkheden voor string-expressies
+- Ondersteunt: `+ - * / ^ ()` en functies `abs sgn sqrt exp log log10 sin cos tan cot asin acos atan acot sinh cosh tanh coth step`
+- Compile-time validatie: onbekende variabelenamen geven een `ValueError` met duidelijke melding
+
+**ROS2 stijve solver** (gebaseerd op EPANET-MSX `ros2.c`, Verwer et al. 1999 / Rossman — US EPA):
+- Rosenbrock 2(1) met adaptieve stapgrootte-aanpassing
+- Jacobian via eindige differenties; LU-decompositie via `numpy.linalg.solve`
+- Aanbevolen voor stijve systemen (chloramine-kinetiek, arsenaat-adsorptie) — geen scipy vereist
+- Vervangt `radau` als standaard voor stijve voorgeconfigureerde modellen
+
 **Kant-en-klare modellen:**
-- `chloramine_decay_msx(k_f, k_ox, solver)` — HOCl + NH3 → NH2Cl (Vikesland 2001); 3 stoffen
-- `chlorine_nom_msx(k_bulk, k_wall, solver)` — Cl2 + NOM bulk/wand; 2 stoffen
-- `arsenic_oxidation_msx(Ka, Kb, K1, K2, Smax, solver)` — AS3→AS5 + wandadsorptie (Zhang 2004); 3 bulk + 1 wandsoort
+- `chloramine_decay_msx(k_f, k_ox, solver='ros2')` — HOCl + NH3 → NH2Cl (Vikesland 2001); 3 stoffen
+- `chlorine_nom_msx(k_bulk, k_wall, solver='rk4')` — Cl2 + NOM bulk/wand; 2 stoffen
+- `arsenic_oxidation_msx(Ka, Kb, K1, K2, Smax, solver='ros2')` — AS3→AS5 + wandadsorptie (Zhang 2004); 3 bulk + 1 wandsoort
 
 **Achterwaartse compatibiliteit:** volledig behouden. Alle nieuwe parameters hebben
-defaults die het oude gedrag reproduceren.
+defaults die het v1.0.0-gedrag reproduceren. `solver='radau'` blijft werken voor bestaande code.
 
 
 ## [1.0.0] — 2025
