@@ -205,6 +205,111 @@ class NzingaFlowSolver:
         _warmup(self.n_species)
         _warmup_merge(self.n_species)
 
+    # ── Beginkwaliteit ────────────────────────────────────────────────────────
+
+    def set_initial_quality(
+        self,
+        node_quality: np.ndarray | dict,
+        simtime:      int = 0,
+    ) -> None:
+        """
+        Initialiseer het netwerk met beginconcentraties per knoop.
+
+        Vult elke leiding met één segment dat de gehele leidinginhoud
+        vertegenwoordigt (volume = L × A) en de concentraties van de
+        upstream knoop draagt.  Dit simuleert de EPANET-MSX [QUALITY]
+        GLOBAL/NODE initialisatie.
+
+        Roep aan vóór EPSRunner.run().  De methode roept intern
+        update_hydraulics(simtime) aan zodat de stroomrichting bekend is
+        vóór de segmenten worden aangemaakt.
+
+        Parameters
+        ----------
+        node_quality : ndarray (node_count, n_species)  of  dict
+            Beginconcentraties per knoop.
+            Als dict: {knoopnaam: ndarray(n_species)} — alle niet-genoemde
+            knopen krijgen concentratie 0.
+            Als ndarray: directe concentratiematrix, rij-index = node_index.
+        simtime : int
+            EPANET-simulatietijd [s] voor de hydraulische initialisatie.
+            Standaard 0 (beginconditie).
+
+        Voorbeelden
+        -----------
+        # Globale beginconcentraties (EPANET-MSX QUALITY GLOBAL)
+        C0 = np.zeros((solver.node_count, solver.n_species))
+        C0[:, SP['ALK']] = 0.004
+        C0[:, SP['H']]   = 2.818e-8
+        solver.set_initial_quality(C0)
+
+        # Mix van globaal en node-specifiek via dict
+        C0 = np.zeros((solver.node_count, solver.n_species))
+        C0[:, SP['ALK']] = 0.004         # globaal
+        solver.set_initial_quality(C0)
+        # Daarna node-overschrijvingen via losse inject_pipe aanroepen,
+        # of geef ze meteen mee als dict:
+        solver.set_initial_quality({
+            '__global__': C_global,       # speciale sleutel voor alle knopen
+            '4':          C_node4,        # overschrijft knoop '4'
+            '5':          C_node5,
+        })
+        """
+        # ── Zet hydraulica op voor simtime ─────────────────────────────────
+        self.update_hydraulics(simtime=simtime)
+        flow, velocity = self._get_hydraulics()
+
+        # ── Bouw concentratiematrix ─────────────────────────────────────────
+        n_sp = self.n_species
+        nc   = self.node_count
+
+        if isinstance(node_quality, dict):
+            C_node = np.zeros((nc, n_sp), dtype=np.float64)
+            # '__global__' sleutel vult alle knopen
+            if '__global__' in node_quality:
+                C_node[:] = np.asarray(node_quality['__global__'],
+                                       dtype=np.float64)
+            # Knoop-specifieke overschrijvingen
+            for uid, c_vec in node_quality.items():
+                if uid == '__global__':
+                    continue
+                idx = self.node_index.get(uid)
+                if idx is None:
+                    raise KeyError(
+                        f"set_initial_quality: onbekende knoopnaam {uid!r}"
+                    )
+                C_node[idx] = np.asarray(c_vec, dtype=np.float64)
+        else:
+            C_node = np.asarray(node_quality, dtype=np.float64)
+            if C_node.shape != (nc, n_sp):
+                raise ValueError(
+                    f"set_initial_quality: verwacht shape ({nc}, {n_sp}), "
+                    f"gekregen {C_node.shape}"
+                )
+
+        # ── Wis eventuele bestaande segmenten ──────────────────────────────
+        self.segments.n = 0
+
+        # ── Vul elke leiding met één beginsegment ───────────────────────────
+        # Upstream knoop = pipe_start (al gecorrigeerd voor flow-richting)
+        n_added = 0
+        for pi in range(len(self.pipe_ids)):
+            v = float(velocity[pi])
+            if v < 1e-9:
+                continue   # stilstaand water — geen segment
+            L   = float(self.pipe_length[pi])
+            A   = float(self.pipe_area[pi])
+            vol = L * A    # totale leidinginhoud [m³]
+            src_node = int(self.pipe_start[pi])
+            self.segments.add(
+                pipe=pi, x=0.0, volume=vol,
+                C_vector=C_node[src_node],
+            )
+            n_added += 1
+
+        # Invalideer hydraulica-cache (segmenten zijn nieuw)
+        self._combined_exp_dt = -1.0
+
     # ── Hydraulica ────────────────────────────────────────────────────────────
 
     def update_hydraulics(self, simtime: int = 0) -> None:
@@ -369,7 +474,10 @@ class NzingaFlowSolver:
             raise KeyError(f"Onbekende knoopnaam: '{node_uid}'")
         out = self._node_outpipes.get(node_idx, [])
         if not out:
-            raise ValueError(f"Knoop '{node_uid}' heeft geen uitgaande leidingen.")
+            # Geen uitgaande leidingen op dit tijdstip (eindknoop of flow
+            # reversal): booster-injectie stilt overgeslagen, geen fout.
+            # Dit is consistent met EPANET-MSX gedrag bij Q_out = 0.
+            return
         flow, _ = self._get_hydraulics()
         C_arr = np.asarray(C_vector, dtype=np.float64)
 
@@ -441,7 +549,10 @@ class NzingaFlowSolver:
 
         out = self._node_outpipes.get(node_idx, [])
         if not out:
-            raise ValueError(f"Knoop '{node_uid}' heeft geen uitgaande leidingen.")
+            # Geen uitgaande leidingen op dit tijdstip (eindknoop of flow
+            # reversal): booster-injectie stilt overgeslagen, geen fout.
+            # Dit is consistent met EPANET-MSX gedrag bij Q_out = 0.
+            return
 
         flow, _ = self._get_hydraulics()
         C_set   = np.asarray(C_set, dtype=np.float64)
