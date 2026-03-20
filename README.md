@@ -102,6 +102,32 @@ runner = EPSRunner(solver, qual_dt=10.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(decay_k=np.zeros(6))
 ```
 
+### Multi-species waterchemie met MSX-reactielagen
+
+```python
+import numpy as np
+from nzingaflow import NzingaFlowSolver, EPSRunner
+from nzingaflow.msx import chloramine_decay_msx
+
+# Chloramine-verval: HOCl + NH3 → NH2Cl  (stijf systeem → ROS2)
+rxn = chloramine_decay_msx(k_f=2.5e-4, k_ox=5.0e-5, solver='ros2')
+
+solver = NzingaFlowSolver(
+    "netwerk.inp",
+    n_species = len(rxn.bulk_species),  # 3: HOCl, NH3, NH2Cl
+    geochem   = rxn,
+)
+runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
+results = runner.run(
+    decay_k         = np.zeros(3),
+    inject_schedule = {"R1": [(0, 86400, np.array([1.0, 0.5, 0.0]))]},
+    verbose         = True,
+)
+# results.shape == (n_stappen, node_count, 3)
+```
+
+Zie [MSX-reactielagen](#msx-reactielagen) voor alle beschikbare modellen en het gebruik van eigen reactievergelijkingen.
+
 ---
 
 ## Performance
@@ -127,6 +153,8 @@ nzingaflow/
 ├── eps.py          EPSRunner — Extended Period Simulation
 ├── stability.py    CFL-check, massabalans
 ├── geochemistry.py GeochemSolver — PhreeqPython integratie
+├── msx.py          MsxReactionSystem — MSX multi-species reactielaag
+│                     (ingebouwde parser + ROS2-solver, geen scipy/sympy)
 └── parse_inp.py    EPANET .inp parser (fallback zonder epynet)
 ```
 
@@ -178,6 +206,48 @@ results = runner.run(
 t = runner.time_axis(unit='h')
 ```
 
+### MSX-reactielagen
+
+```python
+from nzingaflow.msx import (
+    MsxReactionSystem,
+    chloramine_decay_msx,    # HOCl + NH3 → NH2Cl  (Vikesland 2001)
+    chlorine_nom_msx,        # Cl2 + NOM bulk- en wandreactie
+    arsenic_oxidation_msx,   # AS3→AS5 + wandadsorptie (Zhang 2004)
+)
+
+# Voorgeconfigureerd model
+rxn = chloramine_decay_msx(solver='ros2')   # stijf → ROS2 (geen scipy)
+
+# Eigen reactiesysteem
+rxn = MsxReactionSystem(
+    bulk_species = ['Cl2', 'NOM'],
+    params       = {'k_b': 3e-4, 'k_w': 1e-5},
+    pipe_rates   = {
+        'Cl2': '-k_b * Cl2 * NOM - k_w * Cl2 * Av',
+        'NOM': '-k_b * Cl2 * NOM',
+    },
+    tank_rates   = {'Cl2': '-k_b * Cl2 * NOM', 'NOM': '-k_b * Cl2 * NOM'},
+    solver = 'rk4',
+)
+
+# Per-leiding parameteroverride (MSX [PARAMETERS])
+rxn.set_pipe_param(5,  k_w=2e-6)   # gietijzer
+rxn.set_pipe_param(12, k_w=5e-7)   # PVC
+```
+
+**ODE-solvers:**
+
+| Solver | Methode | Scipy nodig | Aanbevolen voor |
+|---|---|---|---|
+| `euler` | Voorwaarts Euler | Nee | Eenvoudige, niet-stijve systemen |
+| `rk4` | Runge-Kutta 4e orde | Nee | Standaard niet-stijf (standaard) |
+| `ros2` | Rosenbrock 2(1) adaptief | **Nee** | **Stijve systemen** (chloramine, biofilm) |
+| `rk45` | Dormand-Prince adaptief | Ja | Niet-stijf met foutcontrole |
+| `radau` | Radau IIA | Ja | Stijf (achterwaarts compatibel) |
+
+**Expressie-parser:** string-expressies worden gecompileerd via een ingebouwde parser gebaseerd op EPANET-MSX `mathexpr.c` (Rossman/Shang/Uber — US EPA). Geen sympy nodig. Ondersteunt `+ - * / ^ ()` en wiskundige functies (`abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, `step`, etc.).
+
 ### LTA-kernfuncties (laag-niveau)
 
 ```python
@@ -226,12 +296,15 @@ De testsuite bevat 10 validatieklassen (V1–V10) met analytische referentieoplo
 
 - Python ≥ 3.10
 - NumPy ≥ 1.24
-- epynet ≥ 2.0
+- epynet ≥ 1.1
 
 Optioneel:
 - numba ≥ 0.57 — voor ~4-5× snellere kernels
 - phreeqpython ≥ 1.4 — voor volledige geochemie (PHREEQC)
-- scipy ≥ 1.10 — voor validatietests
+- scipy ≥ 1.10 — voor validatietests en MSX-solvers `rk45`/`radau`
+
+> **MSX zonder scipy:** de ingebouwde `ros2`- en `rk4`-solvers vereisen alleen NumPy.
+> String-expressies in `MsxReactionSystem` vereisen geen sympy.
 
 ---
 
