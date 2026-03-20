@@ -289,6 +289,7 @@ NzingaFlowSolver(
 | `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Execute one water quality time step |
 | `update_hydraulics(simtime=0)` | `None` | Recompute hydraulics; detects flow reversals and rebuilds routing caches |
 | `warmup_numba()` | `None` | Trigger Numba JIT compilation before the simulation (call once after init) |
+| `set_initial_quality(node_quality, simtime=0)` | `None` | Initialise all pipes with per-node starting concentrations (EPANET-MSX `[QUALITY]` equivalent). Accepts `ndarray (node_count, n_species)` or `dict {node_id: C_vec}` with optional `'__global__'` key. |
 | `inject(node_uid, C_vector, volume)` | `None` | Inject from a node, distributed proportionally over outgoing pipes |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Inject directly into a pipe at position `x` [m] |
 | `booster_inject(node_uid, C_set, flow_frac=1.0)` | `None` | Fix concentration at a set value on outgoing pipes |
@@ -890,6 +891,31 @@ smap = SpeciesMap(
 **Q: When should I use MsxReactionSystem instead of GeochemSolver?**
 
 Use `MsxReactionSystem` when your reactions can be expressed as ordinary differential equations (first- or higher-order kinetics, biofilm growth, chloramine decay). It is faster than PhreeqPython and requires no extra dependencies. Use `GeochemSolver` when you need full thermodynamic equilibrium, mineral dissolution/precipitation, or pH-buffering via PHREEQC.
+
+**Q: How do I set initial water quality when using MSX reactions?**
+
+Use `solver.set_initial_quality()` before calling `runner.run()`. Pass either a `(node_count, n_species)` ndarray or a dict with an optional `'__global__'` key for network-wide values and per-node overrides:
+
+```python
+C_global = np.zeros(n_species)
+C_global[SP['ALK']] = 0.004
+solver.set_initial_quality({
+    '__global__': C_global,   # all nodes
+    'node_4':     C_node4,    # override for node 4
+})
+```
+
+**Q: How do I model a fixed mass flux source (EPANET-MSX MASS)?**
+
+Use `mass_schedule` in `EPSRunner.run()`. The format is identical to `inject_schedule` but values are mass fluxes [unit/s] instead of concentrations. The injected mass per step = flux × qual_dt:
+
+```python
+results = runner.run(
+    decay_k=...,
+    mass_schedule={'node_20': [(0, duration, np.array([0.5, 0.0]))]},
+                                              # 0.5 mmol/s species 0
+)
+```
 
 **Q: How do I model pipe leakage?**
 
