@@ -46,6 +46,7 @@ class EPSRunner:
         inject_schedule:  dict | None = None,
         inject_fn:        Callable | None = None,
         booster_schedule: dict | None = None,
+        mass_schedule:    dict | None = None,
         merge_interval:   int   = 10,
         merge_tol:        float = 1e-6,
         check_cfl:        bool  = True,
@@ -65,6 +66,12 @@ class EPSRunner:
                            Booster-injectie: stel concentratie in op vaste waarde
                            op de opgegeven knoop. C_set[s] < 0 = stof s ongewijzigd.
                            flow_frac is optioneel (default 1.0).
+        mass_schedule    : {knoopnaam: [(t_start, t_end, mass_flux_vec), ...]}
+                           EPANET-MSX MASS-bron: injecteer een vaste massaflux
+                           [eenheid/s] ongeacht het actuele debiet.
+                           mass_flux_vec : (n_species,) massaflux per stof [eenheid/s].
+                           De geinjekteerde massa per tijdstap = mass_flux * qual_dt.
+                           Bij Q_out = 0 wordt de injectie overgeslagen.
         merge_interval   : segmentmerging elke N stappen
         merge_tol        : concentratietolerantie voor merging [mg/L]
         check_cfl        : CFL-check op eerste tijdstap
@@ -74,9 +81,10 @@ class EPSRunner:
         -------
         results : (n_stappen, node_count, n_species)
         """
-        decay_k         = np.asarray(decay_k, dtype=np.float64)
+        decay_k          = np.asarray(decay_k, dtype=np.float64)
         inject_schedule  = inject_schedule  or {}
         booster_schedule = booster_schedule or {}
+        mass_schedule    = mass_schedule    or {}
         n_steps = int(self.duration / self.qual_dt)
         results = np.zeros(
             (n_steps, self.solver.node_count, self.solver.n_species),
@@ -103,6 +111,10 @@ class EPSRunner:
             # Booster-injectie
             if booster_schedule:
                 self._apply_booster(t, booster_schedule)
+
+            # MASS-bron injectie
+            if mass_schedule:
+                self._apply_mass_schedule(t, mass_schedule)
 
             # Kwaliteitstijdstap
             node_C = self.solver.step(
@@ -176,6 +188,56 @@ class EPSRunner:
                     C_arr = np.asarray(C_vec, dtype=np.float64)
                     self.solver.inject(node_uid, C_arr, vol_total)
                 # vol_total == 0: geen debiet op dit tijdstip, injectie overgeslagen
+
+    def _apply_mass_schedule(self, t: float, mass_schedule: dict) -> None:
+        """
+        Verwerk MASS-bronnenschema voor tijdstip t.
+
+        Implementeert de EPANET-MSX MASS-bron: een vaste massaflux [eenheid/s]
+        ongeacht het actuele debiet.  De geinjekteerde massa per tijdstap is
+        mass_flux * qual_dt, verdeeld over alle uitgaande leidingen naar rato
+        van het debiet.
+
+        Schema-formaat:
+            {knoopnaam: [(t_start, t_end, mass_flux_vec), ...]}
+
+        mass_flux_vec : (n_species,) massaflux per stof [eenheid/s]
+            De eenheid is dezelfde als de concentratie-eenheid maal m³/s,
+            bijv. mmol/s als concentraties in mmol/L worden uitgedrukt.
+
+        Bij Q_out = 0: injectie overgeslagen (water staat stil).
+        """
+        flow, _ = self.solver._get_hydraulics()
+        dt = self.qual_dt
+
+        for node_uid, intervals in mass_schedule.items():
+            for t_start, t_end, mass_flux_vec in intervals:
+                if not (t_start <= t < t_end):
+                    continue
+
+                node_idx = self.solver.node_index.get(node_uid)
+                if node_idx is None:
+                    raise KeyError(
+                        f"mass_schedule: onbekende knoopnaam {node_uid!r}"
+                    )
+                out = self.solver._node_outpipes.get(node_idx, [])
+                if not out:
+                    continue
+
+                # Totaal uitstromend debiet [m³/s]
+                Q_out = sum(float(flow[p]) for p in out)
+                if Q_out < 1e-12:
+                    continue   # stilstand: injectie overgeslagen
+
+                # Massa deze tijdstap [eenheid] = flux [eenheid/s] * dt [s]
+                M_dt = np.asarray(mass_flux_vec, dtype=np.float64) * dt
+
+                # Injectie als segment met volume = Q_out * dt [m³]
+                # Concentratie [eenheid/L] = massa / (volume * 1000 L/m³)
+                V_inj = Q_out * dt
+                C_inj = M_dt / (V_inj * 1000.0)
+
+                self.solver.inject(node_uid, C_inj, volume=V_inj)
 
     def time_axis(self, unit: str = 's') -> np.ndarray:
         """Tijdas van simulatieresultaten. unit: 's', 'min' of 'h'."""
