@@ -289,6 +289,7 @@ NzingaFlowSolver(
 | `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Voer één kwaliteitstijdstap uit |
 | `update_hydraulics(simtime=0)` | `None` | Herbereken hydraulica; detecteert flow reversals en herbouwt routing-caches |
 | `warmup_numba()` | `None` | Trigger Numba JIT-compilatie vóór de simulatie (eenmalig aanroepen na init) |
+| `set_initial_quality(node_quality, simtime=0)` | `None` | Initialiseer alle leidingen met beginconcentraties per knoop (equivalent aan EPANET-MSX `[QUALITY]`). Accepteert `ndarray (node_count, n_species)` of `dict {knoopnaam: C_vec}` met optionele `'__global__'`-sleutel. |
 | `inject(node_uid, C_vector, volume)` | `None` | Injecteer vanuit knoop, proportioneel over uitgaande leidingen |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Injecteer direct in leiding op positie `x` [m] |
 | `booster_inject(node_uid, C_set, flow_frac=1.0)` | `None` | Stel concentratie vast op uitgaande leidingen |
@@ -890,6 +891,31 @@ smap = SpeciesMap(
 **Q: Wanneer gebruik ik MsxReactionSystem in plaats van GeochemSolver?**
 
 Gebruik `MsxReactionSystem` als uw reacties uit te drukken zijn als gewone differentiaalvergelijkingen (eerste- of hogere-orde kinetiek, biofilmgroei, chloramineverval). Het is sneller dan PhreeqPython en vereist geen extra afhankelijkheden. Gebruik `GeochemSolver` als u volledige thermodynamisch evenwicht, mineraaloplossing/-precipitatie of pH-buffering via PHREEQC nodig heeft.
+
+**Q: Hoe stel ik beginwaterkwaliteit in bij gebruik van MSX-reacties?**
+
+Gebruik `solver.set_initial_quality()` vóór `runner.run()`. Geef een `(node_count, n_species)` ndarray of een dict mee met optionele `'__global__'`-sleutel voor netwerk-brede waarden en per-knoop overschrijvingen:
+
+```python
+C_global = np.zeros(n_species)
+C_global[SP['ALK']] = 0.004
+solver.set_initial_quality({
+    '__global__': C_global,   # alle knopen
+    'knoop_4':    C_knoop4,   # overschrijving voor knoop 4
+})
+```
+
+**Q: Hoe modelleer ik een vaste massaflux-bron (EPANET-MSX MASS)?**
+
+Gebruik `mass_schedule` in `EPSRunner.run()`. Het formaat is identiek aan `inject_schedule` maar de waarden zijn massafluxen [eenheid/s] in plaats van concentraties. Massa per tijdstap = flux × qual_dt:
+
+```python
+results = runner.run(
+    decay_k=...,
+    mass_schedule={'knoop_20': [(0, duur, np.array([0.5, 0.0]))]},
+                                               # 0.5 mmol/s stof 0
+)
+```
 
 **Q: Hoe modelleer ik leidinglekkage?**
 
