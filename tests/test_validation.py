@@ -33,7 +33,7 @@ V5  Wandverval — twee-film model
     Analytisch: k_eff = k_f · k_w / (k_f + k_w)
                 k_f = Sh · D_mol / D
                 Sh = 0.023 · Re^0.83 · Sc^(1/3)  [turbulent]
-                Sh = 3.65                          [laminair]
+                Sh = 3.66                          [laminair, volledig ontwikkeld, Graetz 1885]
     Bron: Rossman et al. (1994), JAWWA
 
 V6  CFL-stabiliteit — numerieke orde en convergentie
@@ -820,13 +820,32 @@ class TestV5_WallDecay:
     D_mol = 1.3e-9   # m²/s (chloor in water, 20°C)
     nu    = 1e-6     # m²/s
 
-    def _sh_analytical(self, Re):
-        """Analytische Sherwood-getal."""
+    def _sh_analytical(self, Re, D=None, L=None):
+        """Analytisch Sherwood-getal — drie regimes (v1.1.0).
+
+        Laminair  (Re < 2300) : Sh = 3.66 volledig ontwikkeld (Graetz 1885)
+                                 met entry-length correctie als D en L gegeven zijn.
+        Transitie (2300–4000) : lineaire interpolatie Sh_lam ↔ Sh_turb.
+        Turbulent (Re > 4000) : Dittus-Boelter 0.023·Re^0.83·Sc^(1/3).
+        """
+        import math
         Sc = self.nu / self.D_mol
-        if Re > 4000:
-            return 0.023 * Re**0.83 * Sc**(1/3)
+        Sh_turb = 0.023 * Re**0.83 * Sc**(1/3)
+
+        # Laminair basis
+        if D is not None and L is not None and L > 0:
+            entry = max(1.615 * (Re * Sc * D / L)**(1/3) - 0.7, 0.0)
+            Sh_lam = (3.66**3 + entry**3)**(1/3)
         else:
-            return 3.65
+            Sh_lam = 3.66   # volledig ontwikkeld laminair
+
+        if Re >= 4000:
+            return Sh_turb
+        elif Re < 2300:
+            return Sh_lam
+        else:
+            f = (Re - 2300) / (4000 - 2300)
+            return Sh_lam + f * (Sh_turb - Sh_lam)
 
     def _k_eff_analytical(self, D, v, k_w):
         """Analytische effectieve wandreactiesnelheid [m/s]."""
@@ -862,16 +881,20 @@ class TestV5_WallDecay:
             f"  D={D}m, v={v}m/s, k_w={k_w}m/s"
         )
 
-    def test_laminar_regime_sh_365(self):
-        """Bij Re ≤ 4000 moet Sh = 3.65 (constante wandconcentratie, Graetz)."""
+    def test_laminar_regime_sh_366(self):
+        """Bij Re < 2300 (volledig ontwikkeld) moet Sh = 3.66 (Graetz 1885, uniforme T-wandconcentratie).
+
+        Wijziging v1.1.0: Sh=3.65 (uniforme flux) vervangen door Sh=3.66 (uniforme concentratie).
+        Testsnelheid aangepast: v=0.01 m/s geeft Re=1000 (echt laminair, niet transitie).
+        """
         D   = 0.1
-        v   = 0.03    # Re = 0.03 * 0.1 / 1e-6 = 3000 (laminair)
+        v   = 0.01    # Re = 0.01 * 0.1 / 1e-6 = 1000 (volledig laminair)
         k_w = 1e-5
 
         Re  = v * D / self.nu
-        assert Re < 4000, f"Test vereist laminair regime, Re={Re:.0f}"
+        assert Re < 2300, f"Test vereist laminair regime (Re < 2300), Re={Re:.0f}"
 
-        Sh_expected = 3.65
+        Sh_expected = 3.66   # Graetz 1885, uniforme wandconcentratie (v1.1.0)
         k_f_expected = Sh_expected * self.D_mol / D
 
         pipe_diam = np.array([D])
@@ -887,7 +910,7 @@ class TestV5_WallDecay:
         k_f_sim   = k_eff_sim * k_w / (k_w - k_eff_sim) if k_w != k_eff_sim else float('inf')
 
         assert abs(k_f_sim - k_f_expected) / k_f_expected < 1e-10, (
-            f"Laminair: k_f={k_f_sim:.6e}, verwacht {k_f_expected:.6e} (Sh=3.65)"
+            f"Laminair: k_f={k_f_sim:.6e}, verwacht {k_f_expected:.6e} (Sh=3.66)"
         )
 
     def test_zero_kw_gives_zero_wall_decay(self):
@@ -972,7 +995,7 @@ class TestV6_CFLStability:
 
     def test_cfl_check_flags_violation(self):
         """check_dt() moet CFL-schending correct detecteren."""
-        from stability import check_dt
+        from nzingaflow.stability import check_dt
         lengths = np.array([10.0])
         vels    = np.array([1.0])
         k_bulk  = np.array([0.0])
@@ -985,7 +1008,7 @@ class TestV6_CFLStability:
 
     def test_cfl_check_passes_valid_dt(self):
         """check_dt() moet geldige dt goedkeuren."""
-        from stability import check_dt
+        from nzingaflow.stability import check_dt
         lengths = np.array([100.0])
         vels    = np.array([0.5])
         k_bulk  = np.array([0.0])
