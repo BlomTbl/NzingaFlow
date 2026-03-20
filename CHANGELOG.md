@@ -53,19 +53,30 @@ Implements the four core concepts of EPANET-MSX 2.0:
 - **`WALL` species** — wall-bound species (e.g. biofilm); do not move with the water
 
 **`MsxReactionSystem` — new class:**
-- Expressions as Python strings or direct callables; strings compiled via `sympy.lambdify`
-- Four numerical ODE solvers: `euler`, `rk4`, `rk45` (scipy), `radau` (scipy, stiff)
+- Expressions as Python strings or direct callables; strings compiled via built-in parser (no sympy/eval needed)
+- Five numerical ODE solvers: `euler`, `rk4`, `ros2` (stiff, no scipy), `rk45` (scipy), `radau` (scipy, legacy)
 - `Av = 4/D [m²/m³]` automatically available in all pipe expressions
 - Per-pipe parameter override via `set_pipe_param(pipe_idx, **kwargs)`
 - Fully compatible with the `geochem` interface of `NzingaFlowSolver`
 
+**Built-in expression parser** (based on EPANET-MSX `mathexpr.c`, Rossman/Shang/Uber — US EPA):
+- Tokenizer + postfix evaluator; no external dependencies for string expressions
+- Supported: `+ - * / ^ ()` and functions `abs sgn sqrt exp log log10 sin cos tan cot asin acos atan acot sinh cosh tanh coth step`
+- Compile-time validation: unknown variable names raise `ValueError` with a clear message
+
+**ROS2 stiff solver** (based on EPANET-MSX `ros2.c`, Verwer et al. 1999 / Rossman — US EPA):
+- Rosenbrock 2(1) with adaptive step size control
+- Jacobian via finite differences; LU decomposition via `numpy.linalg.solve`
+- Recommended for stiff systems (chloramine kinetics, arsenic adsorption) — no scipy required
+- Replaces `radau` as default for stiff pre-configured models
+
 **Ready-made models:**
-- `chloramine_decay_msx(k_f, k_ox, solver)` — HOCl + NH3 → NH2Cl (Vikesland 2001); 3 species
-- `chlorine_nom_msx(k_bulk, k_wall, solver)` — Cl2 + NOM bulk/wall; 2 species
-- `arsenic_oxidation_msx(Ka, Kb, K1, K2, Smax, solver)` — AS3→AS5 + wall adsorption (Zhang 2004); 3 bulk + 1 wall species
+- `chloramine_decay_msx(k_f, k_ox, solver='ros2')` — HOCl + NH3 → NH2Cl (Vikesland 2001); 3 species
+- `chlorine_nom_msx(k_bulk, k_wall, solver='rk4')` — Cl2 + NOM bulk/wall; 2 species
+- `arsenic_oxidation_msx(Ka, Kb, K1, K2, Smax, solver='ros2')` — AS3→AS5 + wall adsorption (Zhang 2004); 3 bulk + 1 wall species
 
 **Backward compatibility:** fully preserved. All new parameters have defaults that
-reproduce the v1.0.0 behaviour.
+reproduce the v1.0.0 behaviour. `solver='radau'` still works for existing code.
 
 
 ## [1.0.0] — 2025
