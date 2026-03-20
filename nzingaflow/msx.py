@@ -2,272 +2,462 @@
 """
 MsxReactionSystem — MSX-compatibele multi-species reactielaag voor NzingaFlow.
 
-Implementeert de vier kernconcepten van EPANET-MSX 2.0:
+Twee verbeteringen t.o.v. de vorige versie, gebaseerd op EPANET-MSX broncode:
 
-    A. Willekeurig DAE-reactiesysteem
-       RATE  : dC/dt = f(C_bulk, C_wall, params)   [kinetisch]
-       EQUIL : 0 = g(C_bulk, C_wall, params)        [evenwicht]
-       FORMULA: C = h(C_bulk, C_wall, params)        [afgeleide variabele]
+1. ROS2-solver (ros2.c, Verwer et al. 1999 / L. Rossman US EPA)
+   Rosenbrock 2(1) met adaptieve stapgrootte. Geschikt voor stijve
+   systemen (chloramine, arsenaat-adsorptie) zonder scipy-afhankelijkheid.
+   Vervangt 'radau' als aanbevolen keuze voor stijve kinetiek.
 
-    B. Oppervlaktesoorten (WALL species)
-       Gebonden aan de leidingwand; bewegen NIET mee met het water.
-       Koppelen aan bulksoorten via RATE-expressies die Av (= 4/D [1/m])
-       als variabele gebruiken.
+2. Ingebouwde expressie-parser (mathexpr.c, Rossman/Shang/Uber US EPA)
+   Tokenizer + postfix-evaluator. Vervangt sympy/eval() volledig.
+   Geen externe afhankelijkheden voor string-expressies.
+   Ondersteunt: + - * / ^ () abs sgn sqrt exp log log10
+                sin cos tan cot asin acos atan acot
+                sinh cosh tanh coth step
 
-    C. Numerieke ODE-integratie
-       solver='euler'    — voorwaarts Euler (snel, alleen niet-stijf)
-       solver='rk4'      — klassieke Runge-Kutta 4e orde (vectorized)
-       solver='rk45'     — adaptief RK45 via scipy (niet-stijf)
-       solver='radau'    — Radau IIA via scipy (stijf: chloramine, biofilm)
-
-    D. Expressie-taal (optioneel)
-       Vergelijkingen kunnen als Python-string opgegeven worden; ze worden
-       gecompileerd via sympy.lambdify naar snelle numpy-functies.
-       Direct Python-callables zijn ook toegestaan en sneller.
-
-Gebruik
--------
-    from nzingaflow.msx import MsxReactionSystem
-
-    rxn = MsxReactionSystem(
-        bulk_species  = ['Cl2', 'NH3', 'NH2Cl'],
-        wall_species  = ['BF'],                      # biofilm
-        params        = {'k1': 1.5e-4, 'k2': 3e-3, 'k4': 0.01, 'k5': 0.005,
-                         'BFmax': 100.0},
-        pipe_rates = {
-            'Cl2':   '-k1 * Cl2 * NH3 - k2 * Cl2 * BF * Av',
-            'NH3':   '-k1 * Cl2 * NH3',
-            'NH2Cl': 'k1 * Cl2 * NH3 - k3 * NH2Cl',
-            'BF':    'k4 * NH2Cl * (BFmax - BF) - k5 * BF',
-        },
-        tank_rates = {
-            'Cl2':   '-k1 * Cl2 * NH3',
-            'NH3':   '-k1 * Cl2 * NH3',
-            'NH2Cl': 'k1 * Cl2 * NH3 - k3 * NH2Cl',
-        },
-        solver = 'rk4',
-    )
-
-    solver = NzingaFlowSolver(
-        'netwerk.inp',
-        n_species = len(rxn.bulk_species),
-        geochem   = rxn,          # plug in op de geochem-interface
-    )
-
-Notatie in expressie-strings
-------------------------------
-  Bulksoorten     : exacte naam (bijv. 'Cl2', 'NH2Cl')
-  Oppervlaksoorten: exacte naam (bijv. 'BF', 'AS5s')
-  Parameters      : exacte naam (bijv. 'k1', 'Smax')
-  Gereserveerd    : 'Av'  = leidingoppervlak per volume [m²/m³] = 4/D
-                    't'   = gesimuleerde tijd [s]
-Eenheden
----------
-  Dezelfde als de NzingaFlow-invoer. Geen automatische eenheidsconversie.
-  RATE-expressies moeten [concentratie/s] teruggeven.
+ODE-solvers:
+  'euler'  — voorwaarts Euler (snel, niet-stijf)
+  'rk4'    — klassieke RK4 (standaard, niet-stijf)
+  'ros2'   — Rosenbrock 2(1) (stijf, geen scipy)  <- nieuw
+  'rk45'   — adaptief RK45 via scipy
+  'radau'  — Radau IIA via scipy (achterwaarts compatibel)
 """
 
 from __future__ import annotations
-
+import math
 import warnings
 import numpy as np
 from typing import Callable, Dict, List, Optional, Union
 
-_SOLVERS = ('euler', 'rk4', 'rk45', 'radau')
+_SOLVERS = ('euler', 'rk4', 'ros2', 'rk45', 'radau')
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  EXPRESSIE-PARSER  (gebaseerd op EPANET-MSX mathexpr.c)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_OP_LPAREN=1; _OP_RPAREN=2; _OP_ADD=3; _OP_SUB=4; _OP_MUL=5; _OP_DIV=6
+_OP_NUM=7; _OP_VAR=8; _OP_NEG=9
+_OP_COS=10; _OP_SIN=11; _OP_TAN=12; _OP_COT=13; _OP_ABS=14; _OP_SGN=15
+_OP_SQRT=16; _OP_LOG=17; _OP_EXP=18; _OP_ASIN=19; _OP_ACOS=20; _OP_ATAN=21
+_OP_ACOT=22; _OP_SINH=23; _OP_COSH=24; _OP_TANH=25; _OP_COTH=26
+_OP_LOG10=27; _OP_STEP=28; _OP_POW=31
+
+_MATH_FUNCS = {
+    'COS':_OP_COS,'SIN':_OP_SIN,'TAN':_OP_TAN,'COT':_OP_COT,
+    'ABS':_OP_ABS,'SGN':_OP_SGN,'SQRT':_OP_SQRT,'LOG':_OP_LOG,
+    'EXP':_OP_EXP,'ASIN':_OP_ASIN,'ACOS':_OP_ACOS,'ATAN':_OP_ATAN,
+    'ACOT':_OP_ACOT,'SINH':_OP_SINH,'COSH':_OP_COSH,'TANH':_OP_TANH,
+    'COTH':_OP_COTH,'LOG10':_OP_LOG10,'STEP':_OP_STEP,
+}
+
+
+class _Parser:
+    """Tokenizer + recursive-descent parser → postfix lijst van (opcode,fval,ivar)."""
+
+    def __init__(self, formula: str, var_names: list):
+        self._vi   = {n.upper(): i for i, n in enumerate(var_names)}
+        self._s    = formula
+        self._pos  = 0
+        self._len  = len(formula)
+        self._err  = False
+        self._bc   = 0
+        self._prev = 0
+        self._cur  = 0
+        self._fval = 0.0
+        self._ivar = -1
+
+    def _digit(self, c): return '0' <= c <= '9'
+    def _letter(self, c): return c.isalpha() or c == '_'
+
+    def _get_token(self):
+        s = self._s; p = self._pos; n = self._len
+        start = p
+        while p < n and (self._letter(s[p]) or self._digit(s[p])): p += 1
+        self._pos = p
+        return s[start:p]
+
+    def _get_number(self):
+        s = self._s; p = self._pos; n = self._len; start = p
+        while p < n and self._digit(s[p]): p += 1
+        if p < n and s[p] == '.':
+            p += 1
+            while p < n and self._digit(s[p]): p += 1
+        if p < n and s[p].upper() == 'E':
+            p += 1
+            if p < n and s[p] in ('+','-'): p += 1
+            while p < n and self._digit(s[p]): p += 1
+        self._pos = p
+        return float(s[start:p])
+
+    def _get_operand(self):
+        """Herkent enkelteken-operatoren. Geeft (code, advance) terug."""
+        c = self._s[self._pos]
+        if c == '(': return _OP_LPAREN
+        if c == ')': return _OP_RPAREN
+        if c == '+': return _OP_ADD
+        if c == '*': return _OP_MUL
+        if c == '/': return _OP_DIV
+        if c == '^': return _OP_POW
+        if c == '-': return _OP_SUB
+        return 0
+
+    def _lex(self):
+        s = self._s; n = self._len
+        while self._pos < n and s[self._pos] == ' ': self._pos += 1
+        if self._pos >= n: return 0
+
+        code = self._get_operand()
+
+        if code == _OP_SUB:
+            # Negatief getal? Alleen als vorig token begin of '(' was EN
+            # het volgende teken een cijfer is
+            if (self._pos+1 < n and
+                    self._digit(s[self._pos+1]) and
+                    self._cur in (0, _OP_LPAREN)):
+                self._pos += 1          # sla '-' over
+                self._fval = -self._get_number()   # leest cijfers, zet pos
+                code = _OP_NUM
+                # pos staat nu NA het getal — geen extra pos+=1 nodig
+            else:
+                self._pos += 1          # gewone aftrekking: sla '-' over
+        elif code != 0:
+            self._pos += 1              # enkelteken-operator: sla over
+        else:
+            # Geen operand-teken: letter, cijfer of fout
+            if self._letter(s[self._pos]):
+                tok = self._get_token().upper()
+                if tok in _MATH_FUNCS:
+                    code = _MATH_FUNCS[tok]
+                elif tok in self._vi:
+                    self._ivar = self._vi[tok]; code = _OP_VAR
+                else:
+                    self._err = True; return 0
+            elif self._digit(s[self._pos]):
+                self._fval = self._get_number(); code = _OP_NUM
+            else:
+                self._err = True; return 0
+
+        self._prev = self._cur; self._cur = code
+        return code
+
+    def _single_op(self, lex):
+        nodes = []
+        if lex[0] == _OP_LPAREN:
+            self._bc += 1; nodes = self._tree()
+        else:
+            if lex[0] < _OP_NUM or lex[0] == _OP_NEG or lex[0] > 30:
+                self._err = True; return []
+            op = lex[0]
+            if op == _OP_NUM:   nodes = [(op, self._fval, -1)]
+            elif op == _OP_VAR: nodes = [(op, 0.0, self._ivar)]
+            else:
+                lex[0] = self._lex()
+                if lex[0] != _OP_LPAREN: self._err = True; return []
+                self._bc += 1
+                inner = self._tree()
+                nodes = inner + [(op, 0.0, -1)]
+        lex[0] = self._lex()
+        return nodes
+
+    def _op(self, lex):
+        lex[0] = self._lex()
+        neg = False
+        if self._prev in (0, _OP_LPAREN):
+            if lex[0] == _OP_SUB:   neg = True; lex[0] = self._lex()
+            elif lex[0] == _OP_ADD: lex[0] = self._lex()
+        left = self._single_op(lex)
+        while lex[0] in (_OP_MUL, _OP_DIV, _OP_POW):
+            op = lex[0]; lex[0] = self._lex()
+            right = self._single_op(lex)
+            left = left + right + [(op, 0.0, -1)]
+        if neg: left = left + [(_OP_NEG, 0.0, -1)]
+        return left
+
+    def _tree(self):
+        lex = [0]; left = self._op(lex)
+        while True:
+            if lex[0] in (0, _OP_RPAREN):
+                if lex[0] == _OP_RPAREN: self._bc -= 1
+                break
+            if lex[0] not in (_OP_ADD, _OP_SUB): self._err = True; break
+            op = lex[0]; right = self._op(lex)
+            left = left + right + [(op, 0.0, -1)]
+        return left
+
+    def compile(self):
+        nodes = self._tree()
+        if self._err or self._bc != 0:
+            raise ValueError(
+                f"Expressie-syntaxfout: {self._s!r}  "
+                f"(brackets={self._bc}, err={self._err})")
+        return nodes
+
+
+def _eval_postfix(nodes: list, var_values: list) -> float:
+    """Stack-evaluator van postfix-expressie. Identiek aan mathexpr_eval() (mathexpr.c)."""
+    stack = [0.0] * 64; sp = 0
+    for opcode, fvalue, ivar in nodes:
+        if   opcode == _OP_NUM:  sp += 1; stack[sp] = fvalue
+        elif opcode == _OP_VAR:  sp += 1; stack[sp] = var_values[ivar]
+        elif opcode == _OP_ADD:  stack[sp-1] += stack[sp]; sp -= 1
+        elif opcode == _OP_SUB:  stack[sp-1] -= stack[sp]; sp -= 1
+        elif opcode == _OP_MUL:  stack[sp-1] *= stack[sp]; sp -= 1
+        elif opcode == _OP_DIV:
+            r = stack[sp]; sp -= 1
+            stack[sp] = stack[sp] / r if r != 0.0 else 0.0
+        elif opcode == _OP_POW:
+            r = stack[sp]; sp -= 1; b = stack[sp]
+            stack[sp] = math.exp(r*math.log(b)) if b > 0 else 0.0
+        elif opcode == _OP_NEG:  stack[sp] = -stack[sp]
+        elif opcode == _OP_ABS:  stack[sp] = abs(stack[sp])
+        elif opcode == _OP_SGN:
+            v = stack[sp]; stack[sp] = 1.0 if v>0 else (-1.0 if v<0 else 0.0)
+        elif opcode == _OP_SQRT: stack[sp] = math.sqrt(max(stack[sp],0.0))
+        elif opcode == _OP_LOG:
+            v = stack[sp]; stack[sp] = math.log(v) if v>0 else 0.0
+        elif opcode == _OP_LOG10:
+            v = stack[sp]; stack[sp] = math.log10(v) if v>0 else 0.0
+        elif opcode == _OP_EXP:  stack[sp] = math.exp(stack[sp])
+        elif opcode == _OP_SIN:  stack[sp] = math.sin(stack[sp])
+        elif opcode == _OP_COS:  stack[sp] = math.cos(stack[sp])
+        elif opcode == _OP_TAN:  stack[sp] = math.tan(stack[sp])
+        elif opcode == _OP_COT:
+            v = stack[sp]; stack[sp] = 1.0/math.tan(v) if v!=0 else 0.0
+        elif opcode == _OP_ASIN: stack[sp] = math.asin(max(-1.,min(1.,stack[sp])))
+        elif opcode == _OP_ACOS: stack[sp] = math.acos(max(-1.,min(1.,stack[sp])))
+        elif opcode == _OP_ATAN: stack[sp] = math.atan(stack[sp])
+        elif opcode == _OP_ACOT: stack[sp] = math.pi/2 - math.atan(stack[sp])
+        elif opcode == _OP_SINH: stack[sp] = math.sinh(stack[sp])
+        elif opcode == _OP_COSH: stack[sp] = math.cosh(stack[sp])
+        elif opcode == _OP_TANH: stack[sp] = math.tanh(stack[sp])
+        elif opcode == _OP_COTH:
+            v = stack[sp]
+            e = math.exp(min(2*v, 700))
+            stack[sp] = (e+1)/(e-1) if e != 1.0 else 0.0
+        elif opcode == _OP_STEP: stack[sp] = 0.0 if stack[sp] <= 0.0 else 1.0
+    return stack[sp]
+
+
+def _compile_str(formula: str, var_names: list, species: str) -> Callable:
+    """Compileer expressiestring naar callable via ingebouwde parser (geen sympy/eval)."""
+    try:
+        postfix = _Parser(formula, var_names).compile()
+    except ValueError as e:
+        raise ValueError(
+            f"Fout in expressie voor {species!r}: {e}\n"
+            f"  Formule    : {formula!r}\n"
+            f"  Bekende namen: {var_names}"
+        ) from e
+
+    def fn(state: dict) -> float:
+        return _eval_postfix(postfix, [state.get(v, 0.0) for v in var_names])
+    fn.__name__ = f"msx_{species}"
+    fn._formula = formula
+    return fn
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ROS2 — Rosenbrock 2(1) stijve ODE-integrator
+#  Gebaseerd op EPANET-MSX ros2.c (Verwer et al., SIAM J. Sci. Comput. 1999)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_UROUND = 2.3e-16
+_G_ROS2 = 1.0 + 1.0 / math.sqrt(2.0)   # γ = 1 + 1/√2
+
+
+def _ros2_integrate(y0, dt, rhs, atol=1e-6, rtol=1e-3):
+    """
+    Rosenbrock 2(1) met adaptieve stapgrootte.
+    Identieke algoritme als ros2_integrate() in EPANET-MSX ros2.c.
+
+    - Jacobian via eindige differenties (perturbatie √UROUND·max(|y|, 1e-6))
+    - LU via numpy.linalg.solve
+    - Foutschatting: RMSE((y2-y1)/ytol)
+    - Stapfactor: 0.9/√err, begrensd [0.1, 10]
+    - Concentraties < UROUND worden op 0 gezet na acceptatie
+    """
+    n = len(y0)
+    y = y0.copy().astype(np.float64)
+    g = _G_ROS2
+    t = 0.0; tnext = float(dt)
+
+    # Initiële stapgrootte
+    f0 = rhs(0.0, y); h = dt
+    for j in range(n):
+        ytol = atol + rtol * abs(y[j])
+        if f0[j] != 0.0: h = min(h, ytol / abs(f0[j]))
+    h = max(1e-8, min(h, dt))
+
+    ghinv1 = 0.0; is_rej = False; f_cur = f0
+
+    while t < tnext:
+        if 0.1 * abs(h) <= abs(t) * _UROUND:
+            h = tnext - t  # forceer voltooiing
+        tplus = min(t + h, tnext); h_eff = tplus - t
+
+        # Jacobian (alleen bij geaccepteerde stap)
+        if not is_rej:
+            f_cur = rhs(t, y)
+            J = np.zeros((n, n))
+            for j in range(n):
+                eps = math.sqrt(_UROUND) * max(abs(y[j]), 1e-6)
+                yp = y.copy(); yp[j] += eps
+                J[:, j] = (rhs(t, yp) - f_cur) / eps
+
+        # A = γ/h·I - J  (met correctie voor stapgrootte-wijziging)
+        ghinv = -1.0 / (g * h_eff)
+        dghinv = ghinv - ghinv1
+        if not is_rej:
+            A = -J.copy()
+            for j in range(n): A[j, j] += ghinv
+        else:
+            for j in range(n): A[j, j] += dghinv
+        ghinv1 = ghinv
+
+        # Stadium 1: (γ/h·I - J)·k1 = f(y)
+        try:
+            k1 = np.linalg.solve(A, f_cur * ghinv)
+        except np.linalg.LinAlgError:
+            h = max(0.5*h_eff, 1e-8); is_rej = True; continue
+
+        # Stadium 2: (γ/h·I - J)·k2 = f(y+h·k1) - 2·k1
+        y1 = y + h_eff * k1
+        f1 = rhs(tplus, y1)
+        try:
+            k2 = np.linalg.solve(A, (f1 - 2.0*k1) * ghinv)
+        except np.linalg.LinAlgError:
+            h = max(0.5*h_eff, 1e-8); is_rej = True; continue
+
+        # 2e-orde oplossing
+        y2 = y + 1.5*h_eff*k1 + 0.5*h_eff*k2
+
+        # Foutschatting (RMSE)
+        err = 0.0
+        for j in range(n):
+            ytol = atol + rtol * abs(y2[j])
+            ej = abs(y2[j] - y1[j]) / ytol
+            err += ej * ej
+        err = max(math.sqrt(err / n), _UROUND)
+
+        # Stapfactor (identiek aan ros2.c)
+        factor = 0.9 / math.sqrt(err)
+        facmax = 1.0 if is_rej else 10.0
+        factor = min(max(factor, 0.1), facmax)
+        h_new  = min(factor * h_eff, tnext - tplus + h_eff)
+
+        if err > 1.0:
+            h = max(0.5*h_eff, 1e-8); is_rej = True
+        else:
+            for j in range(n):
+                y[j] = y2[j] if y2[j] > _UROUND else 0.0
+            t = tplus; h = h_new; is_rej = False
+
+    return np.maximum(y, 0.0)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MsxReactionSystem
+# ══════════════════════════════════════════════════════════════════════════════
 
 class MsxReactionSystem:
     """
     Multi-species reactielaag compatibel met EPANET-MSX concepten.
-
-    Plugt in op de NzingaFlowSolver via de `geochem`-parameter:
-    de solver roept `apply_geochemistry()` en `apply_mixing()` aan
-    op dezelfde manier als GeochemSolver.
+    Plugt in op NzingaFlowSolver via geochem=rxn.
 
     Parameters
     ----------
-    bulk_species : list[str]
-        Namen van de bulksoorten in dezelfde volgorde als de C-matrix
-        van de SegmentStore. Lengte moet overeenkomen met n_species.
-    wall_species : list[str]
-        Namen van de oppervlaktesoorten. Lege lijst = geen wandsoorten.
-    params : dict[str, float]
-        Reactieparameters (constanten). Kunnen ook per leiding ingesteld
-        worden via `set_pipe_param()`.
-    pipe_rates : dict[str, str | callable]
-        RATE-expressies voor leidingen. Sleutel = soort; waarde = string
-        (wordt gecompileerd) of callable(state_dict) → float.
-    pipe_equil : dict[str, str | callable]
-        EQUIL-expressies voor leidingen (evenwichtssoorten).
-        De expressie moet gelijk zijn aan 0; Newton-iteratie lost op.
-    pipe_formulas : dict[str, str | callable]
-        FORMULA-expressies: directe berekening (geen ODE/evenwicht).
-    tank_rates : dict[str, str | callable]
-        RATE-expressies voor tanks (geen wandsoorten in tanks).
-    tank_formulas : dict[str, str | callable]
-        FORMULA-expressies voor tanks.
-    solver : str
-        ODE-integratiemethode: 'euler', 'rk4', 'rk45', 'radau'.
-        Gebruik 'rk4' voor niet-stijve systemen (standaard).
-        Gebruik 'radau' voor stijve systemen (chloramine, biofilm).
-    rtol, atol : float
-        Toleranties voor adaptieve solvers (rk45, radau).
+    bulk_species  : list[str]   — bulksoorten (volgorde = C-matrix index)
+    wall_species  : list[str]   — wandsoorten (lege lijst = geen)
+    params        : dict        — reactieparameters (constanten)
+    pipe_rates    : dict        — RATE-expressies leidingen (str of callable)
+    pipe_equil    : dict        — EQUIL-expressies leidingen
+    pipe_formulas : dict        — FORMULA-expressies leidingen
+    tank_rates    : dict        — RATE-expressies tanks
+    tank_formulas : dict        — FORMULA-expressies tanks
+    solver        : str         — 'euler'|'rk4'|'ros2'|'rk45'|'radau'
+    rtol, atol    : float       — toleranties voor adaptieve solvers
     """
 
     def __init__(
         self,
-        bulk_species:   List[str],
-        wall_species:   List[str] = (),
-        params:         Dict[str, float] = None,
-        pipe_rates:     Dict[str, Union[str, Callable]] = None,
-        pipe_equil:     Dict[str, Union[str, Callable]] = None,
-        pipe_formulas:  Dict[str, Union[str, Callable]] = None,
-        tank_rates:     Dict[str, Union[str, Callable]] = None,
-        tank_formulas:  Dict[str, Union[str, Callable]] = None,
-        solver:         str = 'rk4',
-        rtol:           float = 1e-3,
-        atol:           float = 1e-6,
+        bulk_species,
+        wall_species   = (),
+        params         = None,
+        pipe_rates     = None,
+        pipe_equil     = None,
+        pipe_formulas  = None,
+        tank_rates     = None,
+        tank_formulas  = None,
+        solver         = 'rk4',
+        rtol           = 1e-3,
+        atol           = 1e-6,
     ):
         if solver not in _SOLVERS:
             raise ValueError(f"solver moet één van {_SOLVERS} zijn, niet {solver!r}")
 
-        self.bulk_species  = list(bulk_species)
-        self.wall_species  = list(wall_species)
-        self.n_bulk        = len(bulk_species)
-        self.n_wall        = len(wall_species)
-        self.params        = dict(params or {})
-        self.solver        = solver
-        self.rtol          = rtol
-        self.atol          = atol
+        self.bulk_species = list(bulk_species)
+        self.wall_species = list(wall_species)
+        self.n_bulk       = len(bulk_species)
+        self.n_wall       = len(wall_species)
+        self.params       = dict(params or {})
+        self.solver       = solver
+        self.rtol         = rtol
+        self.atol         = atol
 
-        # Per-leiding parameteroverrides: {pipe_idx: {param_name: value}}
         self._pipe_params: Dict[int, Dict[str, float]] = {}
-
-        # C_wall: (n_pipes, n_wall_species)  — geïnitialiseerd bij eerste aanroep
-        self._C_wall: Optional[np.ndarray] = None
+        self._C_wall:  Optional[np.ndarray] = None
         self._n_pipes: int = 0
 
-        # Compileer expressies
-        self._pipe_rate_fns   = self._compile_all(pipe_rates   or {}, 'pipe')
-        self._pipe_equil_fns  = self._compile_all(pipe_equil   or {}, 'pipe')
-        self._pipe_formula_fns= self._compile_all(pipe_formulas or {}, 'pipe')
-        self._tank_rate_fns   = self._compile_all(tank_rates   or {}, 'tank')
-        self._tank_formula_fns= self._compile_all(tank_formulas or {}, 'tank')
+        # Variabelenamen voor de parser
+        self._var_names: List[str] = (
+            self.bulk_species + self.wall_species +
+            list(self.params.keys()) + ['Av', 't']
+        )
 
-        # Index: soort → positie in bulk of wall array
+        self._pipe_rate_fns    = self._compile_all(pipe_rates    or {})
+        self._pipe_equil_fns   = self._compile_all(pipe_equil    or {})
+        self._pipe_formula_fns = self._compile_all(pipe_formulas or {})
+        self._tank_rate_fns    = self._compile_all(tank_rates    or {})
+        self._tank_formula_fns = self._compile_all(tank_formulas or {})
+
         self._bulk_idx = {s: i for i, s in enumerate(bulk_species)}
         self._wall_idx = {s: i for i, s in enumerate(wall_species)}
 
-        # Soorten met RATE-expressies (worden geïntegreerd)
-        self._bulk_rate_names = [s for s in bulk_species  if s in self._pipe_rate_fns]
-        self._wall_rate_names = [s for s in wall_species  if s in self._pipe_rate_fns]
-
-    # ── Expressie-compilatie ─────────────────────────────────────────────────
-
-    def _compile_all(
-        self,
-        exprs: Dict[str, Union[str, Callable]],
-        context: str,
-    ) -> Dict[str, Callable]:
+    def _compile_all(self, exprs):
         compiled = {}
         for name, expr in exprs.items():
             if callable(expr):
                 compiled[name] = expr
             elif isinstance(expr, str):
-                compiled[name] = self._compile_str(expr, name, context)
+                compiled[name] = _compile_str(expr, self._var_names, name)
             else:
-                raise TypeError(f"Expressie voor {name!r} moet str of callable zijn")
+                raise TypeError(
+                    f"Expressie voor {name!r} moet str of callable zijn")
         return compiled
 
-    def _compile_str(self, expr: str, species: str, context: str) -> Callable:
-        """
-        Compileer een expressie-string naar een Python-functie via sympy.
-
-        De functie ontvangt een state-dict en retourneert een float.
-        Alle soorten, parameters en 'Av' zijn beschikbaar als symbolen.
-        """
-        try:
-            import sympy as _sp
-
-            # Alle symbolische variabelen
-            sym_names = (
-                self.bulk_species + self.wall_species
-                + list(self.params.keys())
-                + ['Av', 't']
-            )
-            syms = {n: _sp.Symbol(n) for n in sym_names}
-
-            parsed = _sp.sympify(expr, locals=syms)
-            free   = {str(s) for s in parsed.free_symbols}
-
-            # lambdify → snelle numpy-functie
-            sym_list = [syms[n] for n in sym_names if n in free]
-            lam = _sp.lambdify(sym_list, parsed, modules='numpy')
-            free_names = [n for n in sym_names if n in free]
-
-            def fn(state: dict) -> float:
-                args = [state[n] for n in free_names]
-                return float(lam(*args))
-
-            fn.__name__ = f"msx_{context}_{species}"
-            return fn
-
-        except ImportError:
-            # Fallback: eval() zonder sympy
-            warnings.warn(
-                "sympy niet beschikbaar; gebruik eval() voor expressies. "
-                "Installeer sympy voor veiligere compilatie.",
-                ImportWarning, stacklevel=3
-            )
-            code = compile(expr, f"<msx {species}>", 'eval')
-
-            def fn_eval(state: dict) -> float:
-                return float(eval(code, {"__builtins__": {}}, state))
-
-            return fn_eval
-
-    # ── Initialisatie wandsoorten ─────────────────────────────────────────────
-
-    def _ensure_wall(self, n_pipes: int, n_wall: int) -> None:
-        if self._C_wall is None or self._n_pipes != n_pipes:
-            self._C_wall  = np.zeros((n_pipes, n_wall), dtype=np.float64)
-            self._n_pipes = n_pipes
-
-    # ── Per-leiding parameteroverride ─────────────────────────────────────────
-
     def set_pipe_param(self, pipe_idx: int, **kwargs: float) -> None:
-        """
-        Stel een of meer parameters in voor een specifieke leiding.
-
-        Overeenkomst met MSX [PARAMETERS]-sectie.
-
-        Voorbeeld
-        ---------
-            rxn.set_pipe_param(5, k_wall=2e-6)   # gietijzer leiding
-            rxn.set_pipe_param(12, k_wall=5e-7)  # PVC leiding
-        """
+        """Stel parameteroverrides in voor één leiding (MSX [PARAMETERS])."""
         self._pipe_params.setdefault(pipe_idx, {}).update(kwargs)
 
-    def get_wall_concentrations(self) -> Optional[np.ndarray]:
-        """Retourneer huidige wandconcentraties als (n_pipes, n_wall_species) array."""
+    def get_wall_concentrations(self):
         return self._C_wall.copy() if self._C_wall is not None else None
 
     def set_wall_concentrations(self, C_wall: np.ndarray) -> None:
-        """Stel beginconcentraties in voor wandsoorten (n_pipes, n_wall_species)."""
-        self._C_wall = np.asarray(C_wall, dtype=np.float64).copy()
+        self._C_wall  = np.asarray(C_wall, dtype=np.float64).copy()
         self._n_pipes = C_wall.shape[0]
 
-    # ── State-dict bouwen ─────────────────────────────────────────────────────
+    def reset(self) -> None:
+        if self._C_wall is not None:
+            self._C_wall[:] = 0.0
 
-    def _make_state(
-        self,
-        C_bulk: np.ndarray,   # (n_bulk,)
-        C_wall: np.ndarray,   # (n_wall,)
-        Av:     float,
-        t:      float = 0.0,
-        pipe_idx: Optional[int] = None,
-    ) -> dict:
-        """Bouw een toestandsdict voor expressie-evaluatie."""
+    def _ensure_wall(self, n_pipes: int) -> None:
+        if self._C_wall is None or self._n_pipes != n_pipes:
+            self._C_wall  = np.zeros((n_pipes, self.n_wall), dtype=np.float64)
+            self._n_pipes = n_pipes
+
+    def _make_state(self, C_bulk, C_wall, Av, t=0.0, pipe_idx=None):
         state = {s: float(C_bulk[i]) for i, s in enumerate(self.bulk_species)}
         state.update({s: float(C_wall[i]) for i, s in enumerate(self.wall_species)})
         state.update(self.params)
@@ -277,380 +467,207 @@ class MsxReactionSystem:
         state['t']  = float(t)
         return state
 
-    # ── ODE rechterhand ───────────────────────────────────────────────────────
-
-    def _rhs_pipe(
-        self,
-        y:      np.ndarray,   # (n_bulk + n_wall,)
-        Av:     float,
-        t:      float,
-        pipe_idx: Optional[int],
-        rate_fns: Dict[str, Callable],
-    ) -> np.ndarray:
-        """
-        Rechterhands-vector voor leidingsegment.
-        y = [C_bulk..., C_wall...]
-        """
-        C_bulk = y[:self.n_bulk]
-        C_wall = y[self.n_bulk:]
+    def _rhs_pipe(self, y, Av, t, pipe_idx, rate_fns):
+        C_bulk = y[:self.n_bulk]; C_wall = y[self.n_bulk:]
         state  = self._make_state(C_bulk, C_wall, Av, t, pipe_idx)
-
         dy = np.zeros_like(y)
         for name, fn in rate_fns.items():
             val = fn(state)
-            if name in self._bulk_idx:
-                dy[self._bulk_idx[name]] += val
-            elif name in self._wall_idx:
-                dy[self.n_bulk + self._wall_idx[name]] += val
+            if name in self._bulk_idx:   dy[self._bulk_idx[name]] += val
+            elif name in self._wall_idx: dy[self.n_bulk + self._wall_idx[name]] += val
         return dy
 
-    def _rhs_tank(
-        self,
-        y:    np.ndarray,
-        t:    float,
-        rate_fns: Dict[str, Callable],
-    ) -> np.ndarray:
+    def _rhs_tank(self, y, t, rate_fns):
         C_bulk = y[:self.n_bulk]
-        C_wall = np.zeros(self.n_wall)
-        state  = self._make_state(C_bulk, C_wall, Av=0.0, t=t)
-
+        state  = self._make_state(C_bulk, np.zeros(self.n_wall), 0.0, t)
         dy = np.zeros_like(y)
         for name, fn in rate_fns.items():
             if name in self._bulk_idx:
                 dy[self._bulk_idx[name]] += fn(state)
         return dy
 
-    # ── Integratie-stap ───────────────────────────────────────────────────────
-
-    def _integrate(
-        self,
-        y0:  np.ndarray,
-        dt:  float,
-        rhs: Callable,   # signatuur: rhs(t: float, y: ndarray) -> ndarray
-    ) -> np.ndarray:
-        """
-        Integreer van t=0 naar t=dt met gekozen methode.
-        rhs-conventie: rhs(t, y) — overeenkomstig scipy.integrate.solve_ivp.
-        """
+    def _integrate(self, y0, dt, rhs):
         y0 = np.asarray(y0, dtype=np.float64)
-
         if self.solver == 'euler':
             return np.maximum(y0 + dt * rhs(0.0, y0), 0.0)
-
         elif self.solver == 'rk4':
-            k1 = rhs(0.0,       y0)
-            k2 = rhs(0.5*dt,    np.maximum(y0 + 0.5*dt*k1, 0.0))
-            k3 = rhs(0.5*dt,    np.maximum(y0 + 0.5*dt*k2, 0.0))
-            k4 = rhs(dt,        np.maximum(y0 +     dt*k3,  0.0))
-            return np.maximum(y0 + (dt/6.0) * (k1 + 2*k2 + 2*k3 + k4), 0.0)
-
-        else:
+            k1 = rhs(0.0,    y0)
+            k2 = rhs(0.5*dt, np.maximum(y0+0.5*dt*k1, 0.0))
+            k3 = rhs(0.5*dt, np.maximum(y0+0.5*dt*k2, 0.0))
+            k4 = rhs(dt,     np.maximum(y0+    dt*k3, 0.0))
+            return np.maximum(y0 + (dt/6.0)*(k1+2*k2+2*k3+k4), 0.0)
+        elif self.solver == 'ros2':
+            return _ros2_integrate(y0, dt, rhs, atol=self.atol, rtol=self.rtol)
+        else:  # rk45 / radau
             from scipy.integrate import solve_ivp
             method = 'RK45' if self.solver == 'rk45' else 'Radau'
-            sol = solve_ivp(
-                rhs, [0.0, dt], y0,
-                method=method,
-                rtol=self.rtol, atol=self.atol,
-                dense_output=False,
-            )
+            sol = solve_ivp(rhs, [0.0, dt], y0, method=method,
+                            rtol=self.rtol, atol=self.atol)
             if not sol.success:
-                warnings.warn(
-                    f"ODE-integratie niet geconvergeerd: {sol.message}",
-                    RuntimeWarning, stacklevel=3,
-                )
+                warnings.warn(f"ODE niet geconvergeerd ({method}): {sol.message}",
+                              RuntimeWarning, stacklevel=3)
             return np.maximum(sol.y[:, -1], 0.0)
 
-    # ── Evenwichtsoplossing (Newton) ──────────────────────────────────────────
-
-    def _solve_equil(
-        self,
-        C_bulk: np.ndarray,
-        C_wall: np.ndarray,
-        Av:     float,
-        pipe_idx: Optional[int],
-        max_iter: int = 20,
-        tol:      float = 1e-8,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Newton-iteratie voor evenwichtssoorten.
-        Elke EQUIL-expressie f(C) = 0; los op voor de betreffende soort.
-        Eén-dimensionaal Newton (secant-methode per soort).
-        """
-        C_b = C_bulk.copy()
-        C_w = C_wall.copy()
-
+    def _solve_equil(self, C_bulk, C_wall, Av, pipe_idx,
+                     max_iter=20, tol=1e-8):
+        C_b = C_bulk.copy(); C_w = C_wall.copy()
         for _ in range(max_iter):
             converged = True
             for name, fn in self._pipe_equil_fns.items():
                 state = self._make_state(C_b, C_w, Av, pipe_idx=pipe_idx)
                 f0 = fn(state)
-                if abs(f0) < tol:
-                    continue
+                if abs(f0) < tol: continue
                 converged = False
-
-                # Secant stap: perturbeer de variabele
                 if name in self._bulk_idx:
                     idx = self._bulk_idx[name]
-                    dx  = max(abs(C_b[idx]) * 1e-6, 1e-12)
+                    dx  = max(abs(C_b[idx])*1e-6, 1e-12)
                     C_b[idx] += dx
-                    state2 = self._make_state(C_b, C_w, Av, pipe_idx=pipe_idx)
-                    f1 = fn(state2)
-                    dfdx = (f1 - f0) / dx if abs(f1 - f0) > 1e-20 else 1.0
-                    C_b[idx] -= dx + f0 / dfdx
-                    C_b[idx]  = max(C_b[idx], 0.0)   # concentratie ≥ 0
+                    f1 = fn(self._make_state(C_b, C_w, Av, pipe_idx=pipe_idx))
+                    dfdx = (f1-f0)/dx if abs(f1-f0)>1e-20 else 1.0
+                    C_b[idx] = max(C_b[idx]-dx-f0/dfdx, 0.0)
                 elif name in self._wall_idx:
                     idx = self._wall_idx[name]
-                    dx  = max(abs(C_w[idx]) * 1e-6, 1e-12)
+                    dx  = max(abs(C_w[idx])*1e-6, 1e-12)
                     C_w[idx] += dx
-                    state2 = self._make_state(C_b, C_w, Av, pipe_idx=pipe_idx)
-                    f1 = fn(state2)
-                    dfdx = (f1 - f0) / dx if abs(f1 - f0) > 1e-20 else 1.0
-                    C_w[idx] -= dx + f0 / dfdx
-                    C_w[idx]  = max(C_w[idx], 0.0)
-
-            if converged:
-                break
-
+                    f1 = fn(self._make_state(C_b, C_w, Av, pipe_idx=pipe_idx))
+                    dfdx = (f1-f0)/dx if abs(f1-f0)>1e-20 else 1.0
+                    C_w[idx] = max(C_w[idx]-dx-f0/dfdx, 0.0)
+            if converged: break
         return C_b, C_w
 
-    # ── Hoofd-API: apply_geochemistry ─────────────────────────────────────────
+    def apply_geochemistry(self, store, dt, pipe_diam=None,
+                           pipe_vel=None, t=0.0):
+        """Verwerk reacties voor alle actieve segmenten (compatibel met GeochemSolver)."""
+        n = store.n
+        if n == 0: return
+        n_pipes = int(store.pipe[:n].max()) + 1
+        self._ensure_wall(n_pipes)
 
-    def apply_geochemistry(
-        self,
-        store,
-        dt:        float,
-        pipe_diam: Optional[np.ndarray] = None,
-        pipe_vel:  Optional[np.ndarray] = None,
-        t:         float = 0.0,
-    ) -> None:
-        """
-        Verwerk reacties voor alle actieve segmenten (React-stap).
+        Av_arr = (4.0 / np.maximum(pipe_diam, 1e-6)
+                  if pipe_diam is not None and self.n_wall > 0
+                  else np.zeros(n_pipes))
 
-        Compatibel met GeochemSolver.apply_geochemistry() interface:
-        de NzingaFlowSolver roept deze methode aan in step().
-
-        Parameters
-        ----------
-        store     : SegmentStore  (velden: .pipe, .C, .n)
-        dt        : tijdstap [s]
-        pipe_diam : (n_pipes,) diameter [m]; None → Av=0 (geen wandsoorten)
-        pipe_vel  : niet gebruikt; aanwezig voor compatibiliteit
-        t         : gesimuleerde tijd [s]
-        """
-        n       = store.n
-        if n == 0:
-            return
-
-        n_pipes = int(store.pipe[:n].max()) + 1 if n > 0 else 1
-        self._ensure_wall(n_pipes, self.n_wall)
-
-        # Av per leiding [m²/m³] = 4/D voor een cilinder
-        if pipe_diam is not None and self.n_wall > 0:
-            Av_arr = 4.0 / np.maximum(pipe_diam, 1e-6)
-        else:
-            Av_arr = np.zeros(n_pipes)
-
-        has_rates  = bool(self._pipe_rate_fns)
-        has_equil  = bool(self._pipe_equil_fns)
-        has_form   = bool(self._pipe_formula_fns)
-        has_wall   = self.n_wall > 0
-
-        # Groepeer segmenten per leiding voor efficiënte wandkoppeling
-        pipe_arr = store.pipe[:n]
+        has_rates = bool(self._pipe_rate_fns)
+        has_equil = bool(self._pipe_equil_fns)
+        has_form  = bool(self._pipe_formula_fns)
+        has_wall  = self.n_wall > 0
+        pipe_arr  = store.pipe[:n]
 
         for seg_i in range(n):
-            pi     = int(pipe_arr[seg_i])
-            Av     = float(Av_arr[pi]) if pi < len(Av_arr) else 0.0
-            C_b    = store.C[seg_i].copy()
-            C_w    = self._C_wall[pi].copy() if has_wall else np.zeros(0)
+            pi  = int(pipe_arr[seg_i])
+            Av  = float(Av_arr[pi]) if pi < len(Av_arr) else 0.0
+            C_b = store.C[seg_i].copy()
+            C_w = self._C_wall[pi].copy() if has_wall else np.zeros(0)
 
-            # ── RATE-integratie ─────────────────────────────────────────────
             if has_rates:
-                y0  = np.concatenate([C_b, C_w])
-                _Av, _t, _pi, _rfns = Av, t, pi, self._pipe_rate_fns
-                def _rhs_bound(_t_arg, y, _Av=_Av, _pi=_pi, _rfns=_rfns):
+                y0 = np.concatenate([C_b, C_w])
+                _Av=Av; _pi=pi; _rfns=self._pipe_rate_fns
+                def _rhs(_t, y, _Av=_Av, _pi=_pi, _rfns=_rfns):
                     return self._rhs_pipe(np.asarray(y), _Av, 0.0, _pi, _rfns)
-                y1  = self._integrate(y0, dt, _rhs_bound)
+                y1  = self._integrate(y0, dt, _rhs)
                 C_b = np.maximum(y1[:self.n_bulk], 0.0)
-                C_w = np.maximum(y1[self.n_bulk:],  0.0) if has_wall else C_w
+                C_w = np.maximum(y1[self.n_bulk:], 0.0) if has_wall else C_w
 
-            # ── EQUIL-iteratie ──────────────────────────────────────────────
             if has_equil:
                 C_b, C_w = self._solve_equil(C_b, C_w, Av, pi)
 
-            # ── FORMULA (afgeleide variabelen) ──────────────────────────────
             if has_form:
                 state = self._make_state(C_b, C_w, Av, t, pi)
                 for name, fn in self._pipe_formula_fns.items():
                     if name in self._bulk_idx:
                         C_b[self._bulk_idx[name]] = max(fn(state), 0.0)
 
-            # ── Schrijf terug ────────────────────────────────────────────────
             store.C[seg_i] = C_b
-            if has_wall:
-                self._C_wall[pi] = C_w
+            if has_wall: self._C_wall[pi] = C_w
 
-    # ── Tank-reacties na knoopmenging ────────────────────────────────────────
-
-    def apply_mixing(
-        self,
-        node_C:    np.ndarray,   # (node_count, n_bulk) — in-place
-        node_flow: np.ndarray,   # (node_count,)
-        dt:        float,
-        t:         float = 0.0,
-    ) -> None:
-        """
-        Verwerk bulk-reacties na knoopmenging (tank + evenwicht bij knopen).
-
-        Compatibel met GeochemSolver.apply_mixing() interface.
-        Alleen bulk-soorten; wandsoorten niet aanwezig bij knopen.
-        """
+    def apply_mixing(self, node_C, node_flow, dt, t=0.0):
+        """Tank-reacties na knoopmenging (compatibel met GeochemSolver)."""
         has_rates = bool(self._tank_rate_fns)
         has_form  = bool(self._tank_formula_fns)
+        if not has_rates and not has_form: return
 
-        if not has_rates and not has_form:
-            return
-
-        node_count = node_C.shape[0]
-        for ni in range(node_count):
-            if node_flow[ni] <= 0.0:
-                continue
+        for ni in range(node_C.shape[0]):
+            if node_flow[ni] <= 0.0: continue
             C_b = node_C[ni].copy()
-            C_w = np.zeros(0)       # geen wandsoorten bij knopen
-
             if has_rates:
-                y0 = C_b.copy()
                 _tfns = self._tank_rate_fns
-                def _rhs_tank_bound(_t_arg, y, _f=_tfns):
+                def _rhs_t(_t, y, _f=_tfns):
                     return self._rhs_tank(np.asarray(y), 0.0, _f)
-                y1 = self._integrate(y0, dt, _rhs_tank_bound)
-                C_b = np.maximum(y1, 0.0)
-
+                C_b = self._integrate(C_b, dt, _rhs_t)
             if has_form:
-                state = self._make_state(C_b, C_w, Av=0.0, t=t)
+                state = self._make_state(C_b, np.zeros(0), 0.0, t)
                 for name, fn in self._tank_formula_fns.items():
                     if name in self._bulk_idx:
                         C_b[self._bulk_idx[name]] = max(fn(state), 0.0)
-
             node_C[ni] = C_b
 
-    # ── Reset ────────────────────────────────────────────────────────────────
-
-    def reset(self) -> None:
-        """Reset wandsoorten naar nul (bij herstart simulatie)."""
-        if self._C_wall is not None:
-            self._C_wall[:] = 0.0
-
-    # ── Repr ─────────────────────────────────────────────────────────────────
-
-    def __repr__(self) -> str:
+    def __repr__(self):
         return (
             f"<MsxReactionSystem "
-            f"bulk={self.bulk_species} "
-            f"wall={self.wall_species} "
+            f"bulk={self.bulk_species} wall={self.wall_species} "
             f"solver={self.solver!r} "
             f"pipe_rates={list(self._pipe_rate_fns.keys())} "
             f"equil={list(self._pipe_equil_fns.keys())}>"
         )
 
 
-# ── Voorgeconfigureerde reactiesystemen ──────────────────────────────────────
+# ── Voorgeconfigureerde reactiesystemen ───────────────────────────────────────
 
-def chloramine_decay_msx(
-    k_f:    float = 2.5e-4,   # NH2Cl-vervalconstante [1/s]
-    k_ox:   float = 5.0e-5,   # oxidatie HOCl+NH3 [1/(mg/L·s)]
-    solver: str   = 'rk4',
-) -> MsxReactionSystem:
-    """
-    Drie-stof chloramine-verval (Vikesland 2001, vereenvoudigd):
-        HOCl + NH3 → NH2Cl   (snel)
-        NH2Cl     → producten (langzaam)
-
-    Soorten: [HOCl, NH3, NH2Cl]
-    """
+def chloramine_decay_msx(k_f=2.5e-4, k_ox=5.0e-5, solver='ros2'):
+    """HOCl + NH3 → NH2Cl (Vikesland 2001). Soorten: [HOCl, NH3, NH2Cl]."""
     return MsxReactionSystem(
-        bulk_species = ['HOCl', 'NH3', 'NH2Cl'],
-        params       = {'k_ox': k_ox, 'k_f': k_f},
-        pipe_rates   = {
+        bulk_species=['HOCl','NH3','NH2Cl'],
+        params={'k_ox':k_ox,'k_f':k_f},
+        pipe_rates={
             'HOCl':  '-k_ox * HOCl * NH3',
             'NH3':   '-k_ox * HOCl * NH3',
             'NH2Cl': 'k_ox * HOCl * NH3 - k_f * NH2Cl',
         },
-        tank_rates   = {
+        tank_rates={
             'HOCl':  '-k_ox * HOCl * NH3',
             'NH3':   '-k_ox * HOCl * NH3',
             'NH2Cl': 'k_ox * HOCl * NH3 - k_f * NH2Cl',
         },
-        solver = solver,
+        solver=solver,
     )
 
 
-def chlorine_nom_msx(
-    k_bulk: float = 3e-4,    # chloor+NOM bulk [1/(mg/L·s)]
-    k_wall: float = 1e-5,    # wandreactie chloor [m/s]
-    solver: str   = 'rk4',
-) -> MsxReactionSystem:
-    """
-    Twee-stof chloor-NOM model:
-        Cl2 reageert met NOM in bulk en aan de wand.
-
-    Soorten: [Cl2, NOM]
-    """
+def chlorine_nom_msx(k_bulk=3e-4, k_wall=1e-5, solver='rk4'):
+    """Cl2 + NOM bulk- en wandreactie. Soorten: [Cl2, NOM]."""
     return MsxReactionSystem(
-        bulk_species = ['Cl2', 'NOM'],
-        params       = {'k_b': k_bulk, 'k_w_ms': k_wall},
-        pipe_rates   = {
+        bulk_species=['Cl2','NOM'],
+        params={'k_b':k_bulk,'k_w_ms':k_wall},
+        pipe_rates={
             'Cl2': '-k_b * Cl2 * NOM - k_w_ms * Cl2 * Av',
             'NOM': '-k_b * Cl2 * NOM',
         },
-        tank_rates   = {
+        tank_rates={
             'Cl2': '-k_b * Cl2 * NOM',
             'NOM': '-k_b * Cl2 * NOM',
         },
-        solver = solver,
+        solver=solver,
     )
 
 
-def arsenic_oxidation_msx(
-    Ka:   float = 10.0,    # arseniet-oxidatiesnelheid [L/(µg·h)] → [L/(µg·s)]
-    Kb:   float = 0.1,     # NH2Cl-verval [1/h] → [1/s]
-    K1:   float = 5.0,     # adsorptiesnelheid  [L/(µg·h)]
-    K2:   float = 1.0,     # desorptiesnelheid  [1/h]
-    Smax: float = 50.0,    # max oppervlakconcentratie [µg/m²]
-    solver: str = 'radau', # stijf door adsorptie-evenwicht
-) -> MsxReactionSystem:
-    """
-    Arseen-oxidatie + adsorptie (Zhang 2004, MSX voorbeeld 1):
-        AS3 + NH2CL → AS5          (oxidatie)
-        AS5 ⇌ AS5s                 (adsorptie aan wand)
-
-    Soorten bulk:  [AS3, AS5, NH2CL]
-    Soorten wand:  [AS5s]
-    Eenheden:      µg/L voor bulk, µg/m² voor wand
-    """
-    # Eenheden: Ka en K1 in handboek per uur → omzetten naar per seconde
-    Ka_s = Ka / 3600.0
-    Kb_s = Kb / 3600.0
-    K1_s = K1 / 3600.0
-    K2_s = K2 / 3600.0
-
+def arsenic_oxidation_msx(Ka=10.0, Kb=0.1, K1=5.0, K2=1.0, Smax=50.0,
+                          solver='ros2'):
+    """AS3-oxidatie + adsorptie (Zhang 2004). Bulk: [AS3,AS5,NH2CL] Wall: [AS5s]."""
+    Ka_s=Ka/3600; Kb_s=Kb/3600; K1_s=K1/3600; K2_s=K2/3600
     return MsxReactionSystem(
-        bulk_species = ['AS3', 'AS5', 'NH2CL'],
-        wall_species = ['AS5s'],
-        params       = {'Ka': Ka_s, 'Kb': Kb_s, 'K1': K1_s,
-                        'K2': K2_s, 'Smax': Smax,
-                        'Ks': K1_s / K2_s},
-        pipe_rates   = {
-            'AS3':  '-Ka * AS3 * NH2CL',
-            'AS5':  'Ka * AS3 * NH2CL - Av * (K1 * (Smax - AS5s) * AS5 - K2 * AS5s)',
-            'NH2CL':'-Kb * NH2CL',
-            'AS5s': 'K1 * (Smax - AS5s) * AS5 - K2 * AS5s',
+        bulk_species=['AS3','AS5','NH2CL'],
+        wall_species=['AS5s'],
+        params={'Ka':Ka_s,'Kb':Kb_s,'K1':K1_s,'K2':K2_s,
+                'Smax':Smax,'Ks':K1_s/K2_s},
+        pipe_rates={
+            'AS3':   '-Ka * AS3 * NH2CL',
+            'AS5':   'Ka * AS3 * NH2CL - Av * (K1 * (Smax - AS5s) * AS5 - K2 * AS5s)',
+            'NH2CL': '-Kb * NH2CL',
+            'AS5s':  'K1 * (Smax - AS5s) * AS5 - K2 * AS5s',
         },
-        pipe_formulas= {},   # AStot optioneel: voeg toe als extra bulk-soort
-        tank_rates   = {
+        tank_rates={
             'AS3':   '-Ka * AS3 * NH2CL',
             'AS5':   'Ka * AS3 * NH2CL',
             'NH2CL': '-Kb * NH2CL',
         },
-        solver = solver,
+        solver=solver,
     )
