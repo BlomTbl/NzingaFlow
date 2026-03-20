@@ -92,7 +92,7 @@ cd nzingaflow
 pip install -e ".[dev]"
 ```
 
-> **Vereisten:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
+> **Vereisten:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 1.1
 
 ---
 
@@ -168,7 +168,7 @@ solver = NzingaFlowSolver(
 ```python
 from nzingaflow.msx import chloramine_decay_msx
 
-rxn = chloramine_decay_msx(k_f=2.5e-4, k_ox=5e-5, solver='rk4')
+rxn = chloramine_decay_msx(k_f=2.5e-4, k_ox=5e-5, solver='ros2')
 
 solver = NzingaFlowSolver(
     "netwerk.inp",
@@ -532,7 +532,7 @@ rxn = MsxReactionSystem(
     pipe_rates={},         # {soort: expressie} in leidingen
     pipe_formulas={},      # {soort: expressie} afgeleide variabelen
     tank_rates={},         # {soort: expressie} in tanks
-    solver='rk4',          # 'euler', 'rk4', 'rk45' of 'radau' (stijf)
+    solver='rk4',          # 'euler', 'rk4', 'ros2' (stijf, geen scipy), 'rk45', 'radau'
 )
 ```
 
@@ -547,12 +547,15 @@ rxn = MsxReactionSystem(
 
 **Numerieke solvers**
 
-| Solver | Type | Gebruik |
-|---|---|---|
-| `euler` | Expliciet, 1e orde | Snel; alleen niet-stijve systemen |
-| `rk4` | Expliciet, 4e orde | Standaard voor de meeste systemen |
-| `rk45` | Adaptief via scipy | Niet-stijf; variabele stapgrootte |
-| `radau` | Impliciet via scipy | Stijve systemen (chloramineverval, biofilm) |
+| Solver | Type | scipy nodig | Aanbevolen voor |
+|---|---|---|---|
+| `euler` | Expliciet, 1e orde | Nee | Snel; alleen niet-stijve systemen |
+| `rk4` | Expliciet, 4e orde | Nee | Standaard voor de meeste systemen |
+| `ros2` | Rosenbrock 2(1), adaptief | **Nee** | **Stijve systemen** (chloramine, biofilm) |
+| `rk45` | Adaptief RK45 | Ja | Niet-stijf; variabele stapgrootte |
+| `radau` | Impliciet Radau IIA | Ja | Stijf (legacy; gebruik `ros2`) |
+
+**Expressie-parser:** string-expressies worden gecompileerd via een ingebouwde tokenizer/evaluator gebaseerd op EPANET-MSX `mathexpr.c` (Rossman/Shang/Uber — US EPA NRMRL). Geen sympy of eval() nodig. Compile-time validatie geeft `ValueError` bij onbekende variabelenamen.
 
 **Wandsoorten**
 
@@ -599,7 +602,7 @@ from nzingaflow.msx import (
     arsenic_oxidation_msx,   # AS3→AS5, wandadsorptie (Zhang 2004); stoffen: [AS3, AS5, NH2CL] + wand [AS5s]
 )
 
-rxn = chloramine_decay_msx(k_f=2.5e-4, k_ox=5e-5, solver='rk4')
+rxn = chloramine_decay_msx(k_f=2.5e-4, k_ox=5e-5, solver='ros2')
 rxn = chlorine_nom_msx(k_bulk=3e-4, k_wall=1e-5, solver='rk4')
 rxn = arsenic_oxidation_msx(Ka=10.0, Kb=0.1, K1=5.0, K2=1.0, Smax=50.0, solver='radau')
 ```
@@ -938,7 +941,9 @@ Standaard worden pompen overgeslagen (`include_pumps=False`). U kunt pompen incl
 - **Stagnatie-minimum** in `compute_wall_k()`: minimaal filmtransport `k_f_min = 4·D_mol/D` bij nagenoeg nul-snelheid.
 - **Lekkagemodellering** (`leakage_fraction=`-parameter): proportioneel volumeverlies per segment per tijdstap zonder contaminantinstroom.
 - **`wall_mode`-parameter**: `'two_film'` (standaard, EPANET-compatibel) of `'direct'` (k_wall is al k_eff).
-- **`MsxReactionSystem`** (`nzingaflow.msx`): EPANET-MSX 2.0-compatibele reactielaag met `RATE`, `EQUIL`, `FORMULA` en wandsoorten. Vier numerieke solvers: `euler`, `rk4`, `rk45`, `radau`.
+- **`MsxReactionSystem`** (`nzingaflow.msx`): EPANET-MSX 2.0-compatibele reactielaag met `RATE`, `EQUIL`, `FORMULA` en wandsoorten. Vijf numerieke solvers: `euler`, `rk4`, `ros2` (stijf, geen scipy), `rk45`, `radau`.
+- **Ingebouwde expressie-parser** (gebaseerd op EPANET-MSX `mathexpr.c`): geen sympy of eval() nodig; compile-time validatie.
+- **ROS2-solver** (gebaseerd op EPANET-MSX `ros2.c`, Verwer et al. 1999): adaptief Rosenbrock 2(1) zonder scipy-afhankelijkheid.
 - **Kant-en-klare MSX-modellen**: `chloramine_decay_msx`, `chlorine_nom_msx`, `arsenic_oxidation_msx`.
 - Alle nieuwe parameters zijn achterwaarts compatibel; defaults reproduceren v1.0.0-gedrag.
 
