@@ -372,8 +372,9 @@ class HydraulicModel:
         if self.net.solved:
             try:
                 flow, vel, rev = self.get_hydraulic_state()
+                simtime_s = getattr(self.net, "solved_for_simtime", "?")
                 lines += [
-                    f"  Hydraulica    : opgelost voor t={self.net.solved_for_simtime} s",
+                    f"  Hydraulica    : opgelost voor t={simtime_s} s",
                     f"  Flow range    : {flow.min():.4f} – {flow.max():.4f} m³/s",
                     f"  Vel range     : {vel.min():.3f} – {vel.max():.3f} m/s",
                     f"  Reversals     : {rev.sum()} leidingen",
