@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.2.0] — 2026-04-24
+
+### Nieuwe module `nzingaflow/msxlibrary.py` — directe koppeling met de EPANET-MSX native bibliotheek
+
+Biedt drie lagen boven de `epanetmsx.dll` / `libepanetmsx.so` C-API:
+
+**`MsxNativeLib` — ctypes-wrapper (laag 1)**
+- Dunne wrapper rond alle `MSX_*` C-functies (EPANET-MSX 1.1, revisie 11/01/10).
+- Automatische signatuurbinding via `_bind_signatures()`; foutcodes → `MsxError` bij `strict=True`.
+- Automatische bibliotheekdetectie (`_default_lib_path()`) voor Windows, Linux en macOS.
+- Volledige dekking: open/close, hydraulica, kwaliteit, stapsgewijze simulatie, bronnen,
+  patronen, constanten, parameters, initiële kwaliteiten.
+
+**`MsxNetworkState` / dataklassen (laag 2)**
+- `MsxNetworkState` — snapshot na `load()`: stoffen, constanten, bronnen, initiële kwaliteiten, patronen.
+- `MsxSpecies` — metadata per stof (index, naam, bulk/wand, eenheden, toleranties).
+- `MsxSourceRecord` — brondefinitie per (knoop, stof)-paar.
+- `MsxSimulationResult` — tijdreeksen `(T × N × S)` node_quality en `(T × L × S)` link_quality;
+  helper-methoden `node_concentrations()`, `link_concentrations()`, `to_dataframe()`.
+
+**`MsxSimulation` — orchestrator (laag 3)**
+- Hoog-niveau interface: `load()` → `run()` → `MsxSimulationResult`.
+- Context-manager (`with MsxSimulation(...) as sim:`).
+- Schrijfhulpers: `update_initial_quality()`, `configure_source()`, `update_constant()`,
+  `add_time_pattern()`.
+- `hyd_file`-parameter voor hergebruik van eerder opgeslagen hydraulicabestand.
+
+**Gemaksfunctie `run_msx(inp, msx)`**
+- Volledige simulatie in één aanroep; geeft `MsxSimulationResult` terug.
+
+**Relatie tot bestaand `msx.py`:**
+- `msx.py` (`MsxReactionSystem`) — pure-Python ODE-solver; plugt in via `geochem=` in `NzingaFlowSolver`.
+  Geen native bibliotheek nodig; geschikt voor Lagrangian transport met eigen reactie-uitdrukkingen.
+- `msxlibrary.py` (`MsxSimulation`) — directe brug naar de officiële EPANET-MSX C-solver;
+  leest `.msx`-bestanden ongewijzigd; vereist `libepanetmsx.so` / `epanetmsx.dll`.
+  Geschikt wanneer een bestaand `.msx`-bestand gebruikt moet worden of wanneer de MSX-solver
+  zelf de tijdintegratie verzorgt.
+
+**Nieuwe exports in `nzingaflow/__init__.py`:**
+`MsxNativeLib`, `MsxNetworkState`, `MsxSimulation`, `MsxSimulationResult`,
+`MsxSpecies`, `MsxSourceRecord`, `MsxError`, `run_msx`.
+
+---
+
 ## [1.1.0] — 2026
 
 ### Verbeterd wandreactiemodel — drie correcties met meetbaar effect
