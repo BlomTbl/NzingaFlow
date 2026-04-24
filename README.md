@@ -145,18 +145,27 @@ Numba-compilatie vindt plaats bij de eerste aanroep. Gebruik `solver.warmup_numb
 
 ```
 nzingaflow/
-├── solver.py       NzingaFlowSolver — hoofd-API, EPS-koppeling
-├── lta.py          Kernberekeningen (advect, decay, mixing) met Numba JIT
-├── merging.py      Segment-merging met Numba JIT
-├── segments.py     SegmentStore — Structure-of-Arrays opslag + CSR-index
-├── hydraulics.py   HydraulicModel — epynet koppeling
-├── eps.py          EPSRunner — Extended Period Simulation
-├── stability.py    CFL-check, massabalans
-├── geochemistry.py GeochemSolver — PhreeqPython integratie
-├── msx.py          MsxReactionSystem — MSX multi-species reactielaag
-│                     (ingebouwde parser + ROS2-solver, geen scipy/sympy)
-└── parse_inp.py    EPANET .inp parser (fallback zonder epynet)
+├── solver.py        NzingaFlowSolver — hoofd-API, EPS-koppeling
+├── lta.py           Kernberekeningen (advect, decay, mixing) met Numba JIT
+├── merging.py       Segment-merging met Numba JIT
+├── segments.py      SegmentStore — Structure-of-Arrays opslag + CSR-index
+├── hydraulics.py    HydraulicModel — epynet koppeling
+├── eps.py           EPSRunner — Extended Period Simulation
+├── stability.py     CFL-check, massabalans
+├── geochemistry.py  GeochemSolver — PhreeqPython integratie
+├── msx.py           MsxReactionSystem — pure-Python MSX reactielaag
+│                      (ingebouwde parser + ROS2-solver, geen scipy/sympy)
+├── msxlibrary.py   MsxSimulation — directe brug naar libepanetmsx.so/.dll
+│                      (ctypes wrapper; laadt .msx-bestanden ongewijzigd)
+└── parse_inp.py     EPANET .inp parser (fallback zonder epynet)
 ```
+
+**Twee complementaire MSX-lagen:**
+
+| Module | Wanneer gebruiken | Native lib nodig |
+|---|---|---|
+| `msx.py` — `MsxReactionSystem` | Eigen reactievergelijkingen in Python; plugt in via `geochem=` | Nee |
+| `msxlibrary.py` — `MsxSimulation` | Bestaand `.msx`-bestand hergebruiken; MSX-C-solver zelf laten integreren | Ja (`libepanetmsx.so` / `epanetmsx.dll`) |
 
 ### Kernprincipes
 
@@ -205,6 +214,51 @@ results = runner.run(
 )
 t = runner.time_axis(unit='h')
 ```
+
+### MSX native library bridge (ctypes → libepanetmsx)
+
+Directe koppeling met de officiële EPANET-MSX C-bibliotheek. Vereist `libepanetmsx.so` (Linux/macOS) of `epanetmsx.dll` (Windows).
+
+```python
+from nzingaflow import MsxSimulation, run_msx
+
+# Hoog-niveau: alles in één aanroep
+result = run_msx("net2-cl2.inp", "net2-cl2.msx")
+df = result.to_dataframe("CL2", element="node")   # pandas DataFrame (tijd × knopen)
+
+# Context-manager voor fijnere controle
+with MsxSimulation("net2-cl2.inp", "net2-cl2.msx") as sim:
+    state = sim.load()
+    print([s.name for s in state.bulk_species()])   # ['CL2']
+
+    # Initiële kwaliteit aanpassen voor simulatie
+    sim.update_initial_quality(
+        node_values={"J1": {"CL2": 0.8}, "J2": {"CL2": 0.5}}
+    )
+
+    # Bronsterkte aanpassen
+    sim.configure_source("R1", "CL2", kind="CONCEN", level=1.0)
+
+    result = sim.run()
+
+# Tijdreeksen opvragen
+print(result.time_hours())                         # array van tijdstippen [h]
+print(result.node_concentrations("CL2"))           # array (T × N)
+print(result.link_concentrations("CL2"))           # array (T × L)
+```
+
+**Beschikbare klassen en functies:**
+
+| Naam | Type | Omschrijving |
+|---|---|---|
+| `MsxSimulation` | klasse | Hoog-niveau orchestrator: `load()` → `run()` → resultaat |
+| `MsxSimulationResult` | dataclass | Tijdreeksen + hulpmethoden (`node_concentrations`, `to_dataframe`) |
+| `MsxNetworkState` | dataclass | Snapshot na laden: stoffen, constanten, bronnen, patronen |
+| `MsxSpecies` | dataclass | Metadata per stof (naam, bulk/wand, eenheden, toleranties) |
+| `MsxSourceRecord` | dataclass | Brondefinitie per (knoop, stof)-paar |
+| `MsxNativeLib` | klasse | Dunne ctypes-wrapper rond alle `MSX_*` C-functies |
+| `MsxError` | uitzondering | Niet-nul foutcode vanuit de C-bibliotheek |
+| `run_msx(inp, msx)` | functie | Volledige simulatie in één aanroep |
 
 ### MSX-reactielagen
 
@@ -302,9 +356,13 @@ Optioneel:
 - numba ≥ 0.57 — voor ~4-5× snellere kernels
 - phreeqpython ≥ 1.4 — voor volledige geochemie (PHREEQC)
 - scipy ≥ 1.10 — voor validatietests en MSX-solvers `rk45`/`radau`
+- `libepanetmsx.so` / `epanetmsx.dll` — voor `MsxSimulation` (native EPANET-MSX C-bibliotheek)
 
-> **MSX zonder scipy:** de ingebouwde `ros2`- en `rk4`-solvers vereisen alleen NumPy.
-> String-expressies in `MsxReactionSystem` vereisen geen sympy.
+> **MSX zonder scipy:** de ingebouwde `ros2`- en `rk4`-solvers in `MsxReactionSystem` vereisen alleen NumPy.
+> String-expressies vereisen geen sympy.
+>
+> **MSX zonder native bibliotheek:** `MsxReactionSystem` (`msx.py`) werkt zonder `libepanetmsx`.
+> `MsxSimulation` (`msxlibrary.py`) vereist de native bibliotheek wel.
 
 ---
 
