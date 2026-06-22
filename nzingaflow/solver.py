@@ -56,6 +56,7 @@ class NzingaFlowSolver:
         temperature:      float | None = None,
         leakage_fraction: float = 0.0,
         wall_mode:        str   = 'two_film',
+        include_valves:   bool  = False,
     ):
         """
         Parameters
@@ -82,12 +83,18 @@ class NzingaFlowSolver:
                 Gebruik als k_wall uit EPANET-kalibratie komt.
             'direct' — k_wall is al k_eff: k_vol=k_wall·4/D, geen filmweerstand.
                 Gebruik als k_wall al een effectieve waarde is.
+        include_valves    : als True worden afsluiters (PRV, PSV, TCV, FCV, GPV,
+                            PCV) meegenomen in de transporttopologie.  EPANET lost
+                            de hydraulica voor afsluiters altijd correct op; deze
+                            optie zorgt dat NzingaFlow de verblijftijd en het
+                            stoftransport over afsluiters ook berekent.
+                            Standaard False voor achterwaartse compatibiliteit.
         """
         from .hydraulics import HydraulicModel
         from .segments   import SegmentStore
         from .stability  import MassBalanceTracker
 
-        self.hyd = HydraulicModel(inp_path)
+        self.hyd = HydraulicModel(inp_path, include_valves=include_valves)
         self.hyd.solve()
 
         (
