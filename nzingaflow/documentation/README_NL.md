@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.0-informational)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.1-informational)](CHANGELOG.md)
 
 NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken via de **Lagrangian Transport Approach (LTA)**. Stoffen reizen als discrete segmenten mee met de waterstroming — zonder de numerieke diffusie van Euleriaanse methoden. Alle kernberekeningen zijn volledig gevectoriseerd met NumPy en optioneel versneld met Numba JIT-compilatie.
 
@@ -47,6 +47,7 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
 - **Lekkagemodellering** — proportioneel volumeverlies per segment zonder contaminantinstroom (v1.1.0)
 - **MSX-reactiesysteem** — EPANET-MSX 2.0-compatibele multi-species reactielaag (v1.1.0)
 - **MSX native library bridge** — directe ctypes-koppeling met `libepanetmsx`; laadt `.msx`-bestanden ongewijzigd (v1.2.0)
+- **Afsluiters in topologie** — PRV, PSV, TCV, FCV, GPV en PCV worden meegenomen in transport via `include_valves=True` (v1.2.1)
 - **Tanks** — CSTR-model met impliciet Euler (onvoorwaardelijk stabiel)
 - **Extended Period Simulation (EPS)** — automatische hydraulica-updates elke `hyd_dt` seconden
 - **Volledige geochemie** — optionele PhreeqPython/PHREEQC-integratie
@@ -294,6 +295,7 @@ NzingaFlowSolver(
     temperature:      float | None = None,     # watertemperatuur [°C] (v1.1.0)
     leakage_fraction: float = 0.0,             # fractioneel leidingverlies (v1.1.0)
     wall_mode:        str   = 'two_film',      # 'two_film' of 'direct' (v1.1.0)
+    include_valves:   bool  = False,           # afsluiters in transporttopologie (v1.2.1)
 )
 ```
 
@@ -312,6 +314,7 @@ NzingaFlowSolver(
 | `temperature` | `float \| None` | Watertemperatuur [°C]. Activeert Arrhenius-correctie op D_mol (`Ea≈17 kJ/mol`) en θ=1.047-correctie op k_wall (Rossman 2000). `None` = Rossman 1994-compatibel (geen correctie). *(v1.1.0)* |
 | `leakage_fraction` | `float` | Fractie van leidingdebiet dat lekt (0.0–1.0). Elk segment verliest per tijdstap proportioneel volume; concentratie blijft constant. Typisch 0.05–0.20 voor distributienetwerken. *(v1.1.0)* |
 | `wall_mode` | `str` | `'two_film'` (standaard): EPANET-compatibel serieschakeling `k_eff = k_f·k_w/(k_f+k_w)`. `'direct'`: k_wall is al k_eff — gebruik als k_wall uit directe kalibratie komt. *(v1.1.0)* |
+| `include_valves` | `bool` | Als `True` worden afsluiters (PRV, PSV, PBV, FCV, TCV, GPV, PCV) opgenomen in de transporttopologie. EPANET lost de hydraulica voor afsluiters altijd correct op; deze optie zorgt dat NzingaFlow de verblijftijd en het stoftransport over afsluiters ook berekent. Standaard `False` voor achterwaartse compatibiliteit. *(v1.2.1)* |
 
 **Methoden**
 
@@ -320,7 +323,6 @@ NzingaFlowSolver(
 | `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Voer één kwaliteitstijdstap uit |
 | `update_hydraulics(simtime=0)` | `None` | Herbereken hydraulica; detecteert flow reversals en herbouwt routing-caches |
 | `warmup_numba()` | `None` | Trigger Numba JIT-compilatie vóór de simulatie (eenmalig aanroepen na init) |
-| `set_initial_quality(node_quality, simtime=0)` | `None` | Initialiseer alle leidingen met beginconcentraties per knoop (equivalent aan EPANET-MSX `[QUALITY]`). Accepteert `ndarray (node_count, n_species)` of `dict {knoopnaam: C_vec}` met optionele `'__global__'`-sleutel. |
 | `inject(node_uid, C_vector, volume)` | `None` | Injecteer vanuit knoop, proportioneel over uitgaande leidingen |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Injecteer direct in leiding op positie `x` [m] |
 | `booster_inject(node_uid, C_set, flow_frac=1.0)` | `None` | Stel concentratie vast op uitgaande leidingen |
@@ -407,7 +409,7 @@ t_uur = runner.time_axis(unit="h")   # "s", "min" of "h"
 Lage-niveau EPANET-koppeling via epynet. Normaliter intern aangemaakt door `NzingaFlowSolver`.
 
 ```python
-HydraulicModel(inp_path: str, include_pumps: bool = False)
+HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool = False)
 ```
 
 | Methode | Omschrijving |
@@ -1034,31 +1036,6 @@ Gebruik `MsxSimulation` als u een bestaand `.msx`-bestand ongewijzigd wilt uitvo
 
 Gebruik `MsxReactionSystem` als u reacties in Python wilt definiëren en koppelen aan de NzingaFlow Lagrangian solver via `geochem=rxn`. Dit vereist geen native bibliotheek en is flexibeler voor parameterstudies.
 
-**Q: Hoe stel ik beginwaterkwaliteit in bij gebruik van MSX-reacties?**
-
-Gebruik `solver.set_initial_quality()` vóór `runner.run()`. Geef een `(node_count, n_species)` ndarray of een dict mee met optionele `'__global__'`-sleutel voor netwerk-brede waarden en per-knoop overschrijvingen:
-
-```python
-C_global = np.zeros(n_species)
-C_global[SP['ALK']] = 0.004
-solver.set_initial_quality({
-    '__global__': C_global,   # alle knopen
-    'knoop_4':    C_knoop4,   # overschrijving voor knoop 4
-})
-```
-
-**Q: Hoe modelleer ik een vaste massaflux-bron (EPANET-MSX MASS)?**
-
-Gebruik `mass_schedule` in `EPSRunner.run()`. Het formaat is identiek aan `inject_schedule` maar de waarden zijn massafluxen [eenheid/s] in plaats van concentraties. Massa per tijdstap = flux × qual_dt:
-
-```python
-results = runner.run(
-    decay_k=...,
-    mass_schedule={'knoop_20': [(0, duur, np.array([0.5, 0.0]))]},
-                                               # 0.5 mmol/s stof 0
-)
-```
-
 **Q: Hoe modelleer ik leidinglekkage?**
 
 Geef `leakage_fraction` mee aan `NzingaFlowSolver`. Een waarde van `0.12` betekent 12% volumeverlies per leiding. Elk segment verliest per tijdstap proportioneel volume; concentraties blijven ongewijzigd (conservatief mengmodel — geen contaminantinstroom vanuit grondwater). Typische waarden voor Nederlandse distributienetwerken liggen tussen 0.05 en 0.20.
@@ -1066,6 +1043,14 @@ Geef `leakage_fraction` mee aan `NzingaFlowSolver`. Een waarde van `0.12` beteke
 **Q: Worden pompen gesimuleerd?**
 
 Standaard worden pompen overgeslagen (`include_pumps=False`). U kunt pompen includeren via `HydraulicModel("net.inp", include_pumps=True)`, maar dit heeft doorgaans alleen zin als de verblijftijd in de pomp relevant is.
+
+**Q: Worden afsluiters (kleppen) meegenomen in de transportberekening?**
+
+Standaard niet (`include_valves=False`). EPANET lost de hydraulica voor afsluiters altijd correct op, maar NzingaFlow sloot ze traditioneel uit de Lagrangian topologie. Met `include_valves=True` worden alle EPANET-afsluitertypes (PRV, PSV, PBV, FCV, TCV, GPV, PCV) behandeld als korte leidingelementen, zodat verblijftijd en stoftransport ook over afsluiters worden berekend. Dit is met name relevant als een afsluiter de enige verbinding vormt tussen twee netwerksegmenten.
+
+```python
+solver = NzingaFlowSolver("netwerk.inp", include_valves=True)
+```
 
 **Q: Hoe interpreteer ik de Langelier Saturation Index (LSI)?**
 
