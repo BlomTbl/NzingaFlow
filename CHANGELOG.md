@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.2.1] — 2026-06-22
+
+### Valve support in transport topology — `include_valves` parameter
+
+**`hydraulics.py` — `HydraulicModel`**
+- New parameter `include_valves: bool = False` on `HydraulicModel.__init__()`.
+  When `True`, all EPANET valve types (PRV, PSV, PBV, FCV, TCV, GPV, PCV) are
+  added to the transport topology alongside pipes.
+- `_get_links()` updated: appends `list(self.net.valves)` when `include_valves=True`.
+- `summary()` updated: active-links label now reflects `+valves` when the flag is set.
+
+**`solver.py` — `NzingaFlowSolver`**
+- New parameter `include_valves: bool = False` on `NzingaFlowSolver.__init__()`,
+  forwarded to `HydraulicModel`.
+
+**Background**
+
+EPANET always solves hydraulics correctly for valves; NzingaFlow previously excluded
+them from the Lagrangian transport topology. This meant:
+- No residence time or decay calculated across valve elements.
+- Valves that were the *sole connection* between two network segments caused those
+  segments to be topologically disconnected in NzingaFlow.
+
+With `include_valves=True` valves are treated as short pipe elements; flow and
+velocity are taken directly from the EPANET solution.
+
+**Backward compatibility:** default is `False`; existing behaviour is unchanged.
+
+```python
+# Enable valve transport
+solver = NzingaFlowSolver("network.inp", include_valves=True)
+
+# Or directly via HydraulicModel
+hyd = HydraulicModel("network.inp", include_valves=True)
+```
+
+---
+
 ## [1.2.0] — 2026-04-24
 
 ### New module `nzingaflow/msxlibrary.py` — direct binding to the EPANET-MSX native library
