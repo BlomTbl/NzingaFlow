@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.2.1] — 2026-06-22
+
+### Afsluiters (valves) in transporttopologie — parameter `include_valves`
+
+**`hydraulics.py` — `HydraulicModel`**
+- Nieuwe parameter `include_valves: bool = False` in `HydraulicModel.__init__()`.
+  Bij `True` worden alle EPANET-afsluitertypes (PRV, PSV, PBV, FCV, TCV, GPV, PCV)
+  samen met de leidingen aan de transporttopologie toegevoegd.
+- `_get_links()` bijgewerkt: voegt `list(self.net.valves)` toe als `include_valves=True`.
+- `summary()` bijgewerkt: het label voor actieve links toont nu `+valves` als de vlag is ingeschakeld.
+
+**`solver.py` — `NzingaFlowSolver`**
+- Nieuwe parameter `include_valves: bool = False` in `NzingaFlowSolver.__init__()`,
+  doorgegeven aan `HydraulicModel`.
+
+**Achtergrond**
+
+EPANET lost de hydraulica voor afsluiters altijd correct op; NzingaFlow sloot
+afsluiters echter altijd uit de Lagrangian transporttopologie. Dit betekende:
+- Geen verblijftijd of verval berekend over afsluiterelementen.
+- Afsluiters die de *enige verbinding* vormden tussen twee netwerksegmenten
+  zorgden voor een topologische ontkoppeling in NzingaFlow.
+
+Met `include_valves=True` worden afsluiters behandeld als korte leidingelementen;
+debiet en stroomsnelheid worden rechtstreeks uit de EPANET-oplossing gehaald.
+
+**Achterwaartse compatibiliteit:** standaard is `False`; bestaand gedrag verandert niet.
+
+```python
+# Afsluiter-transport inschakelen
+solver = NzingaFlowSolver("netwerk.inp", include_valves=True)
+
+# Of direct via HydraulicModel
+hyd = HydraulicModel("netwerk.inp", include_valves=True)
+```
+
+---
+
 ## [1.2.0] — 2026-04-24
 
 ### Nieuwe module `nzingaflow/msxlibrary.py` — directe koppeling met de EPANET-MSX native bibliotheek
