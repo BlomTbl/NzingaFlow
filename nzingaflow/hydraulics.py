@@ -43,7 +43,7 @@ Invarianten die NIET zijn veranderd
 ─────────────────────────────────────
 - node.uid / link.uid : unieke EPANET-naam (str)
 - pipe.from_node / pipe.to_node : Node-objecten
-- Alleen Pipe-objecten (geen Pump, Valve) worden meegenomen in de topologie
+- Standaard alleen Pipe-objecten in de topologie; pumps/valves via include_pumps/include_valves
 - Negatief debiet → reversed_mask → pipe_start/pipe_end omwisselen
 """
 
@@ -99,15 +99,23 @@ class HydraulicModel:
     include_pumps : bool, default False
         Als True worden pompen ook als 'leidingen' opgenomen in de topologie.
         Standaard False: pompen worden overgeslagen (geen dispersie, geen verval).
+    include_valves : bool, default False
+        Als True worden afsluiters (PRV, PSV, TCV, FCV, GPV, PCV) ook als
+        'leidingen' opgenomen in de topologie.  EPANET lost de hydraulica voor
+        afsluiters altijd correct op; deze optie zorgt dat NzingaFlow de
+        bijbehorende verblijftijd en stoftransport ook meeneemt.
+        Standaard False voor achterwaartse compatibiliteit.
     """
 
-    def __init__(self, inp_path: str, include_pumps: bool = False):
+    def __init__(self, inp_path: str, include_pumps: bool = False,
+                 include_valves: bool = False):
         from epynet import Network
-        self.net          = Network(inp_path)
-        self._include_pumps = include_pumps
-        self._pipe_list   = None   # gecached na eerste _get_links()
-        self._topology    = None   # gecached na eerste get_topology()
-        self._units       = None   # gecached na eerste _get_flow_units()
+        self.net           = Network(inp_path)
+        self._include_pumps  = include_pumps
+        self._include_valves = include_valves
+        self._pipe_list    = None   # gecached na eerste _get_links()
+        self._topology     = None   # gecached na eerste get_topology()
+        self._units        = None   # gecached na eerste _get_flow_units()
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Hydraulische berekening
@@ -272,7 +280,8 @@ class HydraulicModel:
         Gecachede lijst van leiding-objecten.
 
         Standaard alleen Pipe-objecten.  Als include_pumps=True worden ook
-        Pump-objecten meegenomen.  Valves worden altijd uitgesloten.
+        Pump-objecten meegenomen.  Als include_valves=True worden ook
+        Valve-objecten (PRV, PSV, TCV, FCV, GPV, PCV) meegenomen.
 
         Opmerking over ObjectCollection.__iter__:
             De nieuwe epynet itereert over .values() (de objecten zelf),
@@ -283,6 +292,8 @@ class HydraulicModel:
             pipes = list(self.net.pipes)   # list van Pipe-objecten
             if self._include_pumps:
                 pipes = pipes + list(self.net.pumps)
+            if self._include_valves:
+                pipes = pipes + list(self.net.valves)
             self._pipe_list = pipes
         return self._pipe_list
 
@@ -366,7 +377,10 @@ class HydraulicModel:
             f"tanks={n_tanks}, reservoirs={n_res})",
             f"  Leidingen     : {n_pipes} pipes, {n_pumps} pumps, {n_valves} valves",
             f"  Actieve links : {len(links)}  "
-            f"({'pipes+pumps' if self._include_pumps else 'pipes only'})",
+            f"(pipes"
+            f"{'+pumps' if self._include_pumps else ''}"
+            f"{'+valves' if self._include_valves else ''}"
+            f")",
         ]
 
         if self.net.solved:
