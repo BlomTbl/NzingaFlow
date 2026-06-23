@@ -24,9 +24,7 @@ Voorbeeld
 from __future__ import annotations
 
 import ctypes
-import os
 import platform
-import sys
 from ctypes import c_char_p, c_int, c_double, c_long, POINTER, byref
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -737,7 +735,6 @@ class MsxSimulation:
         if not self._loaded:
             raise RuntimeError("Laad eerst het MSX-bestand via .load().")
         lib   = self._lib
-        state = self._state
 
         def _set(obj_type, items):
             if not items:
