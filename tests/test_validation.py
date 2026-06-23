@@ -1073,15 +1073,17 @@ class TestV6_CFLStability:
         dt_valid = 5.0    # dt < dt_CFL: stabiel
         dt_bad   = 50.0   # dt >> dt_CFL: instabiel
 
+        duration = 20 * L / v   # voldoende stappen, ook bij dt_bad (anders lege slice)
+
         C_analytical = C0 * np.exp(-k * L / v)
 
         # Geldige dt: kleine fout
-        _, C_valid = run_pipe_simulation(L, A, v, C0, k, 5*L/v, dt_valid)
+        _, C_valid = run_pipe_simulation(L, A, v, C0, k, duration, dt_valid)
         idx_ss = int(0.8 * len(C_valid))
         err_valid = abs(C_valid[idx_ss:, 0].mean() - C_analytical)
 
         # Ongeldige dt: grotere fout
-        _, C_bad = run_pipe_simulation(L, A, v, C0, k, 5*L/v, dt_bad)
+        _, C_bad = run_pipe_simulation(L, A, v, C0, k, duration, dt_bad)
         idx_ss2 = max(1, int(0.8 * len(C_bad)))
         err_bad = abs(C_bad[idx_ss2:, 0].mean() - C_analytical)
 
