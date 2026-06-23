@@ -56,6 +56,7 @@ class NzingaFlowSolver:
         temperature:      float | None = None,
         leakage_fraction: float = 0.0,
         wall_mode:        str   = 'two_film',
+        include_valves:   bool  = False,
     ):
         """
         Parameters
@@ -82,12 +83,18 @@ class NzingaFlowSolver:
                 Gebruik als k_wall uit EPANET-kalibratie komt.
             'direct' — k_wall is al k_eff: k_vol=k_wall·4/D, geen filmweerstand.
                 Gebruik als k_wall al een effectieve waarde is.
+        include_valves    : als True worden afsluiters (PRV, PSV, TCV, FCV, GPV,
+                            PCV) meegenomen in de transporttopologie.  EPANET lost
+                            de hydraulica voor afsluiters altijd correct op; deze
+                            optie zorgt dat NzingaFlow de verblijftijd en het
+                            stoftransport over afsluiters ook berekent.
+                            Standaard False voor achterwaartse compatibiliteit.
         """
         from .hydraulics import HydraulicModel
         from .segments   import SegmentStore
         from .stability  import MassBalanceTracker
 
-        self.hyd = HydraulicModel(inp_path)
+        self.hyd = HydraulicModel(inp_path, include_valves=include_valves)
         self.hyd.solve()
 
         (
@@ -639,10 +646,8 @@ class NzingaFlowSolver:
         -------
         node_C : (node_count, n_species)
         """
-        from .lta     import (bulk_first_order_multi, wall_first_order_multi,
-                             combined_decay_multi, build_combined_exp,
-                             advect, exit_detect, node_mixing_multi,
-                             tank_step_implicit)
+        from .lta     import (combined_decay_multi, build_combined_exp,
+                             advect, exit_detect, node_mixing_multi)
         from .merging import merge_segments
 
         flow, velocity = self._get_hydraulics()
@@ -1027,6 +1032,6 @@ class NzingaFlowSolver:
             f"n_species={self.n_species} "
             f"tanks={len(self._tank_nodes)} "
             f"wall={'yes' if self._k_wall_vol is not None else 'no'}"
-            f"{geo_str} "
+            f"{geo_str}{T_str}{L_str} "
             f"segments={self.segments.n}>"
         )

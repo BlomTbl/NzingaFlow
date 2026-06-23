@@ -1,5 +1,87 @@
 # Changelog
 
+## [1.2.1] — 2026-06-22
+
+### Afsluiters (valves) in transporttopologie — parameter `include_valves`
+
+**`hydraulics.py` — `HydraulicModel`**
+- Nieuwe parameter `include_valves: bool = False` in `HydraulicModel.__init__()`.
+  Bij `True` worden alle EPANET-afsluitertypes (PRV, PSV, PBV, FCV, TCV, GPV, PCV)
+  samen met de leidingen aan de transporttopologie toegevoegd.
+- `_get_links()` bijgewerkt: voegt `list(self.net.valves)` toe als `include_valves=True`.
+- `summary()` bijgewerkt: het label voor actieve links toont nu `+valves` als de vlag is ingeschakeld.
+
+**`solver.py` — `NzingaFlowSolver`**
+- Nieuwe parameter `include_valves: bool = False` in `NzingaFlowSolver.__init__()`,
+  doorgegeven aan `HydraulicModel`.
+
+**Achtergrond**
+
+EPANET lost de hydraulica voor afsluiters altijd correct op; NzingaFlow sloot
+afsluiters echter altijd uit de Lagrangian transporttopologie. Dit betekende:
+- Geen verblijftijd of verval berekend over afsluiterelementen.
+- Afsluiters die de *enige verbinding* vormden tussen twee netwerksegmenten
+  zorgden voor een topologische ontkoppeling in NzingaFlow.
+
+Met `include_valves=True` worden afsluiters behandeld als korte leidingelementen;
+debiet en stroomsnelheid worden rechtstreeks uit de EPANET-oplossing gehaald.
+
+**Achterwaartse compatibiliteit:** standaard is `False`; bestaand gedrag verandert niet.
+
+```python
+# Afsluiter-transport inschakelen
+solver = NzingaFlowSolver("netwerk.inp", include_valves=True)
+
+# Of direct via HydraulicModel
+hyd = HydraulicModel("netwerk.inp", include_valves=True)
+```
+
+---
+
+## [1.2.0] — 2026-04-24
+
+### Nieuwe module `nzingaflow/msxlibrary.py` — directe koppeling met de EPANET-MSX native bibliotheek
+
+Biedt drie lagen boven de `epanetmsx.dll` / `libepanetmsx.so` C-API:
+
+**`MsxNativeLib` — ctypes-wrapper (laag 1)**
+- Dunne wrapper rond alle `MSX_*` C-functies (EPANET-MSX 1.1, revisie 11/01/10).
+- Automatische signatuurbinding via `_bind_signatures()`; foutcodes → `MsxError` bij `strict=True`.
+- Automatische bibliotheekdetectie (`_default_lib_path()`) voor Windows, Linux en macOS.
+- Volledige dekking: open/close, hydraulica, kwaliteit, stapsgewijze simulatie, bronnen,
+  patronen, constanten, parameters, initiële kwaliteiten.
+
+**`MsxNetworkState` / dataklassen (laag 2)**
+- `MsxNetworkState` — snapshot na `load()`: stoffen, constanten, bronnen, initiële kwaliteiten, patronen.
+- `MsxSpecies` — metadata per stof (index, naam, bulk/wand, eenheden, toleranties).
+- `MsxSourceRecord` — brondefinitie per (knoop, stof)-paar.
+- `MsxSimulationResult` — tijdreeksen `(T × N × S)` node_quality en `(T × L × S)` link_quality;
+  helper-methoden `node_concentrations()`, `link_concentrations()`, `to_dataframe()`.
+
+**`MsxSimulation` — orchestrator (laag 3)**
+- Hoog-niveau interface: `load()` → `run()` → `MsxSimulationResult`.
+- Context-manager (`with MsxSimulation(...) as sim:`).
+- Schrijfhulpers: `update_initial_quality()`, `configure_source()`, `update_constant()`,
+  `add_time_pattern()`.
+- `hyd_file`-parameter voor hergebruik van eerder opgeslagen hydraulicabestand.
+
+**Gemaksfunctie `run_msx(inp, msx)`**
+- Volledige simulatie in één aanroep; geeft `MsxSimulationResult` terug.
+
+**Relatie tot bestaand `msx.py`:**
+- `msx.py` (`MsxReactionSystem`) — pure-Python ODE-solver; plugt in via `geochem=` in `NzingaFlowSolver`.
+  Geen native bibliotheek nodig; geschikt voor Lagrangian transport met eigen reactie-uitdrukkingen.
+- `msxlibrary.py` (`MsxSimulation`) — directe brug naar de officiële EPANET-MSX C-solver;
+  leest `.msx`-bestanden ongewijzigd; vereist `libepanetmsx.so` / `epanetmsx.dll`.
+  Geschikt wanneer een bestaand `.msx`-bestand gebruikt moet worden of wanneer de MSX-solver
+  zelf de tijdintegratie verzorgt.
+
+**Nieuwe exports in `nzingaflow/__init__.py`:**
+`MsxNativeLib`, `MsxNetworkState`, `MsxSimulation`, `MsxSimulationResult`,
+`MsxSpecies`, `MsxSourceRecord`, `MsxError`, `run_msx`.
+
+---
+
 ## [1.1.0] — 2026
 
 ### Verbeterd wandreactiemodel — drie correcties met meetbaar effect

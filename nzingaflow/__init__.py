@@ -68,10 +68,20 @@ from .msx import (
     chlorine_nom_msx,
     arsenic_oxidation_msx,
 )
+from .msxlibrary import (
+    MsxNativeLib,
+    MsxNetworkState,
+    MsxSimulation,
+    MsxSimulationResult,
+    MsxSpecies,
+    MsxSourceRecord,
+    MsxError,
+    run_msx,
+)
 from .lta          import warmup_numba, USE_NUMBA, combined_decay_multi, build_combined_exp
 from .merging      import warmup_numba_merging
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__  = "NzingaFlow"
 
 __all__ = [
@@ -89,11 +99,20 @@ __all__ = [
     "chlorine_decay_geochem",
     "full_water_chemistry",
     "PhreeqSolutionMode",
-    # MSX multi-species reactielaag
+    # MSX multi-species reactielaag (pure Python)
     "MsxReactionSystem",
     "chloramine_decay_msx",
     "chlorine_nom_msx",
     "arsenic_oxidation_msx",
+    # MSX native library bridge (ctypes → libepanetmsx)
+    "MsxNativeLib",
+    "MsxNetworkState",
+    "MsxSimulation",
+    "MsxSimulationResult",
+    "MsxSpecies",
+    "MsxSourceRecord",
+    "MsxError",
+    "run_msx",
     # Bouwstenen
     "HydraulicModel",
     "SegmentStore",

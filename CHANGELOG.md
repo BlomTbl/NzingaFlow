@@ -1,5 +1,86 @@
 # Changelog
 
+## [1.2.1] — 2026-06-22
+
+### Valve support in transport topology — `include_valves` parameter
+
+**`hydraulics.py` — `HydraulicModel`**
+- New parameter `include_valves: bool = False` on `HydraulicModel.__init__()`.
+  When `True`, all EPANET valve types (PRV, PSV, PBV, FCV, TCV, GPV, PCV) are
+  added to the transport topology alongside pipes.
+- `_get_links()` updated: appends `list(self.net.valves)` when `include_valves=True`.
+- `summary()` updated: active-links label now reflects `+valves` when the flag is set.
+
+**`solver.py` — `NzingaFlowSolver`**
+- New parameter `include_valves: bool = False` on `NzingaFlowSolver.__init__()`,
+  forwarded to `HydraulicModel`.
+
+**Background**
+
+EPANET always solves hydraulics correctly for valves; NzingaFlow previously excluded
+them from the Lagrangian transport topology. This meant:
+- No residence time or decay calculated across valve elements.
+- Valves that were the *sole connection* between two network segments caused those
+  segments to be topologically disconnected in NzingaFlow.
+
+With `include_valves=True` valves are treated as short pipe elements; flow and
+velocity are taken directly from the EPANET solution.
+
+**Backward compatibility:** default is `False`; existing behaviour is unchanged.
+
+```python
+# Enable valve transport
+solver = NzingaFlowSolver("network.inp", include_valves=True)
+
+# Or directly via HydraulicModel
+hyd = HydraulicModel("network.inp", include_valves=True)
+```
+
+---
+
+## [1.2.0] — 2026-04-24
+
+### New module `nzingaflow/msxlibrary.py` — direct binding to the EPANET-MSX native library
+
+Provides three layers above the `epanetmsx.dll` / `libepanetmsx.so` C API:
+
+**`MsxNativeLib` — ctypes wrapper (layer 1)**
+- Thin wrapper around all `MSX_*` C functions (EPANET-MSX 1.1, revision 11/01/10).
+- Automatic signature binding via `_bind_signatures()`; error codes → `MsxError` when `strict=True`.
+- Automatic library detection (`_default_lib_path()`) for Windows, Linux, and macOS.
+- Full coverage: open/close, hydraulics, quality, step-by-step simulation, sources,
+  patterns, constants, parameters, initial qualities.
+
+**`MsxNetworkState` / dataclasses (layer 2)**
+- `MsxNetworkState` — snapshot after `load()`: species, constants, sources, initial qualities, patterns.
+- `MsxSpecies` — per-species metadata (index, name, bulk/wall, units, tolerances).
+- `MsxSourceRecord` — source definition per (node, species) pair.
+- `MsxSimulationResult` — time series `(T × N × S)` node_quality and `(T × L × S)` link_quality;
+  helper methods `node_concentrations()`, `link_concentrations()`, `to_dataframe()`.
+
+**`MsxSimulation` — orchestrator (layer 3)**
+- High-level interface: `load()` → `run()` → `MsxSimulationResult`.
+- Context manager (`with MsxSimulation(...) as sim:`).
+- Write helpers: `update_initial_quality()`, `configure_source()`, `update_constant()`,
+  `add_time_pattern()`.
+- `hyd_file` parameter for reusing a previously saved hydraulics file.
+
+**Convenience function `run_msx(inp, msx)`**
+- Full simulation in a single call; returns `MsxSimulationResult`.
+
+**Relationship to existing `msx.py`:**
+- `msx.py` (`MsxReactionSystem`) — pure-Python ODE solver; plugs in via `geochem=` in `NzingaFlowSolver`.
+  No native library required; suited for Lagrangian transport with custom reaction expressions.
+- `msxlibrary.py` (`MsxSimulation`) — direct bridge to the official EPANET-MSX C solver;
+  reads `.msx` files unchanged; requires `libepanetmsx.so` / `epanetmsx.dll`.
+  Suited when an existing `.msx` file must be used or when the MSX solver handles time integration.
+
+**New exports in `nzingaflow/__init__.py`:**
+`MsxNativeLib`, `MsxNetworkState`, `MsxSimulation`, `MsxSimulationResult`,
+`MsxSpecies`, `MsxSourceRecord`, `MsxError`, `run_msx`.
+
+---
+
 ## [1.1.0] — 2026
 
 ### Improved wall reaction model — three corrections with measurable effect

@@ -148,15 +148,19 @@ def _exit_detect_numpy(x, n, pipe, pipe_length, exit_mask):
     # Klamp n op exit_mask-grootte (buffer kan kleiner zijn na partial slice)
     nm = min(n, exit_mask.shape[0])
     np.greater_equal(x[:nm], pipe_length[pipe[:nm]], out=exit_mask[:nm])
+    n_exits = int(exit_mask[:nm].sum())
     if nm < n:
-        # extra segmenten buiten buffer: check zonder out=
+        # extra segmenten buiten buffer: check zonder out=, en wel meetellen
+        # in het totaal — anders worden uitgestroomde segmenten buiten de
+        # buffer stilletjes genegeerd.
         extra = x[nm:n] >= pipe_length[pipe[nm:n]]
-        # niet wegschrijven — het segment is in een groeiende store
+        n_exits += int(extra.sum())
+        # niet wegschrijven naar exit_mask — het segment is in een groeiende store
         # dit is een configuratiefout; de buffer had mee moeten schalen
         import warnings
         warnings.warn(f'exit_detect: buffer ({exit_mask.shape[0]}) < n ({n}); '
                       'roep warmup_numba of vergroot capacity aan', RuntimeWarning)
-    return int(exit_mask[:nm].sum())
+    return n_exits
 
 
 def _combined_decay_numpy(C, n, n_species, pipe, combined_exp):
@@ -471,9 +475,10 @@ def compute_wall_k(
     # In een stilstaande cilinder is het tijdgemiddelde k_f ≈ 4·D_mol/D
     # (eerste term Bessel-reeks voor diffusie in een eindige cilinder).
     k_f_diff = 4.0 * D_mol / D                            # puur diffusief minimum
-    # Geleidelijke overgang: gebruik max(convectief, diffusief) — beide zijn
-    # correct in hun regime; het maximum geeft de juiste fysische limiet.
-    k_f = np.maximum(k_f_conv, k_f_diff)[:, np.newaxis]   # (n_pipes, 1)
+    # Alleen toepassen als Re < 10: buiten dit stagnatieregime is Sh=3.66
+    # (of de Sherwood-correlatie) leidend, ook al is k_f_diff > k_f_conv
+    # (k_f_diff komt overeen met Sh=4, dus zou anders altijd domineren).
+    k_f = np.where(Re < 10.0, np.maximum(k_f_conv, k_f_diff), k_f_conv)[:, np.newaxis]  # (n_pipes, 1)
 
     # ── Serieweerstand: film + wandreactie ────────────────────────────────────
     k_w_arr   = np.atleast_2d(np.asarray(k_w, dtype=np.float64))

@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.1.0-informational)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.1-informational)](CHANGELOG.md)
 
 NzingaFlow simulates water quality in drinking water distribution networks using the **Lagrangian Transport Approach (LTA)**. Chemical species are transported as discrete segments carried along with the flow — eliminating the numerical diffusion inherent to Eulerian methods. All core calculations are fully vectorized with NumPy and optionally accelerated with Numba JIT compilation.
 
@@ -45,6 +45,7 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 - **Temperature correction** — Arrhenius/Hayduk-Laudie correction on D_mol and k_wall (v1.1.0)
 - **Leakage modelling** — proportional volume loss per segment without contaminant ingress (v1.1.0)
 - **MSX reaction system** — EPANET-MSX 2.0 compatible multi-species reaction layer (v1.1.0)
+- **Valve topology support** — PRV, PSV, TCV, FCV, GPV and PCV included in transport via `include_valves=True` (v1.2.1)
 - **Tanks** — CSTR model with implicit Euler integration (unconditionally stable)
 - **Extended Period Simulation (EPS)** — automatic hydraulic updates every `hyd_dt` seconds
 - **Full geochemistry** — optional PhreeqPython/PHREEQC integration
@@ -263,6 +264,7 @@ NzingaFlowSolver(
     temperature:      float | None = None,     # water temperature [°C] (v1.1.0)
     leakage_fraction: float = 0.0,             # fractional pipe flow loss (v1.1.0)
     wall_mode:        str   = 'two_film',      # 'two_film' or 'direct' (v1.1.0)
+    include_valves:   bool  = False,           # include valves in transport topology (v1.2.1)
 )
 ```
 
@@ -281,6 +283,7 @@ NzingaFlowSolver(
 | `temperature` | `float \| None` | Water temperature [°C]. Activates Arrhenius correction on D_mol (`Ea≈17 kJ/mol`) and θ=1.047 correction on k_wall (Rossman 2000). `None` = Rossman 1994-compatible (no correction). *(v1.1.0)* |
 | `leakage_fraction` | `float` | Fraction of pipe flow lost as leakage (0.0–1.0). Each segment loses proportional volume per timestep; concentration remains constant. Typically 0.05–0.20 for distribution networks. *(v1.1.0)* |
 | `wall_mode` | `str` | `'two_film'` (default): EPANET-compatible series resistance `k_eff = k_f·k_w/(k_f+k_w)`. `'direct'`: k_wall is already k_eff — use when k_wall comes from direct calibration rather than EPANET. *(v1.1.0)* |
+| `include_valves` | `bool` | When `True`, valves (PRV, PSV, PBV, FCV, TCV, GPV, PCV) are included in the transport topology. EPANET always solves hydraulics for valves correctly; this option ensures NzingaFlow also computes residence time and species transport across them. Default `False` for backward compatibility. *(v1.2.1)* |
 
 **Methods**
 
@@ -289,7 +292,6 @@ NzingaFlowSolver(
 | `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Execute one water quality time step |
 | `update_hydraulics(simtime=0)` | `None` | Recompute hydraulics; detects flow reversals and rebuilds routing caches |
 | `warmup_numba()` | `None` | Trigger Numba JIT compilation before the simulation (call once after init) |
-| `set_initial_quality(node_quality, simtime=0)` | `None` | Initialise all pipes with per-node starting concentrations (EPANET-MSX `[QUALITY]` equivalent). Accepts `ndarray (node_count, n_species)` or `dict {node_id: C_vec}` with optional `'__global__'` key. |
 | `inject(node_uid, C_vector, volume)` | `None` | Inject from a node, distributed proportionally over outgoing pipes |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Inject directly into a pipe at position `x` [m] |
 | `booster_inject(node_uid, C_set, flow_frac=1.0)` | `None` | Fix concentration at a set value on outgoing pipes |
@@ -376,7 +378,7 @@ t_hours = runner.time_axis(unit="h")   # "s", "min", or "h"
 Low-level EPANET coupling via epynet. Normally instantiated internally by `NzingaFlowSolver`.
 
 ```python
-HydraulicModel(inp_path: str, include_pumps: bool = False)
+HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool = False)
 ```
 
 | Method | Description |
@@ -892,31 +894,6 @@ smap = SpeciesMap(
 
 Use `MsxReactionSystem` when your reactions can be expressed as ordinary differential equations (first- or higher-order kinetics, biofilm growth, chloramine decay). It is faster than PhreeqPython and requires no extra dependencies. Use `GeochemSolver` when you need full thermodynamic equilibrium, mineral dissolution/precipitation, or pH-buffering via PHREEQC.
 
-**Q: How do I set initial water quality when using MSX reactions?**
-
-Use `solver.set_initial_quality()` before calling `runner.run()`. Pass either a `(node_count, n_species)` ndarray or a dict with an optional `'__global__'` key for network-wide values and per-node overrides:
-
-```python
-C_global = np.zeros(n_species)
-C_global[SP['ALK']] = 0.004
-solver.set_initial_quality({
-    '__global__': C_global,   # all nodes
-    'node_4':     C_node4,    # override for node 4
-})
-```
-
-**Q: How do I model a fixed mass flux source (EPANET-MSX MASS)?**
-
-Use `mass_schedule` in `EPSRunner.run()`. The format is identical to `inject_schedule` but values are mass fluxes [unit/s] instead of concentrations. The injected mass per step = flux × qual_dt:
-
-```python
-results = runner.run(
-    decay_k=...,
-    mass_schedule={'node_20': [(0, duration, np.array([0.5, 0.0]))]},
-                                              # 0.5 mmol/s species 0
-)
-```
-
 **Q: How do I model pipe leakage?**
 
 Pass `leakage_fraction` to `NzingaFlowSolver`. A value of `0.12` means 12% of the pipe flow is lost. Each segment loses volume proportionally per timestep; concentrations are unchanged (conservative mixing model — no contaminant ingress from groundwater). Typical values for Dutch distribution networks are 0.05–0.20.
@@ -924,6 +901,14 @@ Pass `leakage_fraction` to `NzingaFlowSolver`. A value of `0.12` means 12% of th
 **Q: Are pumps simulated?**
 
 Pumps are excluded by default (`include_pumps=False`). You can include them via `HydraulicModel("net.inp", include_pumps=True)`, though this is only meaningful when residence time inside the pump is relevant.
+
+**Q: Are valves included in the transport calculation?**
+
+Not by default (`include_valves=False`). EPANET always solves hydraulics for valves correctly, but NzingaFlow traditionally excluded them from the Lagrangian transport topology. With `include_valves=True` all EPANET valve types (PRV, PSV, PBV, FCV, TCV, GPV, PCV) are treated as short pipe elements, so residence time and species transport are computed across them as well. This is particularly relevant when a valve is the sole connection between two network segments.
+
+```python
+solver = NzingaFlowSolver("network.inp", include_valves=True)
+```
 
 **Q: How do I interpret the Langelier Saturation Index (LSI)?**
 

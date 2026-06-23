@@ -94,7 +94,7 @@ import warnings
 import logging
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -477,7 +477,6 @@ class GeochemSolver:
         """
         bg_lines  = self._bg_block          # gecached bij __init__
         act       = self.smap.active_indices
-        ph_idx    = self.smap.ph_index
         pnames    = self.smap.phreeqc_names
         units_lst = self.smap.units
         is_ph     = self.smap.is_pH
