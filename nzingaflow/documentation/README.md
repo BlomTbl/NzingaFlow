@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.0-informational)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.1-informational)](CHANGELOG.md)
 
 NzingaFlow simulates water quality in drinking water distribution networks using the **Lagrangian Transport Approach (LTA)**. Chemical species are transported as discrete segments carried along with the flow — eliminating the numerical diffusion inherent to Eulerian methods. All core calculations are fully vectorized with NumPy and optionally accelerated with Numba JIT compilation.
 
@@ -26,7 +26,6 @@ NzingaFlow simulates water quality in drinking water distribution networks using
   - [LTA Core Functions](#lta-core-functions)
   - [GeochemSolver & SpeciesMap](#geochemsolver--speciesmap)
   - [MsxReactionSystem](#msxreactionsystem)
-  - [MsxSimulation & MsxNativeLib](#msxsimulation--msxnativelib)
   - [Stability Functions](#stability-functions)
   - [merge\_segments](#merge_segments)
 - [Advanced Usage](#advanced-usage)
@@ -46,7 +45,7 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 - **Temperature correction** — Arrhenius/Hayduk-Laudie correction on D_mol and k_wall (v1.1.0)
 - **Leakage modelling** — proportional volume loss per segment without contaminant ingress (v1.1.0)
 - **MSX reaction system** — EPANET-MSX 2.0 compatible multi-species reaction layer (v1.1.0)
-- **MSX native library bridge** — direct ctypes binding to `libepanetmsx`; loads `.msx` files unchanged (v1.2.0)
+- **Valve topology support** — PRV, PSV, TCV, FCV, GPV and PCV included in transport via `include_valves=True` (v1.2.1)
 - **Tanks** — CSTR model with implicit Euler integration (unconditionally stable)
 - **Extended Period Simulation (EPS)** — automatic hydraulic updates every `hyd_dt` seconds
 - **Full geochemistry** — optional PhreeqPython/PHREEQC integration
@@ -181,34 +180,6 @@ runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(decay_k=np.zeros(3))
 ```
 
-### With the EPANET-MSX native library (new in v1.2.0)
-
-Use this when you want to run an existing `.msx` file through the official MSX C solver
-without rewriting reaction expressions in Python.
-
-```python
-from nzingaflow import MsxSimulation, run_msx
-
-# Simplest usage: everything in one call
-result = run_msx("network.inp", "network.msx")
-df = result.to_dataframe("CL2", element="node")   # DataFrame: time [h] × node names
-
-# More control via context manager
-with MsxSimulation("network.inp", "network.msx") as sim:
-    state = sim.load()
-    print([s.name for s in state.bulk_species()])
-
-    sim.update_initial_quality(node_values={"R1": {"CL2": 1.0}})
-    sim.configure_source("R1", "CL2", kind="CONCEN", level=1.0)
-
-    result = sim.run()
-
-print(result.time_hours())                  # time axis [h]
-print(result.node_concentrations("CL2"))    # array (T × N)
-```
-
-> Requires: `libepanetmsx.so` (Linux/macOS) or `epanetmsx.dll` (Windows) on the system.
-
 ### With geochemistry (PhreeqPython)
 
 ```python
@@ -260,8 +231,7 @@ Steps 1–4 are executed by Numba JIT kernels when Numba is installed, with no i
 | `merging.py` | `merge_segments` | Parallel-reduction segment merging with Numba JIT |
 | `stability.py` | `recommended_dt`, `MassBalanceTracker` | CFL check and mass balance |
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython integration |
-| `msx.py` | `MsxReactionSystem` | Pure-Python MSX reaction layer: ODE solvers + expression parser (v1.1.0) |
-| `msxlibrary.py` | `MsxSimulation`, `MsxNativeLib` | Direct ctypes binding to `libepanetmsx`; loads `.msx` files unchanged (v1.2.0) |
+| `msx.py` | `MsxReactionSystem` | MSX-compatible multi-species reaction layer (v1.1.0) |
 
 ### SegmentStore (Structure-of-Arrays)
 
@@ -294,6 +264,7 @@ NzingaFlowSolver(
     temperature:      float | None = None,     # water temperature [°C] (v1.1.0)
     leakage_fraction: float = 0.0,             # fractional pipe flow loss (v1.1.0)
     wall_mode:        str   = 'two_film',      # 'two_film' or 'direct' (v1.1.0)
+    include_valves:   bool  = False,           # include valves in transport topology (v1.2.1)
 )
 ```
 
@@ -312,6 +283,7 @@ NzingaFlowSolver(
 | `temperature` | `float \| None` | Water temperature [°C]. Activates Arrhenius correction on D_mol (`Ea≈17 kJ/mol`) and θ=1.047 correction on k_wall (Rossman 2000). `None` = Rossman 1994-compatible (no correction). *(v1.1.0)* |
 | `leakage_fraction` | `float` | Fraction of pipe flow lost as leakage (0.0–1.0). Each segment loses proportional volume per timestep; concentration remains constant. Typically 0.05–0.20 for distribution networks. *(v1.1.0)* |
 | `wall_mode` | `str` | `'two_film'` (default): EPANET-compatible series resistance `k_eff = k_f·k_w/(k_f+k_w)`. `'direct'`: k_wall is already k_eff — use when k_wall comes from direct calibration rather than EPANET. *(v1.1.0)* |
+| `include_valves` | `bool` | When `True`, valves (PRV, PSV, PBV, FCV, TCV, GPV, PCV) are included in the transport topology. EPANET always solves hydraulics for valves correctly; this option ensures NzingaFlow also computes residence time and species transport across them. Default `False` for backward compatibility. *(v1.2.1)* |
 
 **Methods**
 
@@ -320,7 +292,6 @@ NzingaFlowSolver(
 | `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Execute one water quality time step |
 | `update_hydraulics(simtime=0)` | `None` | Recompute hydraulics; detects flow reversals and rebuilds routing caches |
 | `warmup_numba()` | `None` | Trigger Numba JIT compilation before the simulation (call once after init) |
-| `set_initial_quality(node_quality, simtime=0)` | `None` | Initialise all pipes with per-node starting concentrations (EPANET-MSX `[QUALITY]` equivalent). Accepts `ndarray (node_count, n_species)` or `dict {node_id: C_vec}` with optional `'__global__'` key. |
 | `inject(node_uid, C_vector, volume)` | `None` | Inject from a node, distributed proportionally over outgoing pipes |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Inject directly into a pipe at position `x` [m] |
 | `booster_inject(node_uid, C_set, flow_frac=1.0)` | `None` | Fix concentration at a set value on outgoing pipes |
@@ -407,7 +378,7 @@ t_hours = runner.time_axis(unit="h")   # "s", "min", or "h"
 Low-level EPANET coupling via epynet. Normally instantiated internally by `NzingaFlowSolver`.
 
 ```python
-HydraulicModel(inp_path: str, include_pumps: bool = False)
+HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool = False)
 ```
 
 | Method | Description |
@@ -641,112 +612,7 @@ rxn = arsenic_oxidation_msx(Ka=10.0, Kb=0.1, K1=5.0, K2=1.0, Smax=50.0, solver='
 
 ---
 
-### MsxSimulation & MsxNativeLib
-
-Direct binding to the official EPANET-MSX C library via ctypes. Three layers above the `MSX_*` C API (EPANET-MSX 1.1, revision 11/01/10).
-
-> Requires: `libepanetmsx.so` (Linux/macOS) or `epanetmsx.dll` (Windows).
-> Installation: download the EPANET-MSX source via [github.com/USEPA/EPANET-MSX](https://github.com/USEPA/EPANET-MSX) and build the shared library.
-
-#### `MsxSimulation` — orchestrator (layer 3)
-
-```python
-MsxSimulation(
-    inp_path:  str,           # path to EPANET .inp file
-    msx_path:  str,           # path to EPANET-MSX .msx file
-    lib_path:  str | None = None,  # explicit path to libepanetmsx; None = auto-detect
-    strict:    bool = True,   # raises MsxError on non-zero return codes
-)
-```
-
-**Methods**
-
-| Method | Return type | Description |
-|---|---|---|
-| `load()` | `MsxNetworkState` | Open the MSX file and build a full network snapshot |
-| `run(save_to_file=False, hyd_file=None)` | `MsxSimulationResult` | Run the full simulation; optionally using a previously saved hydraulics file |
-| `update_initial_quality(node_values=None, link_values=None)` | `None` | Adjust initial concentrations before `run()`: `{name: {species: value}}` |
-| `configure_source(node, species, kind, level, pattern_name=None)` | `None` | Set a source; `kind` = `'CONCEN'`, `'MASS'`, `'SETPOINT'`, `'FLOWPACED'`, or `'NOSOURCE'` |
-| `update_constant(name, value)` | `None` | Change a named constant from the .msx file |
-| `add_time_pattern(name, multipliers)` | `None` | Add a new time pattern with the given multipliers |
-| `close()` | `None` | Close the library and free memory |
-
-**Context manager**
-
-```python
-with MsxSimulation("network.inp", "network.msx") as sim:
-    state = sim.load()
-    result = sim.run()
-# sim.close() is called automatically
-```
-
-#### `MsxSimulationResult`
-
-```python
-result.time_s                        # ndarray — time stamps [s]
-result.time_hours()                  # ndarray — time stamps [h]
-result.node_quality                  # ndarray (T, N, S) — node concentrations
-result.link_quality                  # ndarray (T, L, S) — link concentrations
-result.node_names                    # list[str]
-result.link_names                    # list[str]
-result.species                       # list[MsxSpecies]
-
-result.node_concentrations("CL2")   # ndarray (T, N) — one species from node_quality
-result.link_concentrations("CL2")   # ndarray (T, L) — one species from link_quality
-result.to_dataframe("CL2", element="node")  # pandas DataFrame: index=time_h, columns=node names
-```
-
-#### `MsxNetworkState`
-
-Network snapshot after `load()`. Contains species, constants, sources, and patterns.
-
-```python
-state.species               # list[MsxSpecies]
-state.constants             # dict[str, float]
-state.sources               # list[MsxSourceRecord]
-state.node_initq            # ndarray (N, S) — initial node quality
-state.link_initq            # ndarray (L, S) — initial link quality
-state.patterns              # dict[int, list[float]]
-
-state.species_by_name("CL2")   # → MsxSpecies
-state.bulk_species()            # → list[MsxSpecies]
-state.wall_species()            # → list[MsxSpecies]
-```
-
-#### `MsxNativeLib` — ctypes wrapper (layer 1)
-
-For advanced use: direct access to all `MSX_*` C functions.
-
-```python
-from nzingaflow import MsxNativeLib
-
-lib = MsxNativeLib(lib_path=None, strict=True)
-lib.open("network.msx")
-lib.solve_hydraulics()
-lib.solve_quality()
-
-n_sp = lib.object_count(3)              # ObjectType.SPECIES = 3
-name = lib.object_id(3, 1)             # name of species 1
-conc = lib.concentration(0, 1, 1)      # NODE=0, node 1, species 1
-
-lib.set_constant(idx, value)
-lib.set_initial_quality(obj_type, idx, sp_idx, value)
-lib.set_source(node, species, type, level, pattern)
-lib.close()
-```
-
-#### Choosing between `msx.py` and `msxlibrary.py`
-
-| Situation | Recommended module |
-|---|---|
-| Writing reaction expressions in Python | `msx.py` — `MsxReactionSystem` |
-| Reusing an existing `.msx` file | `msxlibrary.py` — `MsxSimulation` |
-| No native library available | `msx.py` (no extra dependency) |
-| MSX C solver should handle time integration | `msxlibrary.py` |
-| Coupling with `NzingaFlowSolver` via `geochem=` | `msx.py` — `MsxReactionSystem` |
-| Standalone MSX simulation without LTA | `msxlibrary.py` — `run_msx()` |
-
----
+### Stability Functions
 
 ```python
 from nzingaflow import recommended_dt, check_dt
@@ -1028,37 +894,6 @@ smap = SpeciesMap(
 
 Use `MsxReactionSystem` when your reactions can be expressed as ordinary differential equations (first- or higher-order kinetics, biofilm growth, chloramine decay). It is faster than PhreeqPython and requires no extra dependencies. Use `GeochemSolver` when you need full thermodynamic equilibrium, mineral dissolution/precipitation, or pH-buffering via PHREEQC.
 
-**Q: When should I use MsxSimulation (msxlibrary) instead of MsxReactionSystem (msx.py)?**
-
-Use `MsxSimulation` when you want to run an existing `.msx` file unchanged through the official EPANET-MSX C solver. This is useful when the reaction expressions are already defined in a `.msx` file, or when you want to cross-check results against the reference MSX implementation. `MsxSimulation` operates as a standalone simulator and does not couple with `NzingaFlowSolver`.
-
-Use `MsxReactionSystem` when you want to define reactions in Python and couple them to the NzingaFlow Lagrangian solver via `geochem=rxn`. This requires no native library and is more flexible for parameter studies.
-
-**Q: How do I set initial water quality when using MSX reactions?**
-
-Use `solver.set_initial_quality()` before calling `runner.run()`. Pass either a `(node_count, n_species)` ndarray or a dict with an optional `'__global__'` key for network-wide values and per-node overrides:
-
-```python
-C_global = np.zeros(n_species)
-C_global[SP['ALK']] = 0.004
-solver.set_initial_quality({
-    '__global__': C_global,   # all nodes
-    'node_4':     C_node4,    # override for node 4
-})
-```
-
-**Q: How do I model a fixed mass flux source (EPANET-MSX MASS)?**
-
-Use `mass_schedule` in `EPSRunner.run()`. The format is identical to `inject_schedule` but values are mass fluxes [unit/s] instead of concentrations. The injected mass per step = flux × qual_dt:
-
-```python
-results = runner.run(
-    decay_k=...,
-    mass_schedule={'node_20': [(0, duration, np.array([0.5, 0.0]))]},
-                                              # 0.5 mmol/s species 0
-)
-```
-
 **Q: How do I model pipe leakage?**
 
 Pass `leakage_fraction` to `NzingaFlowSolver`. A value of `0.12` means 12% of the pipe flow is lost. Each segment loses volume proportionally per timestep; concentrations are unchanged (conservative mixing model — no contaminant ingress from groundwater). Typical values for Dutch distribution networks are 0.05–0.20.
@@ -1066,6 +901,14 @@ Pass `leakage_fraction` to `NzingaFlowSolver`. A value of `0.12` means 12% of th
 **Q: Are pumps simulated?**
 
 Pumps are excluded by default (`include_pumps=False`). You can include them via `HydraulicModel("net.inp", include_pumps=True)`, though this is only meaningful when residence time inside the pump is relevant.
+
+**Q: Are valves included in the transport calculation?**
+
+Not by default (`include_valves=False`). EPANET always solves hydraulics for valves correctly, but NzingaFlow traditionally excluded them from the Lagrangian transport topology. With `include_valves=True` all EPANET valve types (PRV, PSV, PBV, FCV, TCV, GPV, PCV) are treated as short pipe elements, so residence time and species transport are computed across them as well. This is particularly relevant when a valve is the sole connection between two network segments.
+
+```python
+solver = NzingaFlowSolver("network.inp", include_valves=True)
+```
 
 **Q: How do I interpret the Langelier Saturation Index (LSI)?**
 
@@ -1089,7 +932,6 @@ Pumps are excluded by default (`include_pumps=False`). You can include them via 
 | **LTA** | Lagrangian Transport Approach: transport described in the reference frame of the fluid |
 | **LSI** | Langelier Saturation Index: measure of CaCO₃ saturation in water |
 | **MSX** | Multi-Species eXtension: EPANET-MSX compatible reaction layer for arbitrary kinetic systems |
-| **MSX native bridge** | Direct ctypes binding to `libepanetmsx`; implemented in `msxlibrary.py` |
 | **PHREEQC** | Geochemical modelling software by the USGS |
 | **SoA** | Structure of Arrays: memory layout where each property occupies a separate array |
 | **`k_bulk`** | Bulk decay constant [1/s]: first-order decay in the water column |
@@ -1102,18 +944,6 @@ Pumps are excluded by default (`include_pumps=False`). You can include them via 
 ---
 
 ## Changelog
-
-### 1.2.0
-
-- **New module `msxlibrary.py`** — direct ctypes binding to the official EPANET-MSX C library (`libepanetmsx.so` / `epanetmsx.dll`).
-- **`MsxNativeLib`** — thin wrapper around all `MSX_*` C functions; automatic signature binding and error translation to `MsxError`.
-- **`MsxSimulation`** — high-level orchestrator with `load()`, `run()`, context manager, and write helpers (`update_initial_quality`, `configure_source`, `update_constant`, `add_time_pattern`).
-- **`MsxSimulationResult`** — time series `(T × N × S)` and `(T × L × S)` with `node_concentrations()`, `link_concentrations()`, `to_dataframe()`.
-- **`MsxNetworkState`**, **`MsxSpecies`**, **`MsxSourceRecord`** — structured dataclasses for network snapshots after `load()`.
-- **`run_msx(inp, msx)`** — full simulation in a single call.
-- Automatic library detection for Windows, Linux, and macOS.
-- All new classes exported from `nzingaflow.__init__`.
-- Backward compatible: existing `MsxReactionSystem` code works unchanged.
 
 ### 1.1.0
 
