@@ -28,7 +28,7 @@ from __future__ import annotations
 import math
 import warnings
 import numpy as np
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional
 
 _SOLVERS = ('euler', 'rk4', 'ros2', 'rk45', 'radau')
 
