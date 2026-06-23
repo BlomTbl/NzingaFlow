@@ -184,7 +184,15 @@ class HydraulicModel:
             [node_index[lnk.to_node.uid] for lnk in links],
             dtype=np.int32,
         )
-        pipe_length = np.array([lnk.length   for lnk in links], dtype=np.float64)
+        # NB: epynet Valve-objecten hebben geen 'length' static_property
+        # (EPANET kent geen lengte voor afsluiters: PRV/PSV/PBV/FCV/TCV/GPV).
+        # getattr(..., 0.0) voorkomt een AttributeError zodra include_valves=True
+        # en behandelt een valve in topologie-berekeningen als een lengteloos
+        # verbindingselement (lengte 0 m).
+        pipe_length = np.array(
+            [getattr(lnk, 'length', 0.0) for lnk in links],
+            dtype=np.float64,
+        )
 
         # ── Diameter → m ───────────────────────────────────────────────────────
         # EPANET geeft diameter terug in:
