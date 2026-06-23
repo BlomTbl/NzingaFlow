@@ -190,6 +190,7 @@ solver = NzingaFlowSolver(
     k_wall=None,        # (n_pipes, n_species) wandreactiesnelheid [m/s]
     track_mass=False,   # massabalans bijhouden
     geochem=None,       # GeochemSolver instantie
+    include_valves=False,  # afsluiters meenemen in transporttopologie (v1.2.1)
 )
 
 solver.warmup_numba()                      # JIT-compilatie triggeren
