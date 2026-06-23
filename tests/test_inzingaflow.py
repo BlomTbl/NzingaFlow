@@ -826,7 +826,7 @@ class TestV5_WallDecay:
         if Re > 4000:
             return 0.023 * Re**0.83 * Sc**(1/3)
         else:
-            return 3.65
+            return 3.66
 
     def _k_eff_analytical(self, D, v, k_w):
         """Analytische effectieve wandreactiesnelheid [m/s]."""
@@ -863,15 +863,15 @@ class TestV5_WallDecay:
         )
 
     def test_laminar_regime_sh_365(self):
-        """Bij Re ≤ 4000 moet Sh = 3.65 (constante wandconcentratie, Graetz)."""
+        """Bij Re < 2300 (volledig laminair) moet Sh = 3.66 (Graetz, uniforme wandconcentratie)."""
         D   = 0.1
-        v   = 0.03    # Re = 0.03 * 0.1 / 1e-6 = 3000 (laminair)
+        v   = 0.02    # Re = 0.02 * 0.1 / 1e-6 = 2000 (< 2300: volledig laminair, geen transitie)
         k_w = 1e-5
 
         Re  = v * D / self.nu
-        assert Re < 4000, f"Test vereist laminair regime, Re={Re:.0f}"
+        assert Re < 2300, f"Test vereist volledig laminair regime, Re={Re:.0f}"
 
-        Sh_expected = 3.65
+        Sh_expected = 3.66
         k_f_expected = Sh_expected * self.D_mol / D
 
         pipe_diam = np.array([D])
@@ -887,7 +887,8 @@ class TestV5_WallDecay:
         k_f_sim   = k_eff_sim * k_w / (k_w - k_eff_sim) if k_w != k_eff_sim else float('inf')
 
         assert abs(k_f_sim - k_f_expected) / k_f_expected < 1e-10, (
-            f"Laminair: k_f={k_f_sim:.6e}, verwacht {k_f_expected:.6e} (Sh=3.65)"
+            f"Laminair: k_f={k_f_sim:.6e}, verwacht {k_f_expected:.6e} (Sh=3.66)"
+
         )
 
     def test_zero_kw_gives_zero_wall_decay(self):
@@ -972,7 +973,7 @@ class TestV6_CFLStability:
 
     def test_cfl_check_flags_violation(self):
         """check_dt() moet CFL-schending correct detecteren."""
-        from stability import check_dt
+        from nzingaflow.stability import check_dt
         lengths = np.array([10.0])
         vels    = np.array([1.0])
         k_bulk  = np.array([0.0])
@@ -985,7 +986,7 @@ class TestV6_CFLStability:
 
     def test_cfl_check_passes_valid_dt(self):
         """check_dt() moet geldige dt goedkeuren."""
-        from stability import check_dt
+        from nzingaflow.stability import check_dt
         lengths = np.array([100.0])
         vels    = np.array([0.5])
         k_bulk  = np.array([0.0])
@@ -1050,15 +1051,17 @@ class TestV6_CFLStability:
         dt_valid = 5.0    # dt < dt_CFL: stabiel
         dt_bad   = 50.0   # dt >> dt_CFL: instabiel
 
+        duration = 20 * L / v   # voldoende stappen, ook bij dt_bad (anders lege slice)
+
         C_analytical = C0 * np.exp(-k * L / v)
 
         # Geldige dt: kleine fout
-        _, C_valid = run_pipe_simulation(L, A, v, C0, k, 5*L/v, dt_valid)
+        _, C_valid = run_pipe_simulation(L, A, v, C0, k, duration, dt_valid)
         idx_ss = int(0.8 * len(C_valid))
         err_valid = abs(C_valid[idx_ss:, 0].mean() - C_analytical)
 
         # Ongeldige dt: grotere fout
-        _, C_bad = run_pipe_simulation(L, A, v, C0, k, 5*L/v, dt_bad)
+        _, C_bad = run_pipe_simulation(L, A, v, C0, k, duration, dt_bad)
         idx_ss2 = max(1, int(0.8 * len(C_bad)))
         err_bad = abs(C_bad[idx_ss2:, 0].mean() - C_analytical)
 
