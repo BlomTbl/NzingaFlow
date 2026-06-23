@@ -646,10 +646,8 @@ class NzingaFlowSolver:
         -------
         node_C : (node_count, n_species)
         """
-        from .lta     import (bulk_first_order_multi, wall_first_order_multi,
-                             combined_decay_multi, build_combined_exp,
-                             advect, exit_detect, node_mixing_multi,
-                             tank_step_implicit)
+        from .lta     import (combined_decay_multi, build_combined_exp,
+                             advect, exit_detect, node_mixing_multi)
         from .merging import merge_segments
 
         flow, velocity = self._get_hydraulics()
@@ -1034,6 +1032,6 @@ class NzingaFlowSolver:
             f"n_species={self.n_species} "
             f"tanks={len(self._tank_nodes)} "
             f"wall={'yes' if self._k_wall_vol is not None else 'no'}"
-            f"{geo_str} "
+            f"{geo_str}{T_str}{L_str} "
             f"segments={self.segments.n}>"
         )
