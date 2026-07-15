@@ -198,7 +198,15 @@ class HydraulicModel:
         # EPANET geeft diameter terug in:
         #   SI-eenheden (CMH, LPS, …) : mm
         #   US-eenheden (GPM, CFS, …) : inch
-        diam_raw   = np.array([lnk.diameter for lnk in links], dtype=np.float64)
+        # NB: epynet Pump-objecten hebben geen 'diameter' static_property
+        # (EPANET kent geen diameter voor pompen). getattr(..., 0.0) voorkomt
+        # een AttributeError zodra include_pumps=True en behandelt een pomp
+        # in dwarsdoorsnede-afhankelijke berekeningen als lengteloos/nul-
+        # oppervlak element (analoog aan de length-fallback voor valves).
+        diam_raw   = np.array(
+            [getattr(lnk, 'diameter', 0.0) for lnk in links],
+            dtype=np.float64,
+        )
         pipe_diam  = self._diameter_to_m(diam_raw, units)
         pipe_area  = np.pi * (pipe_diam / 2.0) ** 2
 
