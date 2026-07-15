@@ -36,6 +36,25 @@ solver = NzingaFlowSolver("netwerk.inp", include_valves=True)
 hyd = HydraulicModel("netwerk.inp", include_valves=True)
 ```
 
+### Bugfix — `include_pumps=True` crashte op `diameter`
+
+**`hydraulics.py` — `HydraulicModel.get_topology()`**
+- `diam_raw` gebruikt nu `getattr(lnk, 'diameter', 0.0)` in plaats van
+  `lnk.diameter`, analoog aan de bestaande length-fallback voor afsluiters.
+
+**Achtergrond**
+
+epynet `Pump`-objecten hebben geen `diameter` static property (EPANET kent
+geen diameter voor pompen). Elk netwerk met een echte pomp gaf
+`AttributeError: ('Nonexistant Attribute', 'diameter')` zodra
+`include_pumps=True` werd gebruikt. Pompen worden nu behandeld als
+elementen met oppervlak 0 (analoog aan hoe afsluiters al als lengteloze
+elementen worden behandeld), zodat `get_topology()` niet meer crasht.
+
+Regressietests voor zowel het afsluiter-transportpad als deze pump-fix zijn
+toegevoegd in `tests/test_epynet_networks.py` (echte EPANET `.inp`-netwerken
+geladen via epynet, gemarkeerd met `requires_epynet`).
+
 ---
 
 ## [1.2.0] — 2026-04-24
