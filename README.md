@@ -80,6 +80,7 @@ solver = NzingaFlowSolver(
     n_species=2,
     k_wall=np.array([[1e-5, 0.0]] * n_pipes),  # [m/s] per pipe per stof
 )
+solver.warmup_numba()   # optioneel: JIT-compilatie triggeren vóór simulatie
 
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(
@@ -98,6 +99,7 @@ from nzingaflow.geochemistry import full_water_chemistry
 
 geo = full_water_chemistry()  # chloor, pH, alkaliniteit, Ca, Fe, Mn
 solver = NzingaFlowSolver("netwerk.inp", n_species=6, geochem=geo)
+solver.warmup_numba()   # optioneel: JIT-compilatie triggeren vóór simulatie
 runner = EPSRunner(solver, qual_dt=10.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(decay_k=np.zeros(6))
 ```
@@ -117,6 +119,7 @@ solver = NzingaFlowSolver(
     n_species = len(rxn.bulk_species),  # 3: HOCl, NH3, NH2Cl
     geochem   = rxn,
 )
+solver.warmup_numba()   # optioneel: JIT-compilatie triggeren vóór simulatie
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(
     decay_k         = np.zeros(3),

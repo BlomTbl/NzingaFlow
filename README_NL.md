@@ -133,6 +133,7 @@ results = runner.run(
 
 ```python
 solver = NzingaFlowSolver("netwerk.inp", n_species=2)
+solver.warmup_numba()   # optioneel: JIT-compilatie triggeren vóór simulatie
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 
 results = runner.run(
@@ -152,6 +153,7 @@ n_pipes = len(solver.pipe_ids)
 k_wall = np.full((n_pipes, 1), 1e-5)    # [m/s] — uniform over alle leidingen
 
 solver = NzingaFlowSolver("netwerk.inp", n_species=1, k_wall=k_wall)
+solver.warmup_numba()   # optioneel: JIT-compilatie triggeren vóór simulatie
 ```
 
 ### Met temperatuurcorrectie en lekkage (nieuw in v1.1.0)
@@ -164,6 +166,7 @@ solver = NzingaFlowSolver(
     temperature=12.0,          # [°C] — activeert Arrhenius/Hayduk-Laudie correctie
     leakage_fraction=0.12,     # 12% leidingverlies (typisch voor distributienetwerken)
 )
+solver.warmup_numba()   # optioneel: JIT-compilatie triggeren vóór simulatie
 ```
 
 ### Met MSX multi-species reacties (nieuw in v1.1.0)
@@ -178,6 +181,7 @@ solver = NzingaFlowSolver(
     n_species=len(rxn.bulk_species),  # 3: HOCl, NH3, NH2Cl
     geochem=rxn,
 )
+solver.warmup_numba()   # optioneel: JIT-compilatie triggeren vóór simulatie
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(decay_k=np.zeros(3))
 ```
@@ -218,6 +222,7 @@ from nzingaflow.geochemistry import full_water_chemistry
 
 geo = full_water_chemistry()
 solver = NzingaFlowSolver("netwerk.inp", n_species=6, geochem=geo)
+solver.warmup_numba()   # optioneel: JIT-compilatie triggeren vóór simulatie
 runner = EPSRunner(solver, qual_dt=10.0, hyd_dt=300.0, duration=86400.0)
 
 # Stoffen: [Cl2, pH, Alk, Ca, Fe, Mn]
@@ -1087,6 +1092,12 @@ solver = NzingaFlowSolver("netwerk.inp", include_valves=True)
 ---
 
 ## Versiehistorie
+
+### 1.2.1
+
+- **Afsluiters in transporttopologie** (`include_valves`-parameter): alle EPANET-afsluitertypes (PRV, PSV, PBV, FCV, TCV, GPV, PCV) kunnen nu samen met leidingen worden opgenomen in de Lagrangian transporttopologie via `include_valves=True` op `HydraulicModel` en `NzingaFlowSolver`. Voorheen sloot NzingaFlow afsluiters altijd uit, wat geen verblijftijd/verval over afsluiterelementen berekende en topologische ontkoppeling kon veroorzaken wanneer een afsluiter de enige verbinding tussen twee netwerksegmenten was. Standaard `False`; achterwaarts compatibel.
+- **Bugfix — `include_pumps=True` crashte op `diameter`**: `HydraulicModel.get_topology()` gebruikte `lnk.diameter` zonder fallback, terwijl epynet `Pump`-objecten geen `diameter` static property hebben. Elk netwerk met een echte pomp gaf hierdoor een `AttributeError` zodra `include_pumps=True` werd gebruikt. Opgelost met dezelfde `getattr(..., 0.0)`-fallback die al voor de lengte van afsluiters werd gebruikt; pompen worden nu behandeld als oppervlakteloze elementen.
+- Regressietests voor beide punten toegevoegd in `tests/test_epynet_networks.py` (echte EPANET `.inp`-netwerken via epynet, gemarkeerd `requires_epynet`).
 
 ### 1.2.0
 
