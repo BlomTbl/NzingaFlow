@@ -131,6 +131,7 @@ results = runner.run(
 
 ```python
 solver = NzingaFlowSolver("network.inp", n_species=2)
+solver.warmup_numba()   # optional: trigger JIT compilation before the simulation
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 
 results = runner.run(
@@ -150,6 +151,7 @@ n_pipes = len(solver.pipe_ids)
 k_wall = np.full((n_pipes, 1), 1e-5)   # [m/s] — uniform across all pipes
 
 solver = NzingaFlowSolver("network.inp", n_species=1, k_wall=k_wall)
+solver.warmup_numba()   # optional: trigger JIT compilation before the simulation
 ```
 
 ### With temperature correction and leakage (new in v1.1.0)
@@ -162,6 +164,7 @@ solver = NzingaFlowSolver(
     temperature=12.0,          # [°C] — activates Arrhenius/Hayduk-Laudie correction
     leakage_fraction=0.12,     # 12% pipe loss (typical for distribution networks)
 )
+solver.warmup_numba()   # optional: trigger JIT compilation before the simulation
 ```
 
 ### With MSX multi-species reactions (new in v1.1.0)
@@ -176,6 +179,7 @@ solver = NzingaFlowSolver(
     n_species=len(rxn.bulk_species),  # 3: HOCl, NH3, NH2Cl
     geochem=rxn,
 )
+solver.warmup_numba()   # optional: trigger JIT compilation before the simulation
 runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(decay_k=np.zeros(3))
 ```
@@ -188,6 +192,7 @@ from nzingaflow.geochemistry import full_water_chemistry
 
 geo = full_water_chemistry()
 solver = NzingaFlowSolver("network.inp", n_species=6, geochem=geo)
+solver.warmup_numba()   # optional: trigger JIT compilation before the simulation
 runner = EPSRunner(solver, qual_dt=10.0, hyd_dt=300.0, duration=86400.0)
 
 # Species: [Cl2, pH, Alk, Ca, Fe, Mn]
@@ -944,6 +949,21 @@ solver = NzingaFlowSolver("network.inp", include_valves=True)
 ---
 
 ## Changelog
+
+### 1.2.1
+
+- **Valve support in transport topology** (`include_valves` parameter): all EPANET valve types (PRV, PSV, PBV, FCV, TCV, GPV, PCV) can now be included alongside pipes in the Lagrangian transport topology via `include_valves=True` on `HydraulicModel` and `NzingaFlowSolver`. Previously NzingaFlow always excluded valves, meaning no residence time/decay was computed across valve elements, and valves that were the sole connection between two network segments caused a topological disconnection. Default `False`; backward compatible.
+- **Bugfix — `include_pumps=True` crashed on `diameter`**: `HydraulicModel.get_topology()` used `lnk.diameter` without a fallback, while epynet `Pump` objects have no `diameter` static property. Any network with a real pump raised an `AttributeError` as soon as `include_pumps=True` was used. Fixed with the same `getattr(..., 0.0)` fallback already used for valve length; pumps are now treated as zero-area elements.
+- Regression tests for both points added in `tests/test_epynet_networks.py` (real EPANET `.inp` networks loaded via epynet, marked `requires_epynet`).
+
+### 1.2.0
+
+- **New module `nzingaflow/msxlibrary.py`** — direct ctypes binding to the official EPANET-MSX C library (`libepanetmsx.so` / `epanetmsx.dll`), with three layers: `MsxNativeLib` (thin ctypes wrapper), dataclasses `MsxNetworkState`/`MsxSpecies`/`MsxSourceRecord`/`MsxSimulationResult` (structured snapshots and time series), and `MsxSimulation` (high-level orchestrator with `load()`/`run()`, context manager, and write helpers `update_initial_quality`, `configure_source`, `update_constant`, `add_time_pattern`).
+- **`run_msx(inp, msx)`** — full simulation in a single call.
+- Use `msx.py` (`MsxReactionSystem`) for pure-Python reactions plugged in via `geochem=`; use `msxlibrary.py` (`MsxSimulation`) to run an existing `.msx` file unchanged through the official MSX C solver.
+- Automatic library detection for Windows, Linux, and macOS.
+- New exports in `nzingaflow/__init__.py`: `MsxNativeLib`, `MsxNetworkState`, `MsxSimulation`, `MsxSimulationResult`, `MsxSpecies`, `MsxSourceRecord`, `MsxError`, `run_msx`.
+- Backward compatible: existing `MsxReactionSystem` code is unaffected.
 
 ### 1.1.0
 
