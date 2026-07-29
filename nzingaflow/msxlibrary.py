@@ -11,8 +11,15 @@ meerdere chemische stoffen te simuleren. De brug biedt drie lagen:
 
 Compatibiliteit
 ---------------
-EPANET-MSX 1.1 (epanetmsx.h revisie 11/01/10).
-Werkt met Windows (DLL) en Linux/macOS (shared object).
+EPANET-MSX 2.0 (epanetmsx.h uit github.com/USEPA/EPANETMSX).
+Werkt met Windows (DLL) en Linux (shared object); macOS (.dylib) nog niet
+meegebouwd — zie nzingaflow/lib/README voor bouwinstructies.
+
+Let op: de MSX_* C-API is tussen 1.1 en 2.0 op punten gewijzigd (o.a. is
+MSXstep's signatuur van long* naar double* gegaan, en zijn node/link-
+tellingen/-namen verplaatst naar de EPANET-laag i.p.v. MSXgetcount/
+MSXgetID). Deze wrapper is tegen 2.0 geverifieerd; gebruik hem niet
+tegen een MSX 1.1-bibliotheek zonder de signaturen opnieuw te controleren.
 
 Voorbeeld
 ---------
@@ -25,7 +32,7 @@ from __future__ import annotations
 
 import ctypes
 import platform
-from ctypes import c_char_p, c_int, c_double, c_long, POINTER, byref
+from ctypes import c_char_p, c_int, c_double, POINTER, byref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -58,6 +65,17 @@ class _SourceKind:
     SETPOINT   = 2
     FLOW_PACED = 3   # FLOWPACED
 
+class _EnCountType:
+    """EN_* objecttypes voor ENgetcount() — komen uit de EPANET (niet-MSX)
+    toolkit. MSXgetcount()/MSXgetID() ondersteunen alléén SPECIES/CONSTANT/
+    PARAMETER/PATTERN; node-, link- en tank-aantallen en -namen moeten via
+    de onderliggende epanet2-bibliotheek worden opgevraagd."""
+    NODECOUNT = 0
+    TANKCOUNT = 1
+    LINKCOUNT = 2
+
+EN_MAXID = 31  # max. aantal tekens in een EPANET ID-naam (epanet2_enums.h)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Hulpfuncties
@@ -89,12 +107,23 @@ def _default_lib_path() -> str:
             "/usr/lib/libepanetmsx.so",
         ]
 
-    # Zoek ook in de map van dit bestand
+    if system == "Windows":
+        names = ["epanetmsx.dll"]
+    elif system == "Darwin":
+        names = ["libepanetmsx.dylib"]
+    else:  # Linux
+        names = ["libepanetmsx.so"]
+
+    # Zoek in de map van dit bestand, en in een eventuele lib/-submap
+    # daarvan (bundeling van meegeleverde binaries, analoog aan epynet).
+    # Platform-specifiek, want sinds we Windows- én Linux-binaries in
+    # dezelfde lib/-map bundelen staan ze naast elkaar.
     here = Path(__file__).parent
-    for name in ["epanetmsx.dll", "libepanetmsx.so", "libepanetmsx.dylib"]:
-        p = here / name
-        if p.exists():
-            return str(p)
+    for base in (here, here / "lib"):
+        for name in names:
+            p = base / name
+            if p.exists():
+                return str(p)
 
     for candidate in candidates:
         if Path(candidate).exists():
@@ -133,6 +162,144 @@ class MsxNativeLib:
         self._strict = strict
         self._bind_signatures()
 
+        # libepanetmsx is dynamisch gelinkt tegen een epanet2-bibliotheek
+        # (zie NEEDED-entry). MSXopen() leest netwerkgegevens via diezelfde
+        # gedeelde globale EPANET-state, dus die moet via ENopen() gevuld
+        # zijn vóórdat MSXopen() wordt aangeroepen — zie msxmain.c (de
+        # officiële CLI-referentie), die exact deze volgorde aanhoudt:
+        # ENopen(inp, rpt, out) → MSXopen(msx) → MSXsolveH() → MSXinit().
+        #
+        # We laden hier bewust de epanet2-bibliotheek die *naast*
+        # libepanetmsx.so/dll staat (dezelfde die libepanetmsx zelf als
+        # afhankelijkheid gebruikt), niet de losstaande epynet-kopie —
+        # dat zijn twee onafhankelijke geheugeninstanties met elk hun eigen
+        # globale state, en alleen de eerste is zichtbaar voor MSXopen().
+        self._en = self._load_en_lib(path)
+        self._bind_en_signatures()
+
+    @staticmethod
+    def _load_en_lib(msx_lib_path: str):
+        """Laad de epanet2-bibliotheek die naast de MSX-bibliotheek staat.
+
+        Leidt de verwachte bestandsnaam af van de MSX-bibliotheek die we
+        al gekozen hebben (i.p.v. een platformblinde zoeklijst) — zo blijft
+        dit correct zelfs als lib_path handmatig is meegegeven, en ongeacht
+        of er binaries van meerdere platforms naast elkaar in dezelfde map
+        staan (zoals in nzingaflow/lib/, dat Linux+Windows bundelt).
+        """
+        msx_path = Path(msx_lib_path)
+        folder = msx_path.parent
+        suffix = msx_path.suffix.lower()
+        if suffix == ".dll":
+            # Let op: bewust *niet* "epanet2.dll" — Windows' loader
+            # resolveert impliciete DLL-afhankelijkheden op kale
+            # modulenaam, ongeacht map, zodra een gelijknamige DLL al
+            # ergens in het proces geladen is (zie Microsoft's "Dynamic-
+            # link library search order"-documentatie). Zou epynet's
+            # eigen epanet2.dll al geladen zijn (andere map, zelfde naam),
+            # dan zou epanetmsx.dll's impliciete import stilzwijgend naar
+            # dát exemplaar resolven — dezelfde klasse bug als de
+            # SONAME-botsing op Linux. Vandaar de unieke naam.
+            name = "epanet2_msx.dll"
+        elif suffix == ".dylib":
+            name = "libepanet2_msx.dylib"
+        else:
+            # Let op: bewust *niet* "libepanet2.so" — die naam botst met de
+            # SONAME die epynet's eigen bundled epanet2-bibliotheek gebruikt
+            # (epynet/lib/libepanet.so heeft intern SONAME "libepanet2.so").
+            # Draaien beide in hetzelfde proces (zoals in NzingaFlow, dat
+            # epynet gebruikt), dan retourneert de dynamic linker bij de
+            # tweede dlopen() stilzwijgend de AL GELADEN epynet-copy i.p.v.
+            # onze eigen bibliotheek — met verwarrende foutcodes als gevolg
+            # zodra beide netwerken tegelijk open staan. Vandaar de unieke
+            # bestands- én SONAME "libepanet2_msx.so".
+            name = "libepanet2_msx.so"
+        candidate = folder / name
+        if candidate.exists():
+            return ctypes.cdll.LoadLibrary(str(candidate))
+        raise FileNotFoundError(
+            f"Kon '{name}' niet vinden naast '{msx_lib_path}'. "
+            "libepanetmsx heeft een epanet2.dll/libepanet2.so/.dylib nodig "
+            "in dezelfde map (dit moet de versie zijn waartegen "
+            "libepanetmsx zelf is gelinkt, niet een losse epynet-kopie)."
+        )
+
+    def _bind_en_signatures(self):
+        EN = self._en
+        EN.ENopen.restype   = c_int
+        EN.ENopen.argtypes  = [c_char_p, c_char_p, c_char_p]
+        EN.ENclose.restype  = c_int
+        EN.ENclose.argtypes = []
+        EN.ENgetcount.restype   = c_int
+        EN.ENgetcount.argtypes  = [c_int, POINTER(c_int)]
+        EN.ENgetnodeid.restype  = c_int
+        EN.ENgetnodeid.argtypes = [c_int, c_char_p]
+        EN.ENgetlinkid.restype  = c_int
+        EN.ENgetlinkid.argtypes = [c_int, c_char_p]
+        EN.ENgeterror.restype   = c_int
+        EN.ENgeterror.argtypes  = [c_int, c_char_p, c_int]
+        EN.ENgetnodeindex.restype  = c_int
+        EN.ENgetnodeindex.argtypes = [c_char_p, POINTER(c_int)]
+        EN.ENgetlinkindex.restype  = c_int
+        EN.ENgetlinkindex.argtypes = [c_char_p, POINTER(c_int)]
+
+    def _check_en(self, code: int, context: str = "") -> int:
+        """Als _check(), maar vertaalt EN-foutcodes (aparte nummering t.o.v.
+        MSX-foutcodes) via ENgeterror in plaats van MSXgeterror."""
+        if self._strict and code != 0:
+            buf = ctypes.create_string_buffer(256)
+            try:
+                self._en.ENgeterror(code, buf, 256)
+                msg = buf.value.decode(errors="replace")
+            except Exception:
+                msg = f"EPANET fout {code}"
+            raise MsxError(code, msg, context)
+        return code
+
+    def en_open(self, inp_path: str, rpt_path: str = "", out_path: str = "") -> None:
+        """Open het onderliggende EPANET-netwerk (vereist vóór ``open()``)."""
+        self._check_en(
+            self._en.ENopen(_encode(inp_path), _encode(rpt_path), _encode(out_path)),
+            "en_open",
+        )
+
+    def en_close(self) -> None:
+        """Sluit het onderliggende EPANET-netwerk."""
+        try:
+            self._en.ENclose()
+        except Exception:
+            pass
+
+    def en_node_count(self) -> int:
+        n = c_int(0)
+        self._check_en(self._en.ENgetcount(_EnCountType.NODECOUNT, byref(n)), "en_node_count")
+        return n.value
+
+    def en_link_count(self) -> int:
+        n = c_int(0)
+        self._check_en(self._en.ENgetcount(_EnCountType.LINKCOUNT, byref(n)), "en_link_count")
+        return n.value
+
+    def en_node_id(self, index: int) -> str:
+        buf = ctypes.create_string_buffer(EN_MAXID + 1)
+        self._check_en(self._en.ENgetnodeid(index, buf), "en_node_id")
+        return buf.value.decode()
+
+    def en_link_id(self, index: int) -> str:
+        buf = ctypes.create_string_buffer(EN_MAXID + 1)
+        self._check_en(self._en.ENgetlinkid(index, buf), "en_link_id")
+        return buf.value.decode()
+
+    def en_node_index(self, name: str) -> int:
+        idx = c_int(0)
+        self._check_en(self._en.ENgetnodeindex(_encode(name), byref(idx)), "en_node_index")
+        return idx.value
+
+    def en_link_index(self, name: str) -> int:
+        idx = c_int(0)
+        self._check_en(self._en.ENgetlinkindex(_encode(name), byref(idx)), "en_link_index")
+        return idx.value
+
     # ── Signaturen ────────────────────────────────────────────────────────────
 
     def _bind_signatures(self):
@@ -149,7 +316,12 @@ class MsxNativeLib:
         self._use_hyd     = _fn("MSXusehydfile",   c_int, c_char_p)
         self._solve_qual  = _fn("MSXsolveQ",        c_int)
         self._init_run    = _fn("MSXinit",          c_int, c_int)
-        self._step        = _fn("MSXstep",          c_int, POINTER(c_long), POINTER(c_long))
+        # MSXstep gebruikt double* voor t/tleft sinds EPANET-MSX 2.0
+        # (was long* in de 1.1-header waar deze wrapper oorspronkelijk op
+        # was gebaseerd — c_long op de verkeerde grootte zou op Windows
+        # geheugencorruptie geven en op Linux/macOS stille foutieve
+        # tijdwaarden opleveren).
+        self._step        = _fn("MSXstep",          c_int, POINTER(c_double), POINTER(c_double))
         self._save_out    = _fn("MSXsaveoutfile",   c_int, c_char_p)
         self._save_msx    = _fn("MSXsavemsxfile",   c_int, c_char_p)
         self._report      = _fn("MSXreport",        c_int)
@@ -219,8 +391,8 @@ class MsxNativeLib:
         t      : verstreken simulatietijd (s)
         tleft  : resterende tijd (s); 0 betekent klaar
         """
-        t     = c_long(0)
-        tleft = c_long(0)
+        t     = c_double(0)
+        tleft = c_double(0)
         self._check(self._step(byref(t), byref(tleft)), "advance")
         return int(t.value), int(tleft.value)
 
@@ -539,6 +711,7 @@ class MsxSimulation:
         self.msx_path = str(msx_path)
         self._lib     = MsxNativeLib(lib_path, strict=strict)
         self._loaded  = False
+        self._en_opened = False
         self._state   : Optional[MsxNetworkState] = None
 
         # Laad EPANET netwerk (hydraulica); MSX vereist dat dit eerst gebeurt
@@ -547,12 +720,19 @@ class MsxSimulation:
     # ── Initialisatie ─────────────────────────────────────────────────────────
 
     def _epanet_open(self):
-        """Open het EPANET-netwerk via de standaard epanet2 API als dat beschikbaar is."""
-        # We gaan er vanuit dat de gebruiker het netwerk al via zijn eigen EPANET-koppeling
-        # heeft geopend, of dat MSXopen zelf het .inp impliciet inleest via het .msx bestand.
-        # Niets doen hier — MSXopen() verwacht alleen het .msx pad; hydraulica wordt
-        # intern opgelost via MSXsolveH().
-        pass
+        """Open het EPANET-netwerk via de standaard epanet2 API.
+
+        MSXopen() verwacht dat het EPANET-netwerk al via ENopen() is
+        geladen (zie msxmain.c, de officiële CLI-referentie: ENopen()
+        wordt altijd vóór MSXopen() aangeroepen). Zonder deze stap blijft
+        de netwerk-state binnen de gedeelde epanet2-bibliotheek leeg en
+        faalt (of negeert) MSXopen() feitelijk stil.
+        """
+        base = self.inp_path[:-4] if self.inp_path.lower().endswith(".inp") else self.inp_path
+        rpt_path = base + ".rpt"
+        out_path = base + ".bin"
+        self._lib.en_open(self.inp_path, rpt_path, out_path)
+        self._en_opened = True
 
     def load(self) -> MsxNetworkState:
         """
@@ -596,7 +776,7 @@ class MsxSimulation:
             state.constants[name] = value
 
         # ── Initiële kwaliteit: knopen ────────────────────────────────────────
-        n_nodes = lib.object_count(_ObjectType.NODE)
+        n_nodes = lib.en_node_count()
         n_sp    = len(state.species)
         state.node_initq = np.zeros((n_nodes, n_sp))
         for ni in range(1, n_nodes + 1):
@@ -606,7 +786,7 @@ class MsxSimulation:
                 )
 
         # ── Initiële kwaliteit: leidingen ─────────────────────────────────────
-        n_links = lib.object_count(_ObjectType.LINK)
+        n_links = lib.en_link_count()
         state.link_initq = np.zeros((n_links, n_sp))
         for li in range(1, n_links + 1):
             for si, sp in enumerate(state.species, start=1):
@@ -616,7 +796,7 @@ class MsxSimulation:
 
         # ── Bronnen ───────────────────────────────────────────────────────────
         for ni in range(1, n_nodes + 1):
-            node_name = lib.object_id(_ObjectType.NODE, ni)
+            node_name = lib.en_node_id(ni)
             for si, sp in enumerate(state.species, start=1):
                 info = lib.source_info(ni, si)
                 if info["type"] != _SourceKind.NONE:
@@ -672,12 +852,12 @@ class MsxSimulation:
         lib.initialize_run(save_to_file)
 
         state    = self._state
-        n_nodes  = lib.object_count(_ObjectType.NODE)
-        n_links  = lib.object_count(_ObjectType.LINK)
+        n_nodes  = lib.en_node_count()
+        n_links  = lib.en_link_count()
         n_sp     = len(state.species)
 
-        node_names = [lib.object_id(_ObjectType.NODE, i) for i in range(1, n_nodes + 1)]
-        link_names = [lib.object_id(_ObjectType.LINK, i) for i in range(1, n_links + 1)]
+        node_names = [lib.en_node_id(i) for i in range(1, n_nodes + 1)]
+        link_names = [lib.en_link_id(i) for i in range(1, n_links + 1)]
 
         # Pre-alloceer opslag (grote stap): schat tijdstappen
         time_list  : List[int]       = [0]
@@ -740,7 +920,11 @@ class MsxSimulation:
             if not items:
                 return
             for name, sp_dict in items.items():
-                idx = lib.object_index(obj_type, name)
+                idx = (
+                    lib.en_node_index(name) if obj_type == _ObjectType.NODE
+                    else lib.en_link_index(name) if obj_type == _ObjectType.LINK
+                    else lib.object_index(obj_type, name)
+                )
                 for sp_name, value in sp_dict.items():
                     sp_idx = lib.object_index(_ObjectType.SPECIES, sp_name)
                     lib.set_initial_quality(obj_type, idx, sp_idx, value)
@@ -774,7 +958,7 @@ class MsxSimulation:
         kind_map = self._SOURCE_KIND_MAP
         src_code = kind_map.get(kind.upper(), _SourceKind.NONE)
 
-        node_idx = lib.object_index(_ObjectType.NODE,    node_name)
+        node_idx = lib.en_node_index(node_name)
         sp_idx   = lib.object_index(_ObjectType.SPECIES, species_name)
         pat_idx  = 0
         if pattern_name:
@@ -807,13 +991,16 @@ class MsxSimulation:
         self.close()
 
     def close(self) -> None:
-        """Sluit de MSX-bibliotheek en geef geheugen vrij."""
+        """Sluit de MSX-bibliotheek en het onderliggende EPANET-netwerk."""
         if self._loaded:
             try:
                 self._lib.close()
             except MsxError:
                 pass
             self._loaded = False
+        if self._en_opened:
+            self._lib.en_close()
+            self._en_opened = False
 
     def __repr__(self) -> str:
         status = "geladen" if self._loaded else "niet geladen"

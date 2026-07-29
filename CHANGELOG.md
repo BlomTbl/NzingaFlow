@@ -1,5 +1,54 @@
 # Changelog
 
+## [1.2.2] — 2026-07-28
+
+### MSX native library bridge — bundled binaries + critical bugfixes
+
+`msxlibrary.py` (`MsxSimulation`/`MsxNativeLib`) was not actually functional
+since its introduction in v1.2.0: no `libepanetmsx`/`epanetmsx.dll` was
+available on the system, and even with the library present the bridge still
+failed due to several underlying bugs. Both are now fixed.
+
+**Bundled binaries (`nzingaflow/lib/`)**
+- `libepanetmsx.so` + `libepanet2_msx.so` (Linux x86-64) and `epanetmsx.dll` +
+  `epanet2_msx.dll` (Windows x86-64), built from the official EPANET-MSX
+  2.0 source (github.com/USEPA/EPANETMSX). macOS is not yet built (see
+  `nzingaflow/lib/README.txt` for build instructions).
+- `_default_lib_path()` now also searches `lib/`, platform-aware.
+
+**Bugfixes in `msxlibrary.py`**
+- `MSXstep` used `c_long` instead of `c_double` for its time parameters —
+  an ABI mismatch against the MSX 2.0 C API (potentially memory-corrupting
+  on Windows, silently wrong time values elsewhere).
+- `_epanet_open()` was a no-op; `ENopen()` was never called before
+  `MSXopen()`, even though MSX depends on it for the shared network state
+  (see the official CLI reference, `msxmain.c`). The EPANET network is now
+  actually opened via a new `en_open()`/`en_close()` binding.
+- Node/link counts and names went through `MSXgetcount`/`MSXgetID`, which
+  don't support that object type (only SPECIES/CONSTANT/PARAMETER/PATTERN) —
+  this raised `MSX error 515` everywhere. Rerouted through the correct
+  EPANET-layer calls (`ENgetcount`, `ENgetnodeid`, `ENgetlinkid`,
+  `ENgetnodeindex`, `ENgetlinkindex`), with a dedicated error translator
+  (`ENgeterror`) since EN and MSX error codes use different numbering.
+- **Library name collision with epynet:** the epanet2 library that
+  `libepanetmsx` links against shared its name (and, on Linux, its SONAME)
+  with epynet's own bundled epanet2 library. Running both in the same
+  process (as NzingaFlow does, since it depends on epynet) made the dynamic
+  linker / Windows loader silently resolve to the wrong, already-loaded
+  copy. Fixed with a unique name (`libepanet2_msx.so` / `epanet2_msx.dll`)
+  for the companion library.
+
+**Docs:** the earlier reference to EPANET-MSX **1.1** (the source of the
+`MSXstep` bug) has been corrected to **2.0** in both the module docstring
+and the READMEs.
+
+**Tests:** new `tests/test_msxlibrary.py`, run against the official arsenic
+oxidation example network (USEPA EPANETMSX Examples/), including regression
+tests for the bugs listed above.
+
+**Backward compatibility:** `MsxSimulation`/`MsxNativeLib`'s public API is
+unchanged; this is a bugfix and bundling release only.
+
 ## [1.2.1] — 2026-06-22
 
 ### Valve support in transport topology — `include_valves` parameter

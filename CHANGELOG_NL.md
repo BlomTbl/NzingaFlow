@@ -1,5 +1,56 @@
 # Changelog
 
+## [1.2.2] — 2026-07-28
+
+### MSX native library bridge — meegeleverde binaries + kritieke bugfixes
+
+`msxlibrary.py` (`MsxSimulation`/`MsxNativeLib`) was sinds de introductie in
+v1.2.0 in de praktijk niet functioneel: er was geen `libepanetmsx`/`epanetmsx.dll`
+op het systeem beschikbaar, en zelfs met de bibliotheek aanwezig faalde de
+brug alsnog door meerdere onderliggende bugs. Beide zijn nu opgelost.
+
+**Meegeleverde binaries (`nzingaflow/lib/`)**
+- `libepanetmsx.so` + `libepanet2_msx.so` (Linux x86-64) en `epanetmsx.dll` +
+  `epanet2_msx.dll` (Windows x86-64), gebouwd vanuit de officiële EPANET-MSX
+  2.0-broncode (github.com/USEPA/EPANETMSX). macOS is nog niet meegebouwd
+  (zie `nzingaflow/lib/README.txt` voor bouwinstructies).
+- `_default_lib_path()` zoekt nu ook in `lib/`, platform-bewust.
+
+**Bugfixes in `msxlibrary.py`**
+- `MSXstep` gebruikte `c_long` i.p.v. `c_double` voor de tijdsparameters —
+  een ABI-mismatch t.o.v. de MSX 2.0 C-API (op Windows potentieel
+  geheugencorrumperend, elders stille foutieve tijdwaarden).
+- `_epanet_open()` was een no-op; `ENopen()` werd nooit aangeroepen vóór
+  `MSXopen()`, terwijl MSX daarvan afhankelijk is voor de gedeelde
+  netwerk-state (zie de officiële CLI-referentie `msxmain.c`). Nu wordt
+  het EPANET-netwerk daadwerkelijk geopend via een nieuwe `en_open()`/
+  `en_close()`-koppeling.
+- Node-/link-tellingen en -namen liepen via `MSXgetcount`/`MSXgetID`, die
+  dat objecttype niet ondersteunen (alleen SPECIES/CONSTANT/PARAMETER/
+  PATTERN) — gaf overal `MSX fout 515`. Omgezet naar de juiste EPANET-laag
+  (`ENgetcount`, `ENgetnodeid`, `ENgetlinkid`, `ENgetnodeindex`,
+  `ENgetlinkindex`), met een aparte foutvertaling (`ENgeterror`) omdat
+  EN- en MSX-foutcodes een andere nummering hebben.
+- **Bibliotheeknaam-botsing met epynet:** de epanet2-bibliotheek waar
+  `libepanetmsx` tegen linkt deelde dezelfde naam (en op Linux: dezelfde
+  SONAME) als epynet's eigen bundled `epanet2`-bibliotheek. Draaiden beide
+  in hetzelfde proces (zoals in NzingaFlow, dat epynet gebruikt), dan
+  resolvde de dynamic linker/Windows-loader stilzwijgend naar het verkeerde,
+  al-geladen exemplaar. Opgelost met een unieke naam (`libepanet2_msx.so` /
+  `epanet2_msx.dll`) voor de companion-bibliotheek.
+
+**Documentatie:** de eerdere verwijzing naar EPANET-MSX **1.1** (waar de
+`MSXstep`-bug vandaan kwam) is gecorrigeerd naar **2.0** in zowel de
+module-docstring als de README's.
+
+**Tests:** nieuwe `tests/test_msxlibrary.py`, tegen het officiële
+arseenoxidatie-voorbeeldnetwerk (USEPA EPANETMSX Examples/), inclusief
+regressietests voor de hierboven genoemde bugs.
+
+**Achterwaartse compatibiliteit:** de publieke API van `MsxSimulation`/
+`MsxNativeLib` is ongewijzigd; dit is uitsluitend een bugfix- en
+bundeling-release.
+
 ## [1.2.1] — 2026-06-22
 
 ### Afsluiters (valves) in transporttopologie — parameter `include_valves`
