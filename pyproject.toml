@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nzingaflow"
-version = "1.2.1"
+version = "1.2.2"
 description = "Lagrangian Transport kwaliteitssimulator voor EPANET-drinkwaternetwerken"
 readme = "README.md"
 license = { text = "MIT" }
@@ -67,7 +67,13 @@ where = ["."]
 include = ["nzingaflow*"]
 
 [tool.setuptools.package-data]
-nzingaflow = ["py.typed"]
+nzingaflow = [
+    "py.typed",
+    "lib/*.so",
+    "lib/*.dylib",
+    "lib/*.dll",
+    "lib/README.txt",
+]
 
 # ── Ruff linter ───────────────────────────────────────────────────────────────
 [tool.ruff]
@@ -95,4 +101,5 @@ addopts   = "-v --tb=short"
 markers   = [
     "slow: tests die > 5 seconden duren",
     "requires_epynet: tests die een geladen EPANET-netwerk vereisen",
+    "requires_msx: tests die de epanetmsx/epanet2 gedeelde bibliotheken vereisen",
 ]
