@@ -950,6 +950,18 @@ solver = NzingaFlowSolver("network.inp", include_valves=True)
 
 ## Changelog
 
+### 1.2.2
+
+- **MSX native library bridge — bundled binaries + critical bugfixes.** `msxlibrary.py` (`MsxSimulation`/`MsxNativeLib`) was not actually functional since its introduction in 1.2.0: no native library was available on the system, and even with one present the bridge still failed due to several underlying bugs.
+- Native binaries now ship in `nzingaflow/lib/`: `libepanetmsx.so`/`libepanet2_msx.so` (Linux x86-64) and `epanetmsx.dll`/`epanet2_msx.dll` (Windows x86-64), built from the official EPANET-MSX 2.0 source. macOS not yet built — see `nzingaflow/lib/README.txt`.
+- Fixed: `MSXstep` used `c_long` instead of `c_double` for its time parameters (ABI mismatch against the MSX 2.0 C API).
+- Fixed: `_epanet_open()` was a no-op — `ENopen()` was never called before `MSXopen()`, even though MSX depends on it for the shared network state. Now bound via new `en_open()`/`en_close()` methods.
+- Fixed: node/link counts and names went through `MSXgetcount`/`MSXgetID`, which don't support that object type — raised `MSX error 515` on every call. Rerouted through the correct EPANET-layer calls (`ENgetcount`, `ENgetnodeid`, `ENgetlinkid`, `ENgetnodeindex`, `ENgetlinkindex`).
+- Fixed: the companion epanet2 library shared its name (and, on Linux, its SONAME) with epynet's own bundled epanet2 library, so running both in the same process silently resolved to the wrong, already-loaded copy. Renamed to `libepanet2_msx.so`/`epanet2_msx.dll`.
+- Corrected: earlier docs referenced EPANET-MSX 1.1 (the source of the `MSXstep` bug); this bridge targets 2.0.
+- New `tests/test_msxlibrary.py`, run against the official arsenic oxidation example network, including regression tests for the bugs above.
+- Backward compatible: `MsxSimulation`/`MsxNativeLib`'s public API is unchanged.
+
 ### 1.2.1
 
 - **Valve support in transport topology** (`include_valves` parameter): all EPANET valve types (PRV, PSV, PBV, FCV, TCV, GPV, PCV) can now be included alongside pipes in the Lagrangian transport topology via `include_valves=True` on `HydraulicModel` and `NzingaFlowSolver`. Previously NzingaFlow always excluded valves, meaning no residence time/decay was computed across valve elements, and valves that were the sole connection between two network segments caused a topological disconnection. Default `False`; backward compatible.
