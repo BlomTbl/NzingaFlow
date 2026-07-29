@@ -168,7 +168,7 @@ nzingaflow/
 | Module | Wanneer gebruiken | Native lib nodig |
 |---|---|---|
 | `msx.py` — `MsxReactionSystem` | Eigen reactievergelijkingen in Python; plugt in via `geochem=` | Nee |
-| `msxlibrary.py` — `MsxSimulation` | Bestaand `.msx`-bestand hergebruiken; MSX-C-solver zelf laten integreren | Ja (`libepanetmsx.so` / `epanetmsx.dll`) |
+| `msxlibrary.py` — `MsxSimulation` | Bestaand `.msx`-bestand hergebruiken; MSX-C-solver zelf laten integreren | Nee — meegeleverd in `nzingaflow/lib/` (Linux x86-64, Windows x86-64; macOS nog niet) |
 
 ### Kernprincipes
 
@@ -221,7 +221,7 @@ t = runner.time_axis(unit='h')
 
 ### MSX native library bridge (ctypes → libepanetmsx)
 
-Directe koppeling met de officiële EPANET-MSX C-bibliotheek. Vereist `libepanetmsx.so` (Linux/macOS) of `epanetmsx.dll` (Windows).
+Directe koppeling met de officiële EPANET-MSX C-bibliotheek. `libepanetmsx`/`epanet2` worden meegeleverd in `nzingaflow/lib/` (Linux x86-64 en Windows x86-64); voor macOS moet je de bibliotheek zelf bouwen (zie EPANETMSX's eigen `CMakeLists.txt`, die Linux/macOS/Windows ondersteunt).
 
 ```python
 from nzingaflow import MsxSimulation, run_msx
@@ -360,13 +360,13 @@ Optioneel:
 - numba ≥ 0.57 — voor ~4-5× snellere kernels
 - phreeqpython ≥ 1.4 — voor volledige geochemie (PHREEQC)
 - scipy ≥ 1.10 — voor validatietests en MSX-solvers `rk45`/`radau`
-- `libepanetmsx.so` / `epanetmsx.dll` — voor `MsxSimulation` (native EPANET-MSX C-bibliotheek)
+- `libepanetmsx`/`epanet2` — meegeleverd (`nzingaflow/lib/`) voor `MsxSimulation`; Linux x86-64 en Windows x86-64 bijgesloten, macOS (nog) niet
 
 > **MSX zonder scipy:** de ingebouwde `ros2`- en `rk4`-solvers in `MsxReactionSystem` vereisen alleen NumPy.
 > String-expressies vereisen geen sympy.
 >
 > **MSX zonder native bibliotheek:** `MsxReactionSystem` (`msx.py`) werkt zonder `libepanetmsx`.
-> `MsxSimulation` (`msxlibrary.py`) vereist de native bibliotheek wel.
+> `MsxSimulation` (`msxlibrary.py`) heeft de meegeleverde native bibliotheek nodig (Linux/Windows bijgesloten; macOS zelf bouwen).
 
 ---
 
