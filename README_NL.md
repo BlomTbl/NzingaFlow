@@ -212,7 +212,8 @@ print(result.time_hours())                   # tijdas [h]
 print(result.node_concentrations("CL2"))     # array (T × N)
 ```
 
-> Vereist: `libepanetmsx.so` (Linux/macOS) of `epanetmsx.dll` (Windows) op het systeem.
+> Native bibliotheek (`libepanetmsx`/`epanet2`) wordt meegeleverd in `nzingaflow/lib/` — Linux x86-64 en
+> Windows x86-64 bijgesloten. macOS is (nog) niet meegebouwd; bouw zelf via EPANETMSX's `CMakeLists.txt`.
 
 ### Met geochemie (PhreeqPython)
 
@@ -267,7 +268,7 @@ Stappen 1–4 worden uitgevoerd door Numba JIT-kernels als Numba is geïnstallee
 | `stability.py` | `recommended_dt`, `MassBalanceTracker` | CFL-controle en massabalans |
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython-integratie |
 | `msx.py` | `MsxReactionSystem` | Pure-Python MSX reactielaag: ODE-solvers + expressieparser (v1.1.0) |
-| `msxlibrary.py` | `MsxSimulation`, `MsxNativeLib` | Directe ctypes-brug naar `libepanetmsx`; laadt `.msx`-bestanden ongewijzigd (v1.2.0) |
+| `msxlibrary.py` | `MsxSimulation`, `MsxNativeLib` | Directe ctypes-brug naar `libepanetmsx` (EPANET-MSX 2.0); laadt `.msx`-bestanden ongewijzigd; native libs meegeleverd (v1.2.2) |
 
 ### SegmentStore (Structure-of-Arrays)
 
@@ -650,10 +651,11 @@ rxn = arsenic_oxidation_msx(Ka=10.0, Kb=0.1, K1=5.0, K2=1.0, Smax=50.0, solver='
 
 ### MsxSimulation & MsxNativeLib
 
-Directe koppeling met de officiële EPANET-MSX C-bibliotheek via ctypes. Drie lagen boven de `MSX_*` C-API (EPANET-MSX 1.1, revisie 11/01/10).
+Directe koppeling met de officiële EPANET-MSX C-bibliotheek via ctypes. Drie lagen boven de `MSX_*` C-API (EPANET-MSX 2.0).
 
-> Vereist: `libepanetmsx.so` (Linux/macOS) of `epanetmsx.dll` (Windows).
-> Installatie: download de EPANET-MSX broncode via [github.com/USEPA/EPANET-MSX](https://github.com/USEPA/EPANET-MSX) en compileer de gedeelde bibliotheek.
+> Native bibliotheek (`libepanetmsx`/`epanet2`) wordt meegeleverd in `nzingaflow/lib/` —
+> Linux x86-64 en Windows x86-64 bijgesloten. Voor macOS: bouw zelf via de `CMakeLists.txt`
+> uit [github.com/USEPA/EPANETMSX](https://github.com/USEPA/EPANETMSX) (ondersteunt Linux/macOS/Windows).
 
 #### `MsxSimulation` — orchestrator (laag 3)
 
