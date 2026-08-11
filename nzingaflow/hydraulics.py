@@ -2,6 +2,27 @@
 """
 Koppeling tussen epynet (EPANET via Python) en NzingaFlow.
 
+Werkt rechtstreeks tegen de kale EPYnetDTD-`epynet.Network` — GEEN
+afhankelijkheid van `epynet.compat` (die laag is niet meer beschikbaar).
+Dat betekent dat deze module zelf drie dingen regelt die de oude epynet
+gratis gaf en die `epynet.compat` tijdelijk simuleerde:
+
+1.  Memoisatie van solve()  — EPYnetDTD's `HydraulicSolver.solve_time_step()`
+    runt altijd opnieuw, ook bij twee aanroepen met dezelfde `simtime`.
+    HydraulicModel houdt daarom zelf `_solved` / `_solved_for_simtime` bij
+    (zie solve() hieronder) i.p.v. dat aan het Network-object te delegeren.
+
+2.  Geen wegschrijven naar .hyd  — EPYnetDTD's `HydraulicSolver.initialise()`
+    roept `EN_initH()` aan met het (impliciete) `EN_SAVE`-default. Voor een
+    EPS-loop met veel `hyd_dt`-stappen is dat onnodige disk-I/O; net als de
+    oude epynet gebruiken we hier `EN_NOSAVE` via `_NoSaveHydraulicSolver`.
+
+3.  Dict-achtige/`len()`-bare knoop- en linkcollecties  — EPYnetDTD geeft
+    `net.nodes`, `.links`, `.tanks`, `.pumps`, `.reservoirs`, etc. terug als
+    kale generators: geen `len()`, geen `in`, geen index-toegang. Overal
+    waar dat nodig is, wordt hier expliciet naar `list(...)` of een
+    uid-`set`/`dict` geconverteerd (zie o.a. `_get_links()`, `summary()`).
+
 Wijzigingen t.o.v. vorige versie
 ──────────────────────────────────
 Compatibel met de herziene epynet-codebase (2025):
@@ -10,11 +31,10 @@ Compatibel met de herziene epynet-codebase (2025):
                   1-based.  Aftrekken van 1 voor 0-based array-indexering
                   is nog steeds noodzakelijk.
 
-2.  ObjectCollection.__iter__  — itereert over .values() (de objecten),
-                  NIET over de sleutels.  list(net.pipes) geeft daardoor
-                  een lijst van Pipe-objecten, precies wat we nodig hebben.
-                  De oude code gebruikte list(net.pipes.values()) — beide
-                  werken, maar list(net.pipes) is nu de idiomatische vorm.
+2.  net.nodes / net.pipes / ...  — kale generators (geen ObjectCollection).
+                  Itereren geeft de objecten zelf (`for lnk in self.net.pipes`
+                  geeft direct Pipe-objecten), maar `len()`, `in` en
+                  index-toegang werken niet — zie hierboven.
 
 3.  p.diameter  — ENgetlinkvalue(index, EN_DIAMETER=0) retourneert de
                   diameter in millimeter voor SI-eenheden (CMH, LPS, enz.)
@@ -25,8 +45,9 @@ Compatibel met de herziene epynet-codebase (2025):
 4.  p.velocity  — wordt teruggegeven in m/s (SI) of ft/s (US) door EPANET.
                   get_hydraulic_state() converteert US-snelheid naar m/s.
 
-5.  ENgetflowunits()  — beschikbaar via net.ep.ENgetflowunits(); retourneert
-                  een int-code.  Dezelfde mapping als voorheen.
+5.  ENgetflowunits()  — beschikbaar via net.EN_getflowunits() (niet meer via
+                  een `net.ep.ENxxx(...)`-shim); retourneert een int-code.
+                  Dezelfde mapping als voorheen.
 
 6.  weakref-netwerk  — node.network is een weakref.ref; gebruik altijd
                   node.network() om het Network-object te verkrijgen.
@@ -34,7 +55,7 @@ Compatibel met de herziene epynet-codebase (2025):
                   op net.pipes / net.nodes), maar wel relevant als je ooit
                   node-methoden aanroept.
 
-7.  solve() caches  — na network.solve() zijn link._values en node._values
+7.  solve() caches  — na solve_time_step() zijn link._values en node._values
                   leeggemaakt (reset() → _values.clear()).  Eigenschap-
                   toegang via p.flow / p.velocity werkt daarna correct omdat
                   get_property() opnieuw ENgetlinkvalue aanroept.
@@ -50,10 +71,13 @@ Invarianten die NIET zijn veranderd
 from __future__ import annotations
 import numpy as np
 
+from epynet.enum import EN_InitHydOption
+from epynet.solver import HydraulicSolver
+
 
 # ── Eenheidsafhankelijke conversiefactoren ────────────────────────────────────
 
-# Flow-codes zoals geretourneerd door ENgetflowunits()
+# Flow-codes zoals geretourneerd door EN_getflowunits()
 _FLOW_CODE_TO_LABEL = {
     0: 'CFS', 1: 'GPM', 2: 'MGD', 3: 'IMGD', 4: 'AFD',
     5: 'LPS', 6: 'LPM', 7: 'MLD', 8: 'CMH', 9: 'CMD',
@@ -79,6 +103,20 @@ _US_UNITS = {'CFS', 'GPM', 'MGD', 'IMGD', 'AFD'}
 # Conversies
 _INCH_TO_M  = 0.0254
 _FT_S_TO_M_S = 0.3048
+
+
+class _NoSaveHydraulicSolver(HydraulicSolver):
+    """`HydraulicSolver`-variant die, net als de oude epynet, geen
+    hydraulische resultaten wegschrijft naar het .hyd-bestand.
+
+    Alleen `initialise()` wijkt af van de EPYnetDTD-standaard: die roept
+    `EN_initH()` aan met `EN_NOSAVE` in plaats van het (impliciete)
+    `EN_SAVE`-default. `run()` en `close()` zijn ongewijzigd (geërfd).
+    """
+
+    def initialise(self) -> None:
+        self.network.EN_openH()
+        self.network.EN_initH(EN_InitHydOption.EN_NOSAVE)
 
 
 class HydraulicModel:
@@ -111,6 +149,9 @@ class HydraulicModel:
                  include_valves: bool = False):
         from epynet import Network
         self.net           = Network(inp_path)
+        self._solver       = _NoSaveHydraulicSolver(self.net)
+        self._solved        = False   # zelf bijgehouden — net.solved bestaat niet
+        self._solved_for_simtime: int | None = None
         self._include_pumps  = include_pumps
         self._include_valves = include_valves
         self._pipe_list    = None   # gecached na eerste _get_links()
@@ -132,11 +173,22 @@ class HydraulicModel:
 
         Opmerking
         ──────────────────────
-        Na solve() maakt epynet intern link._values leeg via reset().
-        Eigenschap-toegang (p.flow, p.velocity, p.diameter) werkt daarna
-        correct via get_property() → ENgetlinkvalue().
+        Memoisatie: als het netwerk al opgelost is voor exact deze
+        `simtime`, wordt er niet opnieuw gerekend — `HydraulicSolver
+        .solve_time_step()` zelf memoiseert niet, dus dat regelt
+        HydraulicModel hier zelf.
+
+        Na solve_time_step() maakt epynet intern link._values leeg via
+        reset(). Eigenschap-toegang (p.flow, p.velocity, p.diameter) werkt
+        daarna correct via get_property() → EN_getlinkvalue().
         """
-        self.net.solve(simtime=simtime)
+        if self._solved and self._solved_for_simtime == simtime:
+            return
+
+        self._solved = False
+        self._solver.solve_time_step(pattern_start_time=simtime)
+        self._solved = True
+        self._solved_for_simtime = simtime
         self._pipe_list = None   # invalideer link-cache na nieuwe oplossing
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -169,7 +221,7 @@ class HydraulicModel:
 
         # ── Knoopindex-tabel (0-based) ────────────────────────────────────────
         # node.index is 1-based (EPANET-conventie); wij willen 0-based.
-        # De volgorde in self.net.nodes (ObjectCollection) is de volgorde
+        # De volgorde in self.net.nodes (kale generator) is de volgorde
         # van inlezen, die overeenkomt met de EPANET-interne indices.
         node_names  = [n.uid for n in self.net.nodes]
         node_index  = {uid: i for i, uid in enumerate(node_names)}
@@ -323,7 +375,7 @@ class HydraulicModel:
         if self._units is not None:
             return self._units
         try:
-            code = self.net.ep.ENgetflowunits()
+            code = self.net.EN_getflowunits()
             self._units = _FLOW_CODE_TO_LABEL.get(code, 'CMH')
         except Exception:
             self._units = 'CMH'
@@ -378,12 +430,14 @@ class HydraulicModel:
         """
         links     = self._get_links()
         units     = self._get_flow_units()
-        n_nodes   = len(self.net.nodes)
+        # net.nodes / .tanks / .reservoirs zijn kale generators in EPYnetDTD
+        # (geen ObjectCollection meer) — dus expliciet naar list() voor len().
+        n_nodes   = len(list(self.net.nodes))
         n_pipes   = len(list(self.net.pipes))
         n_pumps   = len(list(self.net.pumps))
         n_valves  = len(list(self.net.valves))
-        n_tanks   = len(self.net.tanks)
-        n_res     = len(self.net.reservoirs)
+        n_tanks   = len(list(self.net.tanks))
+        n_res     = len(list(self.net.reservoirs))
 
         lines = [
             f"HydraulicModel — {self.net.inputfile or '(geen .inp)'}",
@@ -399,10 +453,10 @@ class HydraulicModel:
             f")",
         ]
 
-        if self.net.solved:
+        if self._solved:
             try:
                 flow, vel, rev = self.get_hydraulic_state()
-                simtime_s = getattr(self.net, "solved_for_simtime", "?")
+                simtime_s = self._solved_for_simtime
                 lines += [
                     f"  Hydraulica    : opgelost voor t={simtime_s} s",
                     f"  Flow range    : {flow.min():.4f} – {flow.max():.4f} m³/s",
@@ -418,9 +472,9 @@ class HydraulicModel:
 
     def __repr__(self) -> str:
         n_pipes = len(self._get_links())
-        n_nodes = len(self.net.nodes)
+        n_nodes = len(list(self.net.nodes))
         units   = self._get_flow_units()
         return (
             f"<HydraulicModel pipes={n_pipes} nodes={n_nodes} "
-            f"units={units} solved={self.net.solved}>"
+            f"units={units} solved={self._solved}>"
         )

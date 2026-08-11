@@ -4,7 +4,8 @@ Twee ingangen voor netwerktopologie:
 
   load_from_epynet(net, simtime=0)
       Leest topologie, hydraulica, coördinaten en patronen rechtstreeks
-      uit een geladen epynet.Network object. Geeft de meest nauwkeurige
+      uit een geladen epynet.Network object (kale EPYnetDTD-`Network`,
+      geen `epynet.compat`-laag nodig). Geeft de meest nauwkeurige
       flow/velocity omdat EPANET het netwerk zelf oplost.
 
   parse_inp(path)
@@ -87,7 +88,8 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
 
     Parameters
     ----------
-    net      : epynet.Network  (reeds geladen, hoeft niet opgelost te zijn)
+    net      : epynet.Network  (kale EPYnetDTD-Network, reeds geladen,
+               hoeft niet opgelost te zijn)
     simtime  : simulatietijdstip in seconden waarop hydraulica wordt opgelost.
                Standaard 0 (steady-state beginconditie).
 
@@ -102,12 +104,14 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         duration_s      : int
         source_patterns : {res_uid: {'base_q': float, 'pattern': list[float]}}
     """
-    ep = net.ep
+    # Geen `net.ep`-shim meer — EPYnetDTD's ENxxx-toolkitfuncties heten
+    # rechtstreeks EN_xxx op het Network-object zelf.
+    ep = net
 
     # ── 1. Tijdparameters ─────────────────────────────────────────────────────
-    hyd_step_s  = int(ep.ENgettimeparam(_EN_HYDSTEP))
-    pat_step_s  = int(ep.ENgettimeparam(_EN_PATTERNSTEP))
-    duration_s  = int(ep.ENgettimeparam(_EN_DURATION))
+    hyd_step_s  = int(ep.EN_gettimeparam(_EN_HYDSTEP))
+    pat_step_s  = int(ep.EN_gettimeparam(_EN_PATTERNSTEP))
+    duration_s  = int(ep.EN_gettimeparam(_EN_DURATION))
     # Nul-waarden zijn geldig maar onbruikbaar — gebruik veilige defaults
     if hyd_step_s  <= 0: hyd_step_s  = 3600
     if pat_step_s  <= 0: pat_step_s  = 3600
@@ -115,7 +119,7 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
 
     # ── 2. Flow-eenheden → m³/s omrekeningsfactor ─────────────────────────────
     try:
-        flow_unit_code = int(ep.ENgetflowunits())
+        flow_unit_code = int(ep.EN_getflowunits())
     except Exception:
         flow_unit_code = 8   # fallback: CMH
     flow_factor = _FLOW_TO_M3S.get(flow_unit_code, 1 / 3600)
@@ -125,12 +129,18 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
     node_names = []
     node_coords = {}
 
+    # net.reservoirs / net.tanks zijn kale generators in EPYnetDTD (geen
+    # ObjectCollection meer, dus geen `in`-support): éénmalig naar uid-sets
+    # omzetten, i.p.v. `uid in net.reservoirs` per knoop te herhalen.
+    reservoir_uids = {n.uid for n in net.reservoirs}
+    tank_uids      = {n.uid for n in net.tanks}
+
     for node in net.nodes:
         uid = node.uid
         # Type bepalen
-        if uid in net.reservoirs:
+        if uid in reservoir_uids:
             ntype = 'reservoir'
-        elif uid in net.tanks:
+        elif uid in tank_uids:
             ntype = 'tank'
         else:
             ntype = 'junction'
@@ -138,9 +148,9 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         nodes[uid] = {'type': ntype}
         node_names.append(uid)
 
-        # Coördinaten via ENgetcoord
+        # Coördinaten via EN_getcoord
         try:
-            x, y = ep.ENgetcoord(node.index)
+            x, y = ep.EN_getcoord(node.index)
             node_coords[uid] = (float(x), float(y))
         except Exception:
             pass   # knoop zonder coördinaten: overgeslagen
@@ -149,7 +159,8 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
 
     # ── 4. Hydraulica oplossen op gevraagd tijdstip ───────────────────────────
     try:
-        net.solve(simtime=simtime)
+        from epynet.solver import HydraulicSolver
+        HydraulicSolver(net).solve_time_step(pattern_start_time=simtime)
     except Exception:
         pass   # als solve faalt: flow/velocity worden 0
 
@@ -163,6 +174,10 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
     flow_list   = []
     vel_list    = []
 
+    # Zelfde reden als hierboven: éénmalig uid-sets voor link-typebepaling.
+    pipe_uids = {l.uid for l in net.pipes}
+    pump_uids = {l.uid for l in net.pumps}
+
     for link in net.links:
         uid = link.uid
         idx = link.index
@@ -175,8 +190,8 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
 
         # Geometrie
         try:
-            diam_mm = float(ep.ENgetlinkvalue(idx, _EN_DIAMETER))
-            length_m = float(ep.ENgetlinkvalue(idx, _EN_LENGTH))
+            diam_mm = float(ep.EN_getlinkvalue(idx, _EN_DIAMETER))
+            length_m = float(ep.EN_getlinkvalue(idx, _EN_LENGTH))
         except Exception:
             diam_mm  = 100.0
             length_m = 1.0
@@ -188,8 +203,8 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
 
         # Hydraulica
         try:
-            raw_flow = float(ep.ENgetlinkvalue(idx, _EN_FLOW))
-            raw_vel  = float(ep.ENgetlinkvalue(idx, _EN_VELOCITY))
+            raw_flow = float(ep.EN_getlinkvalue(idx, _EN_FLOW))
+            raw_vel  = float(ep.EN_getlinkvalue(idx, _EN_VELOCITY))
         except Exception:
             raw_flow = 0.0
             raw_vel  = 0.0
@@ -203,9 +218,9 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         vel_ms   = abs(raw_vel)
 
         # Link-type
-        if uid in net.pipes:
+        if uid in pipe_uids:
             ltype = 'pipe'
-        elif uid in net.pumps:
+        elif uid in pump_uids:
             ltype = 'pump'
         else:
             ltype = 'valve'
@@ -237,12 +252,12 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
 
     # ── 6. Patronen ───────────────────────────────────────────────────────────
     patterns = {}
-    n_pat = ep.ENgetcount(_EN_PATCOUNT)
+    n_pat = ep.EN_getcount(_EN_PATCOUNT)
     for pi_idx in range(1, n_pat + 1):
         try:
-            pat_uid  = ep.ENgetpatternid(pi_idx)
-            pat_len  = ep.ENgetpatternlen(pi_idx)
-            mults    = [float(ep.ENgetpatternvalue(pi_idx, k + 1))
+            pat_uid  = ep.EN_getpatternid(pi_idx)
+            pat_len  = ep.EN_getpatternlen(pi_idx)
+            mults    = [float(ep.EN_getpatternvalue(pi_idx, k + 1))
                         for k in range(pat_len)]
             patterns[pat_uid] = mults
         except Exception:
@@ -254,14 +269,14 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         uid  = res.uid
         nidx = res.index
         try:
-            base_q    = float(ep.ENgetnodevalue(nidx, _EN_SOURCEQUAL))
-            pat_idx   = int(ep.ENgetnodevalue(nidx, _EN_SOURCEPAT))
+            base_q    = float(ep.EN_getnodevalue(nidx, _EN_SOURCEQUAL))
+            pat_idx   = int(ep.EN_getnodevalue(nidx, _EN_SOURCEPAT))
         except Exception:
             base_q, pat_idx = 1.0, 0
 
         if pat_idx > 0:
             try:
-                pat_uid = ep.ENgetpatternid(pat_idx)
+                pat_uid = ep.EN_getpatternid(pat_idx)
                 mults   = patterns.get(pat_uid, [1.0])
             except Exception:
                 mults = [1.0]

@@ -807,11 +807,17 @@ class NzingaFlowSolver:
             )
 
     def _get_tank_volumes(self) -> np.ndarray:
-        """Huidige tankvolumes [m³] via epynet."""
+        """Huidige tankvolumes [m³] via epynet.
+
+        EPYnetDTD noemt deze property `tank_volume` (EN_TANKVOLUME, actueel
+        berekend volume), niet `volume` zoals de oude epynet — `n.volume`
+        bestaat niet op EPYnetDTD's Tank en gaf hier voorheen altijd de
+        stille 1000.0-fallback, voor élke tank, ongeacht het echte volume.
+        """
         volumes = []
         for n in self.hyd.net.tanks:
             try:
-                volumes.append(float(n.volume))
+                volumes.append(float(n.tank_volume))
             except Exception:
                 volumes.append(1000.0)   # veilige standaard
         return np.array(volumes, dtype=np.float64) if volumes else np.array([])

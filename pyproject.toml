@@ -35,7 +35,10 @@ requires-python = ">=3.10"
 
 dependencies = [
     "numpy>=1.24",
-    "epynet>=1.1",
+    # >=2.0 == EPYnetDTD (kale Network + epynet.solver.HydraulicSolver,
+    # epynet.enum). NzingaFlow gebruikt geen epynet.compat — dat bestaat niet
+    # (meer); HydraulicModel implementeert memoisatie/no-save zelf.
+    "epynet>=2.0",
 ]
 
 [project.optional-dependencies]

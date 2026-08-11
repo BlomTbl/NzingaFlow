@@ -27,9 +27,19 @@ E3  include_pumps=True — topologie mag niet crashen
     een netwerk met een echte pomp. Na de fix valt dit terug op 0.0,
     net als de bestaande length-fallback voor valves.
 
+E4  Tankvolume via EPYnetDTD
+    Regressietest voor de bugfix in solver.py::_get_tank_volumes(): de
+    oude epynet-property heette `volume`, EPYnetDTD noemt 'm `tank_volume`
+    (EN_TANKVOLUME). `n.volume` bestaat niet op EPYnetDTD's Tank en werd
+    stilzwijgend opgevangen door de brede `except Exception`, waardoor
+    ELKE tank altijd de fallback-waarde 1000.0 m³ kreeg — nooit het echte,
+    door EPANET berekende volume. Deze test rekent het verwachte volume
+    (cilinder: π·r²·h) uit en vergelijkt dat met wat de solver teruggeeft.
+
 Alle tests zijn gemarkeerd met @pytest.mark.requires_epynet.
 """
 from __future__ import annotations
+import math
 import textwrap
 
 import pytest
@@ -115,6 +125,42 @@ _PUMP_NETWORK = textwrap.dedent("""\
     [END]
     """)
 
+# ── Netwerk met een tank (voor tank_volume-regressietest) ────────────────────
+_TANK_NETWORK = textwrap.dedent("""\
+    [TITLE]
+    Testnetwerk met tank
+
+    [JUNCTIONS]
+    ;ID              Elev        Demand      Pattern
+     J1               0           5
+
+    [RESERVOIRS]
+    ;ID              Head        Pattern
+     R1               50
+
+    [TANKS]
+    ;ID              Elevation   InitLevel   MinLevel    MaxLevel    Diameter    MinVol      VolCurve
+     T1               10          5           0           10          20          0
+
+    [PIPES]
+    ;ID              Node1           Node2           Length      Diameter    Roughness   MinorLoss   Status
+     P1               R1              J1              100         200         100         0           Open
+     P2               J1              T1              100         150         100         0           Open
+
+    [TIMES]
+     Duration           0
+
+    [OPTIONS]
+     Units              LPS
+
+    [COORDINATES]
+     J1                0                0
+     R1                -100             0
+     T1                100              0
+
+    [END]
+    """)
+
 
 @pytest.fixture
 def valve_inp(tmp_path):
@@ -129,6 +175,14 @@ def pump_inp(tmp_path):
     """Schrijft _PUMP_NETWORK weg naar een tijdelijk .inp-bestand."""
     p = tmp_path / "pump_network.inp"
     p.write_text(_PUMP_NETWORK)
+    return str(p)
+
+
+@pytest.fixture
+def tank_inp(tmp_path):
+    """Schrijft _TANK_NETWORK weg naar een tijdelijk .inp-bestand."""
+    p = tmp_path / "tank_network.inp"
+    p.write_text(_TANK_NETWORK)
     return str(p)
 
 
@@ -220,3 +274,20 @@ class TestIncludePumpsDiameterFallback:
         hm.solve()
         _, _, _, _, _, pipe_ids, _ = hm.get_topology()
         assert pipe_ids == []
+
+
+class TestTankVolume:
+    """E4 — regressietest: tankvolume via EPYnetDTD's `tank_volume`-property."""
+
+    def test_tank_volume_matches_computed_cylinder_volume(self, tank_inp):
+        # T1: diameter 20 m, initieel peil 5 m boven de bodem (min_level=0,
+        # elevation los van level) → verwacht volume = π·r²·h = π·10²·5.
+        solver = NzingaFlowSolver(tank_inp, n_species=1)
+        volumes = solver._get_tank_volumes()
+
+        assert volumes.shape == (1,)
+        expected = math.pi * (20.0 / 2.0) ** 2 * 5.0
+        assert volumes[0] == pytest.approx(expected, rel=1e-6)
+        # Vóór de fix (n.volume i.p.v. n.tank_volume) viel dit altijd terug
+        # op de veilige standaardwaarde, ongeacht het echte tankvolume.
+        assert volumes[0] != pytest.approx(1000.0, rel=1e-6)
