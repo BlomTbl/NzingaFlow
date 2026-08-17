@@ -1,0 +1,36 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checking / linting caches
+.mypy_cache/
+.ruff_cache/
+
+# EPANET / EPANET-MSX run artifacts
+*.rpt
+*.out
+*.bin
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

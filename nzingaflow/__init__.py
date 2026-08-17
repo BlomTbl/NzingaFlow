@@ -81,7 +81,7 @@ from .msxlibrary import (
 from .lta          import warmup_numba, USE_NUMBA, combined_decay_multi, build_combined_exp
 from .merging      import warmup_numba_merging
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 __author__  = "NzingaFlow"
 
 __all__ = [

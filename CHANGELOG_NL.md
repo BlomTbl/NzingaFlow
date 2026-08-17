@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Hydraulica-refactor + `units.py`
+
+Interne opbouw van `HydraulicModel` herzien rond `Topology`/`HydraulicState`-dataclasses, met een gecachede topologie/leidinglijst en een read-once hydraulica-snapshot na `solve()`. Publieke API ongewijzigd, op twee toevoegingen na: `close()` en context-manager-ondersteuning (`with HydraulicModel(...) as hm:`) voor expliciete opruiming van de EPANET-sessie (`EN_closeH`).
+
+- De interne hydraulische solver vervangen door een sessie-hergebruikende implementatie (`EN_openH()` blijft open tussen `solve()`-aanroepen; `EN_INITFLOW` voor correct cold-start-gedrag), wat de EPS-performance verbetert.
+- Nieuwe module `nzingaflow/units.py`: centraliseert EPANET-eenhedenconversies en -enums (lost AFD/MLD- en diameter/snelheid-US↔SI-conversiebugs op), nu gedeeld door `hydraulics.py` en `parse_inp.py`.
+- `parse_inp.py` bijgewerkt om typed node/link-klassen en de gecorrigeerde eenhedenconversies te gebruiken.
+- Nieuwe tests: `tests/gen_grid_network.py`; `tests/test_epynet_networks.py` uitgebreid met sessie-hergebruik/regressie- en memoisatiecontroles.
+
 ## [1.2.2] — 2026-07-28
 
 ### MSX native library bridge — meegeleverde binaries + kritieke bugfixes
