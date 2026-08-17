@@ -36,12 +36,32 @@ E4  Tankvolume via EPYnetDTD
     door EPANET berekende volume. Deze test rekent het verwachte volume
     (cilinder: π·r²·h) uit en vergelijkt dat met wat de solver teruggeeft.
 
+E5  Sessie-hergebruik (EN_openH één keer per sessie) — numerieke regressie
+    Regressietest voor de performance-optimalisatie in
+    `_NoSaveHydraulicSolver` (hydraulics.py): EN_openH() wordt maar één
+    keer per HydraulicModel-sessie aangeroepen i.p.v. bij elke solve()
+    opnieuw. Empirisch gevonden valkuil tijdens het bouwen hiervan: de voor
+    de hand liggende EN_initH()-flag EN_NOSAVE bleek bij sessie-hergebruik
+    een klein maar reëel numeriek verschil te geven t.o.v. "vers
+    HydraulicModel per simtime" (~1e-8 relatief) — omdat EN_NOSAVE de
+    laatst-geconvergeerde debieten van de vorige stap hergebruikt als
+    startpunt voor de volgende Newton-Raphson-iteratie (warm start), iets
+    wat een verse sessie niet heeft (cold start). EN_INITFLOW forceert een
+    cold start bij elke stap, ook binnen een hergebruikte sessie — dat is
+    de flag die hier daadwerkelijk gebruikt wordt. Deze test vergelijkt,
+    op een netwerk met tank + patroon (zodat EN_initH() elke stap
+    daadwerkelijk iets terugzet om warm/cold-verschil zichtbaar te maken),
+    (a) één sessie met 4 opeenvolgende solve()-aanroepen tegen (b) 4 losse
+    HydraulicModel-instanties — met np.allclose(rtol=1e-9, atol=1e-12),
+    niet alleen "geen crash".
+
 Alle tests zijn gemarkeerd met @pytest.mark.requires_epynet.
 """
 from __future__ import annotations
 import math
 import textwrap
 
+import numpy as np
 import pytest
 
 from nzingaflow.hydraulics import HydraulicModel
@@ -161,6 +181,49 @@ _TANK_NETWORK = textwrap.dedent("""\
     [END]
     """)
 
+# ── Netwerk met tank + patroon (voor sessie-hergebruik-regressietest) ────────
+# Een patroon-gestuurde demand zorgt dat elke simtime een ander debiet geeft
+# (anders zou EN_INITFLOW vs EN_NOSAVE toevallig hetzelfde resultaat geven,
+# los van de bug die dit netwerk moet vangen).
+_EPS_TANK_NETWORK = textwrap.dedent("""\
+    [TITLE]
+    EPS-testnetwerk met tank en patroon
+
+    [JUNCTIONS]
+     J1               0           5
+
+    [RESERVOIRS]
+     R1               50
+
+    [TANKS]
+     T1               10          5           0           10          20          0
+
+    [PIPES]
+     P1               R1              J1              200         200         100         0           Open
+     P2               J1              T1              150         150         100         0           Open
+
+    [PATTERNS]
+     PAT1             1.0  1.5  0.5  2.0  0.8  1.2
+
+    [DEMANDS]
+     J1               5.0             PAT1
+
+    [TIMES]
+     Duration           6
+     Hydraulic Timestep 1
+     Pattern Timestep   1
+
+    [OPTIONS]
+     Units              LPS
+
+    [COORDINATES]
+     J1                0                0
+     R1                -100             0
+     T1                100              0
+
+    [END]
+    """)
+
 
 @pytest.fixture
 def valve_inp(tmp_path):
@@ -183,6 +246,14 @@ def tank_inp(tmp_path):
     """Schrijft _TANK_NETWORK weg naar een tijdelijk .inp-bestand."""
     p = tmp_path / "tank_network.inp"
     p.write_text(_TANK_NETWORK)
+    return str(p)
+
+
+@pytest.fixture
+def eps_tank_inp(tmp_path):
+    """Schrijft _EPS_TANK_NETWORK weg naar een tijdelijk .inp-bestand."""
+    p = tmp_path / "eps_tank_network.inp"
+    p.write_text(_EPS_TANK_NETWORK)
     return str(p)
 
 
@@ -291,3 +362,52 @@ class TestTankVolume:
         # Vóór de fix (n.volume i.p.v. n.tank_volume) viel dit altijd terug
         # op de veilige standaardwaarde, ongeacht het echte tankvolume.
         assert volumes[0] != pytest.approx(1000.0, rel=1e-6)
+
+
+class TestSessionReuse:
+    """E5 — numerieke regressie voor EN_openH()-sessiehergebruik.
+
+    Vergelijkt (a) één HydraulicModel-sessie met 4 opeenvolgende
+    solve()-aanroepen tegen (b) 4 losse HydraulicModel-instanties (één
+    per simtime) — moet bit-identiek zijn. Zie de moduledocstring
+    hierboven (E5) voor waarom dit niet vanzelfsprekend is (EN_NOSAVE vs
+    EN_INITFLOW)."""
+
+    _SIMTIMES = [0, 3600, 7200, 10800]
+
+    def test_reused_session_matches_fresh_sessions(self, eps_tank_inp):
+        # (a) één sessie, herhaalde solve()-aanroepen
+        flows_reused, vels_reused = [], []
+        with HydraulicModel(eps_tank_inp) as hm_reused:
+            for st in self._SIMTIMES:
+                hm_reused.solve(simtime=st)
+                flow, vel, _ = hm_reused.get_hydraulic_state()
+                flows_reused.append(flow.copy())
+                vels_reused.append(vel.copy())
+
+        # (b) vers HydraulicModel per simtime
+        flows_fresh, vels_fresh = [], []
+        for st in self._SIMTIMES:
+            with HydraulicModel(eps_tank_inp) as hm_fresh:
+                hm_fresh.solve(simtime=st)
+                flow, vel, _ = hm_fresh.get_hydraulic_state()
+                flows_fresh.append(flow.copy())
+                vels_fresh.append(vel.copy())
+
+        for i, st in enumerate(self._SIMTIMES):
+            assert np.allclose(
+                flows_reused[i], flows_fresh[i], rtol=1e-9, atol=1e-12
+            ), f"flow-mismatch bij simtime={st}: {flows_reused[i]} vs {flows_fresh[i]}"
+            assert np.allclose(
+                vels_reused[i], vels_fresh[i], rtol=1e-9, atol=1e-12
+            ), f"velocity-mismatch bij simtime={st}"
+
+    def test_solve_is_memoized_for_identical_simtime(self, eps_tank_inp):
+        # Tweede solve() met dezelfde simtime moet een no-op zijn (geen
+        # nieuwe EN_runH()), dus de cached HydraulicState-instantie blijft
+        # ongewijzigd (zelfde object, niet alleen gelijke waarden).
+        with HydraulicModel(eps_tank_inp) as hm:
+            hm.solve(simtime=3600)
+            state_after_first = hm._state
+            hm.solve(simtime=3600)
+            assert hm._state is state_after_first

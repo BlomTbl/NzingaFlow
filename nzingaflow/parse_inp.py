@@ -41,41 +41,10 @@ import numpy as np
 from pathlib import Path
 from math import pi
 
+from epynet.node import Reservoir, Tank
+from epynet.link import Pipe, Pump
 
-# ─────────────────────────────────────────────────────────────────────────────
-# EPANET property codes — gespiegeld uit epynet/epanet2.py
-# ─────────────────────────────────────────────────────────────────────────────
-_EN_NODECOUNT   = 0
-_EN_LINKCOUNT   = 2
-_EN_PATCOUNT    = 3
-
-_EN_FLOW        = 8    # link, readonly
-_EN_VELOCITY    = 9    # link, readonly
-_EN_DIAMETER    = 0    # link, static
-_EN_LENGTH      = 1    # link, static
-
-_EN_DEMAND      = 9    # node, readonly
-_EN_SOURCEQUAL  = 5    # node, source quality
-_EN_SOURCEPAT   = 6    # node, source pattern index
-
-_EN_DURATION    = 0    # time param
-_EN_HYDSTEP     = 1    # time param
-_EN_QUALSTEP    = 2    # time param
-_EN_PATTERNSTEP = 3    # time param
-
-# Flow-eenheden → omzettingsfactor naar m³/s
-_FLOW_TO_M3S = {
-    0: 0.028317,      # CFS  → m³/s
-    1: 6.30902e-5,    # GPM  → m³/s
-    2: 0.043813,      # MGD  → m³/s  (1 MGD = 0.043813 m³/s)
-    3: 0.052617,      # IMGD → m³/s  (Imperial MGD)
-    4: 1.42764e-5,    # AFD  → m³/s  (acre-feet/day)
-    5: 1e-3,          # LPS  → m³/s
-    6: 1 / 60_000,    # LPM  → m³/s
-    7: 1 / 86_400,    # MLD  → m³/s
-    8: 1 / 3_600,     # CMH  → m³/s   ← meest gebruikelijk in NL
-    9: 1 / 86_400,    # CMD  → m³/s
-}
+from . import units as u
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -103,44 +72,45 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         hyd_step_s      : int
         duration_s      : int
         source_patterns : {res_uid: {'base_q': float, 'pattern': list[float]}}
+
+    Let op — eenmalig gebruik
+    ──────────────────────────
+    Deze functie opent en sluit haar eigen `_NoSaveHydraulicSolver`-sessie
+    (via een with-blok). Voor herhaalde solves op hetzelfde netwerk (een
+    EPS-loop) is `HydraulicModel` (hydraulics.py) efficiënter: die
+    hergebruikt de EN_openH()-sessie over meerdere solve()-aanroepen heen
+    i.p.v.'m hier bij elke load_from_epynet()-aanroep opnieuw te openen.
     """
     # Geen `net.ep`-shim meer — EPYnetDTD's ENxxx-toolkitfuncties heten
-    # rechtstreeks EN_xxx op het Network-object zelf.
-    ep = net
+    # rechtstreeks EN_xxx op het Network-object zelf. `_NoSaveHydraulicSolver`
+    # hergebruikt uit hydraulics.py i.p.v. hier een eigen kopie te onderhouden.
+    from .hydraulics import _NoSaveHydraulicSolver
 
     # ── 1. Tijdparameters ─────────────────────────────────────────────────────
-    hyd_step_s  = int(ep.EN_gettimeparam(_EN_HYDSTEP))
-    pat_step_s  = int(ep.EN_gettimeparam(_EN_PATTERNSTEP))
-    duration_s  = int(ep.EN_gettimeparam(_EN_DURATION))
+    hyd_step_s  = int(net.EN_gettimeparam(u.EN_TimeParameter.EN_HYDSTEP))
+    pat_step_s  = int(net.EN_gettimeparam(u.EN_TimeParameter.EN_PATTERNSTEP))
+    duration_s  = int(net.EN_gettimeparam(u.EN_TimeParameter.EN_DURATION))
     # Nul-waarden zijn geldig maar onbruikbaar — gebruik veilige defaults
     if hyd_step_s  <= 0: hyd_step_s  = 3600
     if pat_step_s  <= 0: pat_step_s  = 3600
     if duration_s  <= 0: duration_s  = 24 * 3600
 
-    # ── 2. Flow-eenheden → m³/s omrekeningsfactor ─────────────────────────────
-    try:
-        flow_unit_code = int(ep.EN_getflowunits())
-    except Exception:
-        flow_unit_code = 8   # fallback: CMH
-    flow_factor = _FLOW_TO_M3S.get(flow_unit_code, 1 / 3600)
+    # ── 2. Flow-eenheden ─────────────────────────────────────────────────────
+    flow_units = u.flow_units_label(net)
 
     # ── 3. Knopen ─────────────────────────────────────────────────────────────
     nodes      = {}
     node_names = []
     node_coords = {}
 
-    # net.reservoirs / net.tanks zijn kale generators in EPYnetDTD (geen
-    # ObjectCollection meer, dus geen `in`-support): éénmalig naar uid-sets
-    # omzetten, i.p.v. `uid in net.reservoirs` per knoop te herhalen.
-    reservoir_uids = {n.uid for n in net.reservoirs}
-    tank_uids      = {n.uid for n in net.tanks}
-
     for node in net.nodes:
         uid = node.uid
-        # Type bepalen
-        if uid in reservoir_uids:
+        # Type bepalen via isinstance — net.nodes is al getypeerd door
+        # EPYnetDTD's NodeFactory (Junction/Reservoir/Tank), dus geen
+        # membership-check tegen een losse uid-verzameling meer nodig.
+        if isinstance(node, Reservoir):
             ntype = 'reservoir'
-        elif uid in tank_uids:
+        elif isinstance(node, Tank):
             ntype = 'tank'
         else:
             ntype = 'junction'
@@ -150,7 +120,7 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
 
         # Coördinaten via EN_getcoord
         try:
-            x, y = ep.EN_getcoord(node.index)
+            x, y = net.EN_getcoord(node.index)
             node_coords[uid] = (float(x), float(y))
         except Exception:
             pass   # knoop zonder coördinaten: overgeslagen
@@ -159,8 +129,9 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
 
     # ── 4. Hydraulica oplossen op gevraagd tijdstip ───────────────────────────
     try:
-        from epynet.solver import HydraulicSolver
-        HydraulicSolver(net).solve_time_step(pattern_start_time=simtime)
+        solver = _NoSaveHydraulicSolver(net)
+        solver.solve_step(pattern_start_time=simtime)
+        solver.close()
     except Exception:
         pass   # als solve faalt: flow/velocity worden 0
 
@@ -174,10 +145,6 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
     flow_list   = []
     vel_list    = []
 
-    # Zelfde reden als hierboven: éénmalig uid-sets voor link-typebepaling.
-    pipe_uids = {l.uid for l in net.pipes}
-    pump_uids = {l.uid for l in net.pumps}
-
     for link in net.links:
         uid = link.uid
         idx = link.index
@@ -188,23 +155,26 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         if fn_uid not in node_index or tn_uid not in node_index:
             continue
 
-        # Geometrie
+        # Geometrie — EN_DIAMETER/EN_LENGTH: mm/inch resp. altijd in de
+        # invoereenheid van het .inp (zie units.diameter_to_m()).
         try:
-            diam_mm = float(ep.EN_getlinkvalue(idx, _EN_DIAMETER))
-            length_m = float(ep.EN_getlinkvalue(idx, _EN_LENGTH))
+            diam_raw = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_DIAMETER))
+            length_m = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_LENGTH))
         except Exception:
-            diam_mm  = 100.0
+            diam_raw = 100.0
             length_m = 1.0
 
-        diam_m = diam_mm * 1e-3
+        diam_m = u.diameter_to_m(diam_raw, flow_units)
         # Kleppen en pompen krijgen een symbolische minimale lengte
         if length_m <= 0:
             length_m = 0.1
 
-        # Hydraulica
+        # Hydraulica — EN_VELOCITY: m/s (SI) of ft/s (US), zie
+        # units.velocity_to_ms(). Vóór deze consolidatie ontbrak deze
+        # conversie hier volledig (velocity bleef ft/s op een US-netwerk).
         try:
-            raw_flow = float(ep.EN_getlinkvalue(idx, _EN_FLOW))
-            raw_vel  = float(ep.EN_getlinkvalue(idx, _EN_VELOCITY))
+            raw_flow = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_FLOW))
+            raw_vel  = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_VELOCITY))
         except Exception:
             raw_flow = 0.0
             raw_vel  = 0.0
@@ -214,13 +184,14 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         if raw_flow < 0:
             fn_uid, tn_uid = tn_uid, fn_uid   # draai richting om
 
-        flow_m3s = abs(raw_flow) * flow_factor
-        vel_ms   = abs(raw_vel)
+        flow_m3s = abs(u.flow_to_m3s(raw_flow, flow_units))
+        vel_ms   = abs(u.velocity_to_ms(raw_vel, flow_units))
 
-        # Link-type
-        if uid in pipe_uids:
+        # Link-type via isinstance — net.links is al getypeerd door
+        # EPYnetDTD's LinkFactory (Pipe/Pump/Valve).
+        if isinstance(link, Pipe):
             ltype = 'pipe'
-        elif uid in pump_uids:
+        elif isinstance(link, Pump):
             ltype = 'pump'
         else:
             ltype = 'valve'
@@ -252,12 +223,12 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
 
     # ── 6. Patronen ───────────────────────────────────────────────────────────
     patterns = {}
-    n_pat = ep.EN_getcount(_EN_PATCOUNT)
+    n_pat = net.EN_getcount(u.EN_CountType.EN_PATCOUNT)
     for pi_idx in range(1, n_pat + 1):
         try:
-            pat_uid  = ep.EN_getpatternid(pi_idx)
-            pat_len  = ep.EN_getpatternlen(pi_idx)
-            mults    = [float(ep.EN_getpatternvalue(pi_idx, k + 1))
+            pat_uid  = net.EN_getpatternid(pi_idx)
+            pat_len  = net.EN_getpatternlen(pi_idx)
+            mults    = [float(net.EN_getpatternvalue(pi_idx, k + 1))
                         for k in range(pat_len)]
             patterns[pat_uid] = mults
         except Exception:
@@ -269,14 +240,14 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         uid  = res.uid
         nidx = res.index
         try:
-            base_q    = float(ep.EN_getnodevalue(nidx, _EN_SOURCEQUAL))
-            pat_idx   = int(ep.EN_getnodevalue(nidx, _EN_SOURCEPAT))
+            base_q    = float(net.EN_getnodevalue(nidx, u.EN_NodeProperty.EN_SOURCEQUAL))
+            pat_idx   = int(net.EN_getnodevalue(nidx, u.EN_NodeProperty.EN_SOURCEPAT))
         except Exception:
             base_q, pat_idx = 1.0, 0
 
         if pat_idx > 0:
             try:
-                pat_uid = ep.EN_getpatternid(pat_idx)
+                pat_uid = net.EN_getpatternid(pat_idx)
                 mults   = patterns.get(pat_uid, [1.0])
             except Exception:
                 mults = [1.0]

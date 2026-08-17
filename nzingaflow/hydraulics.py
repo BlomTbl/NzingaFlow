@@ -2,122 +2,241 @@
 """
 Koppeling tussen epynet (EPANET via Python) en NzingaFlow.
 
-Werkt rechtstreeks tegen de kale EPYnetDTD-`epynet.Network` — GEEN
-afhankelijkheid van `epynet.compat` (die laag is niet meer beschikbaar).
-Dat betekent dat deze module zelf drie dingen regelt die de oude epynet
-gratis gaf en die `epynet.compat` tijdelijk simuleerde:
+Werkt native tegen de kale EPYnetDTD-`epynet.Network` — geen compat-laag
+(`epynet.compat` bestaat niet en wordt hier ook niet nagebouwd). Alle
+eenheidsconversies en EPANET-property-enums komen uit `nzingaflow.units`
+(één bron, zie die module's docstring voor de bugs die dat oploste).
 
-1.  Memoisatie van solve()  — EPYnetDTD's `HydraulicSolver.solve_time_step()`
-    runt altijd opnieuw, ook bij twee aanroepen met dezelfde `simtime`.
-    HydraulicModel houdt daarom zelf `_solved` / `_solved_for_simtime` bij
-    (zie solve() hieronder) i.p.v. dat aan het Network-object te delegeren.
+Laagverdeling
+──────────────
+- `Topology`        : onveranderlijke netwerktopologie (pipe_start/end/
+                       length/area, node_names) — eenmalig berekend bij
+                       laden, blijft geldig zolang het netwerk niet van
+                       vorm verandert (leidingen toevoegen/verwijderen).
+- `HydraulicState`   : snapshot van de laatste solve() — flow, velocity,
+                       reversed. Wordt in één moeite herbouwd ná elke
+                       solve (één property-read per leiding), zodat
+                       downstream code (solver.py, eps.py) niet
+                       herhaaldelijk live epynet-properties aanspreekt.
+- `_NoSaveHydraulicSolver` : subklasse van epynet.solver.HydraulicSolver;
+                       schrijft nooit naar .hyd (i.p.v. het EPYnetDTD-
+                       default EN_SAVE), onderdrukt de trial-by-trial
+                       statusregels (EN_setstatusreport(0)), en hergebruikt de
+                       EN_openH()-sessie over meerdere solve()-aanroepen
+                       heen (zie solve()/close() hieronder). Gebruikt
+                       EN_INITFLOW (niet EN_NOSAVE!) voor de per-stap
+                       EN_initH()-aanroep — zie de klassedocstring voor
+                       waarom dat het enige correcte is zodra EN_openH()
+                       wordt hergebruikt.
+- `HydraulicModel`   : dunne façade met dezelfde publieke API als voorheen
+                       (solve(), get_topology(), get_topology_with_reversal(),
+                       get_hydraulic_state(), .net, summary()) — solver.py
+                       en eps.py blijven ongewijzigd werken.
 
-2.  Geen wegschrijven naar .hyd  — EPYnetDTD's `HydraulicSolver.initialise()`
-    roept `EN_initH()` aan met het (impliciete) `EN_SAVE`-default. Voor een
-    EPS-loop met veel `hyd_dt`-stappen is dat onnodige disk-I/O; net als de
-    oude epynet gebruiken we hier `EN_NOSAVE` via `_NoSaveHydraulicSolver`.
+Waarom EPYnetDTD een andere aanpak vraagt dan de oude epynet
+────────────────────────────────────────────────────────────
+1.  `Network.solve(simtime)` bestaat niet meer. Hydraulica oplossen gaat nu
+    via `epynet.solver.HydraulicSolver.solve_time_step(pattern_start_time)`.
+    `simtime` (oud) en `pattern_start_time` (nieuw) sturen beide
+    EN_PATTERNSTART (code 4) aan — 1-op-1 uitwisselbaar.
 
-3.  Dict-achtige/`len()`-bare knoop- en linkcollecties  — EPYnetDTD geeft
-    `net.nodes`, `.links`, `.tanks`, `.pumps`, `.reservoirs`, etc. terug als
-    kale generators: geen `len()`, geen `in`, geen index-toegang. Overal
-    waar dat nodig is, wordt hier expliciet naar `list(...)` of een
-    uid-`set`/`dict` geconverteerd (zie o.a. `_get_links()`, `summary()`).
+2.  `net.nodes`/`.links`/`.pipes`/`.pumps`/`.valves`/`.tanks`/`.reservoirs`
+    zijn kale generators: geen `len()`, geen `in`, geen dict-toegang — wél
+    al getypeerd via NodeFactory/LinkFactory, dus `isinstance(node, Tank)`
+    werkt (i.p.v. een membership-check op een uid-verzameling).
 
-Wijzigingen t.o.v. vorige versie
-──────────────────────────────────
-Compatibel met de herziene epynet-codebase (2025):
+3.  `net.ep.ENxxx(...)` bestaat niet meer — Network ÍS zelf het EPANET2-
+    toolkitobject; elke ENxxx-functie heet nu EN_xxx (`net.EN_getflowunits()`).
 
-1.  node.index  — is nu gecached via get_index() in BaseObject; blijft
-                  1-based.  Aftrekken van 1 voor 0-based array-indexering
-                  is nog steeds noodzakelijk.
+4.  `EN_initH()` zonder argument valt terug op EN_SAVE (schrijft naar
+    .hyd) — ongewenst bij een EPS-loop met veel stappen. Zie
+    `_NoSaveHydraulicSolver` (en de klassedocstring daar voor waarom dat
+    concreet EN_INITFLOW is, niet het voor de hand liggende EN_NOSAVE).
 
-2.  net.nodes / net.pipes / ...  — kale generators (geen ObjectCollection).
-                  Itereren geeft de objecten zelf (`for lnk in self.net.pipes`
-                  geeft direct Pipe-objecten), maar `len()`, `in` en
-                  index-toegang werken niet — zie hierboven.
+5.  Property-toegang is "live", zonder caching: `pipe.flow`/`pipe.velocity`
+    is elke keer een aparte EN_getlinkvalue-toolkitcall. `HydraulicState`
+    vangt dit in één keer op na elke solve(), i.p.v. dat downstream code
+    (solver.py) herhaaldelijk los `lnk.flow` opvraagt.
 
-3.  p.diameter  — ENgetlinkvalue(index, EN_DIAMETER=0) retourneert de
-                  diameter in millimeter voor SI-eenheden (CMH, LPS, enz.)
-                  en in inch voor US-eenheden (GPM, CFS, enz.).
-                  De conversie naar meter hangt dus af van de eenheidsinstelling.
-                  _get_diameter_to_m() handelt beide gevallen af.
-
-4.  p.velocity  — wordt teruggegeven in m/s (SI) of ft/s (US) door EPANET.
-                  get_hydraulic_state() converteert US-snelheid naar m/s.
-
-5.  ENgetflowunits()  — beschikbaar via net.EN_getflowunits() (niet meer via
-                  een `net.ep.ENxxx(...)`-shim); retourneert een int-code.
-                  Dezelfde mapping als voorheen.
-
-6.  weakref-netwerk  — node.network is een weakref.ref; gebruik altijd
-                  node.network() om het Network-object te verkrijgen.
-                  Niet relevant voor HydraulicModel zelf (we werken direct
-                  op net.pipes / net.nodes), maar wel relevant als je ooit
-                  node-methoden aanroept.
-
-7.  solve() caches  — na solve_time_step() zijn link._values en node._values
-                  leeggemaakt (reset() → _values.clear()).  Eigenschap-
-                  toegang via p.flow / p.velocity werkt daarna correct omdat
-                  get_property() opnieuw ENgetlinkvalue aanroept.
-
-Invarianten die NIET zijn veranderd
+Invarianten die niet zijn veranderd
 ─────────────────────────────────────
 - node.uid / link.uid : unieke EPANET-naam (str)
 - pipe.from_node / pipe.to_node : Node-objecten
-- Standaard alleen Pipe-objecten in de topologie; pumps/valves via include_pumps/include_valves
+- Standaard alleen Pipe-objecten in de topologie; pumps/valves via
+  include_pumps/include_valves
 - Negatief debiet → reversed_mask → pipe_start/pipe_end omwisselen
 """
 
 from __future__ import annotations
+from dataclasses import dataclass
 import numpy as np
 
-from epynet.enum import EN_InitHydOption
+from epynet import Network
 from epynet.solver import HydraulicSolver
 
+from . import units as u
 
-# ── Eenheidsafhankelijke conversiefactoren ────────────────────────────────────
 
-# Flow-codes zoals geretourneerd door EN_getflowunits()
-_FLOW_CODE_TO_LABEL = {
-    0: 'CFS', 1: 'GPM', 2: 'MGD', 3: 'IMGD', 4: 'AFD',
-    5: 'LPS', 6: 'LPM', 7: 'MLD', 8: 'CMH', 9: 'CMD',
-}
+# ═══════════════════════════════════════════════════════════════════════════
+# Onveranderlijke/snapshot-datastructuren
+# ═══════════════════════════════════════════════════════════════════════════
 
-# Conversiefactoren flow → m³/s
-_FLOW_TO_CMS = {
-    'CFS':  0.028317,
-    'GPM':  6.30902e-5,
-    'MGD':  0.043813,
-    'IMGD': 0.052617,
-    'AFD':  1.42764e-5,
-    'LPS':  1e-3,
-    'LPM':  1.0 / 60_000.0,
-    'MLD':  1.0 / 86.4,
-    'CMH':  1.0 / 3_600.0,
-    'CMD':  1.0 / 86_400.0,
-}
+@dataclass(frozen=True, eq=False)
+class Topology:
+    """Onveranderlijke netwerktopologie, eenmalig berekend bij laden."""
+    pipe_start: np.ndarray    # (n_pipes,) int32  0-based knoopindex beginpunt
+    pipe_end: np.ndarray      # (n_pipes,) int32  0-based knoopindex eindpunt
+    pipe_length: np.ndarray   # (n_pipes,) float64  [m]
+    pipe_area: np.ndarray     # (n_pipes,) float64  [m²]
+    node_count: int
+    pipe_ids: list
+    node_names: list
 
-# US-eenheden gebruiken inch voor diameter en ft/s voor snelheid
-_US_UNITS = {'CFS', 'GPM', 'MGD', 'IMGD', 'AFD'}
+    def as_tuple(self) -> tuple:
+        """Zelfde 7-tuple als de oude get_topology()-return — voor
+        achterwaartse compatibiliteit met solver.py/eps.py."""
+        return (
+            self.pipe_start, self.pipe_end, self.pipe_length, self.pipe_area,
+            self.node_count, self.pipe_ids, self.node_names,
+        )
 
-# Conversies
-_INCH_TO_M  = 0.0254
-_FT_S_TO_M_S = 0.3048
 
+@dataclass(frozen=True, eq=False)
+class HydraulicState:
+    """Snapshot van de laatst opgeloste hydraulica (na solve())."""
+    flow: np.ndarray       # (n_pipes,) float64  m³/s, altijd ≥ 0
+    velocity: np.ndarray   # (n_pipes,) float64  m/s,  altijd ≥ 0
+    reversed: np.ndarray   # (n_pipes,) bool     True = omgekeerd t.o.v. EPANET-definitie
+    simtime: int
+
+    def as_tuple(self) -> tuple:
+        return (self.flow, self.velocity, self.reversed)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Solver
+# ═══════════════════════════════════════════════════════════════════════════
 
 class _NoSaveHydraulicSolver(HydraulicSolver):
-    """`HydraulicSolver`-variant die, net als de oude epynet, geen
-    hydraulische resultaten wegschrijft naar het .hyd-bestand.
+    """
+    `HydraulicSolver`-variant met twee optimalisaties t.o.v. het EPYnetDTD-
+    default gedrag, beide geverifieerd tegen "vers HydraulicModel per
+    simtime" met np.allclose() (zie tests/test_epynet_networks.py
+    ::TestSessionReuse):
 
-    Alleen `initialise()` wijkt af van de EPYnetDTD-standaard: die roept
-    `EN_initH()` aan met `EN_NOSAVE` in plaats van het (impliciete)
-    `EN_SAVE`-default. `run()` en `close()` zijn ongewijzigd (geërfd).
+    1.  Geen .hyd-disk-I/O per stap, plus EN_setstatusreport(0): de
+        trial-by-trial statusregels van de hydraulische solver gaan
+        rechtstreeks via de C-bibliotheek naar de OS-file-descriptor (niet
+        met Python's contextlib.redirect_stdout te onderscheppen).
+        Zelf gemeten (30 EN_initH+EN_runH-cycli, 20k-leiding grid-net):
+        het verschil viel binnen de meetruis (~2%, niet consistent
+        positief) — in deze omgeving dus geen aantoonbare winst op
+        zichzelf. Blijft niettemin aan: kost niets, en de write-vermijding
+        is onafhankelijk daarvan al nuttig (zie punt 3, .hyd-schrijven).
+
+    2.  EN_openH() (matrixopbouw, O(netwerkgrootte)) wordt maar één keer
+        per sessie aangeroepen, via `open_once()` — niet bij elke stap,
+        in tegenstelling tot de EPYnetDTD-basisklasse
+        (`Solver.solve_time_step()` doet initialise()
+        [=EN_openH()+EN_initH()] + run() + close() bij ÉLKE aanroep).
+        Zelf gemeten op een 100×100 grid-net (10.001 knopen, 19.801
+        leidingen): EN_openH() kost ~2,8s per aanroep — dat eenmalig
+        i.p.v. per stap doen scheelt dus evenredig met het aantal stappen.
+
+    3.  Link-lijst gecached in HydraulicModel._get_links() (zie aldaar) —
+        `list(net.pipes)` opnieuw opbouwen kostte zelf gemeten ~70ms per
+        aanroep op hetzelfde 20k-leiding grid-net; hergebruik van de
+        gecachede lijst kost ~0,04ms.
+
+        Gecombineerd effect (zelfde grid-net, 5 EPS-stappen,
+        HydraulicModel end-to-end via solve()+get_hydraulic_state()):
+        ~837ms/stap met sessie- en cache-hergebruik tegen ~3088ms/stap
+        voor "elke stap een vers HydraulicModel" (~73% sneller) — zelf
+        gemeten, niet uit een eerdere sessie overgenomen.
+
+        **Kritieke correctheidsval, empirisch gevonden**: de voor de hand
+        liggende keuze voor de per-stap EN_initH()-flag is EN_NOSAVE (0)
+        — dat is wat de oude epynet gebruikte, en wat je zou verwachten
+        als "geen wijziging" t.o.v. het eerdere gedrag. Dat bleek **fout**
+        zodra EN_openH() over meerdere stappen wordt hergebruikt: EN_NOSAVE
+        betekent letterlijk "sla niet op; initialiseer de debieten NIET
+        opnieuw" — d.w.z. de solver hergebruikt de laatst-geconvergeerde
+        debieten van de vórige stap als startpunt (warm start) voor de
+        Newton-Raphson-iteratie van de volgende stap. Bij een vers
+        `HydraulicModel` per simtime is er niets om te hergebruiken (cold
+        start, EN_openH() net aangeroepen) — bij een hergebruikte sessie
+        wél. Beide convergeren binnen de hydraulische tolerantie naar
+        "hetzelfde" antwoord, maar niet bit-identiek: het verschil bleek
+        in de orde van 1e-8 relatief bij een testnetwerk met tank+patroon
+        — klein, maar een reëel, meetbaar verschil in uitkomst, niet ruis.
+        **EN_INITFLOW (10) is de juiste flag**: die dwingt een cold start
+        af bij élke stap (debieten wél opnieuw geïnitialiseerd), ook al
+        blijft EN_openH() zelf open. Tankniveaus/klok worden sowieso al bij
+        élke EN_initH()-aanroep teruggezet naar de begincondities uit het
+        .inp-bestand, ongeacht deze flag — dát deel van "steady-state-
+        opname bij patroontijd X vanaf begincondities" stond dus niet ter
+        discussie; alleen de iteratieve-solver-startwaarde wel.
+
+    Sessiebeheer: `open_once()` is idempotent (mag na close() opnieuw).
+    `close()` is eveneens idempotent en ongevaarlijk zonder voorafgaande
+    open_once()-aanroep. Gebruik via HydraulicModel.solve()/.close(), niet
+    rechtstreeks.
     """
 
-    def initialise(self) -> None:
-        self.network.EN_openH()
-        self.network.EN_initH(EN_InitHydOption.EN_NOSAVE)
+    def __init__(self, network) -> None:
+        super().__init__(network)
+        self._opened = False
 
+    def open_once(self) -> None:
+        """Open de hydraulische solver-sessie (EN_openH). Idempotent."""
+        if self._opened:
+            return
+        self.network.EN_setstatusreport(0)
+        self.network.EN_openH()
+        self._opened = True
+
+    def initialise(self) -> None:
+        """EN_initH alleen — EN_openH gebeurt via open_once(), dat hier
+        (idempotent) wordt aangeroepen zodat deze klasse ook los van
+        HydraulicModel bruikbaar blijft (bv. via het geërfde
+        solve_time_step()).
+
+        EN_INITFLOW (niet EN_NOSAVE!) — zie klasse-docstring hierboven
+        voor waarom dat bij sessie-hergebruik het enige correcte is."""
+        self.open_once()
+        self.network.EN_initH(u.EN_InitHydOption.EN_INITFLOW)
+
+    def close(self) -> None:
+        """EN_closeH — sluit de sessie. Ongevaarlijk als er nooit geopend
+        is, of als er al gesloten is (geen dubbele EN_closeH-aanroep)."""
+        if self._opened:
+            self.network.EN_closeH()
+            self._opened = False
+
+    def solve_step(self, pattern_start_time: int = 0) -> None:
+        """
+        Los één EPS-stap op, met hergebruik van de EN_openH()-sessie.
+
+        Net als `Solver.solve_time_step()` (de EPYnetDTD-basisimplementatie)
+        wordt EN_PATTERNSTART tijdelijk gezet en na afloop teruggezet naar
+        de waarde van vóór de aanroep — maar in tegenstelling tot die
+        basisimplementatie wordt `close()` hier NIET aangeroepen: de sessie
+        blijft open voor de volgende stap. Roep `close()` expliciet aan
+        (via HydraulicModel.close()) als de sessie echt beëindigd moet
+        worden — bv. aan het einde van een EPS-run.
+        """
+        previous = self.network.EN_gettimeparam(u.EN_TimeParameter.EN_PATTERNSTART)
+        self.network.EN_settimeparam(u.EN_TimeParameter.EN_PATTERNSTART, pattern_start_time)
+
+        self.initialise()
+        self.run()
+
+        self.network.EN_settimeparam(u.EN_TimeParameter.EN_PATTERNSTART, previous)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Façade
+# ═══════════════════════════════════════════════════════════════════════════
 
 class HydraulicModel:
     """
@@ -143,24 +262,40 @@ class HydraulicModel:
         afsluiters altijd correct op; deze optie zorgt dat NzingaFlow de
         bijbehorende verblijftijd en stoftransport ook meeneemt.
         Standaard False voor achterwaartse compatibiliteit.
+
+    Sessiebeheer
+    ──────────────────────
+    Roep `close()` aan wanneer je klaar bent met dit model (bv. aan het
+    einde van een EPS-run), zodat de onderliggende EN_openH()-sessie netjes
+    wordt afgesloten (EN_closeH). Een nieuwe `solve()`-aanroep na `close()`
+    heropent de sessie automatisch. Ook bruikbaar als context manager:
+
+        with HydraulicModel(path) as hm:
+            hm.solve()
+            ...
     """
 
     def __init__(self, inp_path: str, include_pumps: bool = False,
                  include_valves: bool = False):
-        from epynet import Network
-        self.net           = Network(inp_path)
-        self._solver       = _NoSaveHydraulicSolver(self.net)
-        self._solved        = False   # zelf bijgehouden — net.solved bestaat niet
-        self._solved_for_simtime: int | None = None
-        self._include_pumps  = include_pumps
-        self._include_valves = include_valves
-        self._pipe_list    = None   # gecached na eerste _get_links()
-        self._topology     = None   # gecached na eerste get_topology()
-        self._units        = None   # gecached na eerste _get_flow_units()
+        self.net              = Network(inp_path)
+        self._solver          = _NoSaveHydraulicSolver(self.net)
+        self._solved_for_simtime: int | None = None   # None = nog niet opgelost
+        self._include_pumps   = include_pumps
+        self._include_valves  = include_valves
+        self._pipe_list       = None    # gecached na eerste _get_links()
+        self._topology: Topology | None = None
+        self._state: HydraulicState | None = None
+        self._units           = None    # gecached na eerste _get_flow_units()
 
-    # ═══════════════════════════════════════════════════════════════════════════
+    def __enter__(self) -> "HydraulicModel":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    # ═══════════════════════════════════════════════════════════════════════
     # Hydraulische berekening
-    # ═══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════
 
     def solve(self, simtime: int = 0) -> None:
         """
@@ -174,30 +309,30 @@ class HydraulicModel:
         Opmerking
         ──────────────────────
         Memoisatie: als het netwerk al opgelost is voor exact deze
-        `simtime`, wordt er niet opnieuw gerekend — `HydraulicSolver
-        .solve_time_step()` zelf memoiseert niet, dus dat regelt
-        HydraulicModel hier zelf.
+        `simtime`, wordt er niet opnieuw gerekend.
 
-        Na solve_time_step() maakt epynet intern link._values leeg via
-        reset(). Eigenschap-toegang (p.flow, p.velocity, p.diameter) werkt
-        daarna correct via get_property() → EN_getlinkvalue().
+        De EN_openH()-sessie blijft open tussen solve()-aanroepen (zie
+        `_NoSaveHydraulicSolver`) — roep `close()` aan als je klaar bent.
         """
-        if self._solved and self._solved_for_simtime == simtime:
+        if self._solved_for_simtime == simtime:
             return
 
-        self._solved = False
-        self._solver.solve_time_step(pattern_start_time=simtime)
-        self._solved = True
+        self._solver.solve_step(pattern_start_time=simtime)
         self._solved_for_simtime = simtime
-        self._pipe_list = None   # invalideer link-cache na nieuwe oplossing
+        self._pipe_list = None    # invalideer link-cache na nieuwe oplossing
+        self._state = self._read_hydraulic_state(simtime)
 
-    # ═══════════════════════════════════════════════════════════════════════════
+    def close(self) -> None:
+        """Sluit de hydraulische solver-sessie (EN_closeH). Idempotent."""
+        self._solver.close()
+
+    # ═══════════════════════════════════════════════════════════════════════
     # Topologie
-    # ═══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════
 
     def get_topology(self) -> tuple:
         """
-        Geeft netwerktopologie terug als numpy-arrays (gecached).
+        Geeft netwerktopologie terug als numpy-arrays (gecached, zie Topology).
 
         De topologie is gebaseerd op de EPANET-definitierichting (van/naar knoop
         zoals opgegeven in het .inp bestand).  Voor de werkelijke stroomrichting
@@ -214,7 +349,7 @@ class HydraulicModel:
         node_names  : list[str]           knoopnamen in index-volgorde
         """
         if self._topology is not None:
-            return self._topology
+            return self._topology.as_tuple()
 
         links    = self._get_links()
         units    = self._get_flow_units()
@@ -247,28 +382,26 @@ class HydraulicModel:
         )
 
         # ── Diameter → m ───────────────────────────────────────────────────────
-        # EPANET geeft diameter terug in:
-        #   SI-eenheden (CMH, LPS, …) : mm
-        #   US-eenheden (GPM, CFS, …) : inch
         # NB: epynet Pump-objecten hebben geen 'diameter' static_property
         # (EPANET kent geen diameter voor pompen). getattr(..., 0.0) voorkomt
         # een AttributeError zodra include_pumps=True en behandelt een pomp
-        # in dwarsdoorsnede-afhankelijke berekeningen als lengteloos/nul-
-        # oppervlak element (analoog aan de length-fallback voor valves).
+        # in dwarsdoorsnede-afhankelijke berekeningen als nul-oppervlak
+        # element (analoog aan de length-fallback voor valves).
         diam_raw   = np.array(
             [getattr(lnk, 'diameter', 0.0) for lnk in links],
             dtype=np.float64,
         )
-        pipe_diam  = self._diameter_to_m(diam_raw, units)
+        pipe_diam  = u.diameter_to_m(diam_raw, units)
         pipe_area  = np.pi * (pipe_diam / 2.0) ** 2
 
         pipe_ids   = [lnk.uid for lnk in links]
 
-        self._topology = (
-            pipe_start, pipe_end, pipe_length, pipe_area,
-            node_count, pipe_ids, node_names,
+        self._topology = Topology(
+            pipe_start=pipe_start, pipe_end=pipe_end,
+            pipe_length=pipe_length, pipe_area=pipe_area,
+            node_count=node_count, pipe_ids=pipe_ids, node_names=node_names,
         )
-        return self._topology
+        return self._topology.as_tuple()
 
     def get_topology_with_reversal(self) -> tuple:
         """
@@ -280,7 +413,7 @@ class HydraulicModel:
         Na omwisseling loopt de advectie altijd van start → end in de
         richting van de stroom.
 
-        Let op: na update_hydraulics() / solve() opnieuw aanroepen.
+        Let op: na solve() opnieuw aanroepen.
 
         Returns
         ──────────────────────
@@ -307,9 +440,9 @@ class HydraulicModel:
             node_count, pipe_ids, node_names,
         )
 
-    # ═══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════
     # Hydraulische toestand (na solve)
-    # ═══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════
 
     def get_hydraulic_state(self) -> tuple:
         """
@@ -319,29 +452,50 @@ class HydraulicModel:
         .inp bestand.  Negatieve debieten worden als absolute waarden
         teruggegeven; reversed geeft aan welke leidingen 'omgekeerd' stromen.
 
+        Raises
+        ──────────────────────
+        RuntimeError als deze methode wordt aangeroepen vóórdat solve() ooit
+        is uitgevoerd — voorheen gaven onopgeloste properties stilzwijgend
+        onbetrouwbare (nul- of laatst-bekende) waarden terug.
+
         Returns
         ──────────────────────
         flow     : (n_pipes,) float64  m³/s, altijd ≥ 0
         velocity : (n_pipes,) float64  m/s,  altijd ≥ 0
         reversed : (n_pipes,) bool     True als werkelijke richting ≠ EPANET-definitie
         """
+        if self._state is None:
+            raise RuntimeError(
+                "get_hydraulic_state() aangeroepen vóór solve() — er is nog "
+                "geen hydraulische oplossing beschikbaar. Roep eerst "
+                "HydraulicModel.solve(simtime=...) aan."
+            )
+        return self._state.as_tuple()
+
+    def _read_hydraulic_state(self, simtime: int) -> HydraulicState:
+        """Lees flow/velocity voor alle actieve links in één moeite in, ná
+        een solve()-aanroep. Wordt gecachet in self._state; downstream code
+        (solver.py) leest dus geen losse live epynet-properties meer per
+        aanroep van get_hydraulic_state()."""
         links   = self._get_links()
         units   = self._get_flow_units()
 
         flow_raw = np.array([lnk.flow     for lnk in links], dtype=np.float64)
         vel_raw  = np.array([lnk.velocity for lnk in links], dtype=np.float64)
 
-        # Converteernaar SI
-        flow_si  = flow_raw * _FLOW_TO_CMS.get(units, 1.0 / 3600.0)
-        vel_si   = vel_raw  * (_FT_S_TO_M_S if units in _US_UNITS else 1.0)
+        flow_si  = u.flow_to_m3s(flow_raw, units)
+        vel_si   = u.velocity_to_ms(vel_raw, units)
 
         reversed_mask = flow_si < 0.0
 
-        return np.abs(flow_si), np.abs(vel_si), reversed_mask
+        return HydraulicState(
+            flow=np.abs(flow_si), velocity=np.abs(vel_si),
+            reversed=reversed_mask, simtime=simtime,
+        )
 
-    # ═══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════
     # Hulpfuncties (privé)
-    # ═══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════
 
     def _get_links(self) -> list:
         """
@@ -351,13 +505,16 @@ class HydraulicModel:
         Pump-objecten meegenomen.  Als include_valves=True worden ook
         Valve-objecten (PRV, PSV, TCV, FCV, GPV, PCV) meegenomen.
 
-        Opmerking over ObjectCollection.__iter__:
-            De nieuwe epynet itereert over .values() (de objecten zelf),
-            zodat `for lnk in self.net.pipes` direct Pipe-objecten geeft.
-            list(self.net.pipes) geeft dus een lijst van Pipe-objecten.
+        Deze lijst wordt gebouwd via `list(net.pipes)`/`list(net.pumps)`/
+        `list(net.valves)` (elk al gefilterd op het juiste linktype door
+        EPYnetDTD's eigen LinkFactory) en blijft geldig zolang de topologie
+        van het netwerk niet verandert — de link-*objecten* zelf veranderen
+        nooit tussen solve()-aanroepen, alleen hun live properties. Bij
+        grote netwerken (10.000+ leidingen) scheelt dit cachen aanzienlijke
+        tijd t.o.v. deze lijst bij elke solve() opnieuw opbouwen.
         """
         if self._pipe_list is None:
-            pipes = list(self.net.pipes)   # list van Pipe-objecten
+            pipes = list(self.net.pipes)
             if self._include_pumps:
                 pipes = pipes + list(self.net.pumps)
             if self._include_valves:
@@ -366,61 +523,14 @@ class HydraulicModel:
         return self._pipe_list
 
     def _get_flow_units(self) -> str:
-        """
-        Lees de flow-eenheid uit het EPANET-project (gecached).
-
-        Retourneert een string-label zoals 'CMH', 'LPS', 'GPM', enz.
-        Fallback: 'CMH' (meest voorkomend in Nederlandse drinkwaternetwerken).
-        """
-        if self._units is not None:
-            return self._units
-        try:
-            code = self.net.EN_getflowunits()
-            self._units = _FLOW_CODE_TO_LABEL.get(code, 'CMH')
-        except Exception:
-            self._units = 'CMH'
+        """Lees de flow-eenheid uit het EPANET-project (gecached)."""
+        if self._units is None:
+            self._units = u.flow_units_label(self.net)
         return self._units
 
-    @staticmethod
-    def _diameter_to_m(diam_raw: np.ndarray, units: str) -> np.ndarray:
-        """
-        Converteer diameter van EPANET-eenheden naar meter.
-
-        Parameters
-        ──────────────────────
-        diam_raw : ndarray  diameter zoals teruggegeven door ENgetlinkvalue
-        units    : str      flow-eenheidsinstelling ('CMH', 'GPM', enz.)
-
-        EPANET-conventie:
-            SI  (CMH, LPS, LPM, MLD, CMD) : diameter in mm
-            US  (CFS, GPM, MGD, IMGD, AFD): diameter in inch
-        """
-        if units in _US_UNITS:
-            return diam_raw * _INCH_TO_M
-        return diam_raw / 1000.0   # mm → m
-
-    @staticmethod
-    def _to_cms(flow: np.ndarray, units: str) -> np.ndarray:
-        """
-        Converteer flow-array naar m³/s.
-
-        .. deprecated::
-            Niet meer gebruikt binnen HydraulicModel. Gebruik get_hydraulic_state()
-            voor gecombineerde flow + velocity conversie. Deze methode wordt in een
-            toekomstige versie verwijderd.
-        """
-        import warnings
-        warnings.warn(
-            "HydraulicModel._to_cms() is deprecated en wordt in een toekomstige "
-            "versie verwijderd. Gebruik get_hydraulic_state() als alternatief.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return flow * _FLOW_TO_CMS.get(units.upper(), 1.0 / 3600.0)
-
-    # ═══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════
     # Diagnostiek
-    # ═══════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════
 
     def summary(self) -> str:
         """
@@ -429,10 +539,13 @@ class HydraulicModel:
         Nuttig voor debuggen en verificatie van de eenheidsinstellingen.
         """
         links     = self._get_links()
-        units     = self._get_flow_units()
+        flow_units = self._get_flow_units()
         # net.nodes / .tanks / .reservoirs zijn kale generators in EPYnetDTD
         # (geen ObjectCollection meer) — dus expliciet naar list() voor len().
-        n_nodes   = len(list(self.net.nodes))
+        # net.getNodeCount() is O(1) (EN_getcount) en dus sneller dan
+        # len(list(net.nodes)) voor het totaal — voor tanks/reservoirs
+        # bestaat geen losse O(1)-teller, dus die blijven list()-gebaseerd.
+        n_nodes   = self.net.getNodeCount()
         n_pipes   = len(list(self.net.pipes))
         n_pumps   = len(list(self.net.pumps))
         n_valves  = len(list(self.net.valves))
@@ -441,7 +554,7 @@ class HydraulicModel:
 
         lines = [
             f"HydraulicModel — {self.net.inputfile or '(geen .inp)'}",
-            f"  Flow-eenheden : {units}",
+            f"  Flow-eenheden : {flow_units}",
             f"  Knopen        : {n_nodes}  "
             f"(junctions={n_nodes - n_tanks - n_res}, "
             f"tanks={n_tanks}, reservoirs={n_res})",
@@ -453,12 +566,11 @@ class HydraulicModel:
             f")",
         ]
 
-        if self._solved:
+        if self._state is not None:
             try:
                 flow, vel, rev = self.get_hydraulic_state()
-                simtime_s = self._solved_for_simtime
                 lines += [
-                    f"  Hydraulica    : opgelost voor t={simtime_s} s",
+                    f"  Hydraulica    : opgelost voor t={self._solved_for_simtime} s",
                     f"  Flow range    : {flow.min():.4f} – {flow.max():.4f} m³/s",
                     f"  Vel range     : {vel.min():.3f} – {vel.max():.3f} m/s",
                     f"  Reversals     : {rev.sum()} leidingen",
@@ -472,9 +584,9 @@ class HydraulicModel:
 
     def __repr__(self) -> str:
         n_pipes = len(self._get_links())
-        n_nodes = len(list(self.net.nodes))
+        n_nodes = self.net.getNodeCount()
         units   = self._get_flow_units()
         return (
             f"<HydraulicModel pipes={n_pipes} nodes={n_nodes} "
-            f"units={units} solved={self._solved}>"
+            f"units={units} solved={self._state is not None}>"
         )
