@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nzingaflow"
-version = "1.2.2"
+version = "1.3.0"
 description = "Lagrangian Transport kwaliteitssimulator voor EPANET-drinkwaternetwerken"
 readme = "README.md"
 license = { text = "MIT" }
@@ -37,7 +37,10 @@ dependencies = [
     "numpy>=1.24",
     # >=2.0 == EPYnetDTD (kale Network + epynet.solver.HydraulicSolver,
     # epynet.enum). NzingaFlow gebruikt geen epynet.compat — dat bestaat niet
-    # (meer); HydraulicModel implementeert memoisatie/no-save zelf.
+    # (meer); HydraulicModel implementeert sessie-hergebruik en memoisatie
+    # zelf (zie hydraulics.py::_NoSaveHydraulicSolver). Vanaf NzingaFlow
+    # 1.3.0 is de oude epynet (<2.0, met Network.solve(simtime=...)/
+    # .ep-shim) niet meer ondersteund — zie CHANGELOG.md.
     "epynet>=2.0",
 ]
 

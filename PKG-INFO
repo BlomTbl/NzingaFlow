@@ -1,3 +1,32 @@
+Metadata-Version: 2.1
+Name: nzingaflow
+Version: 1.3.0
+Summary: Lagrangian Transport kwaliteitssimulator voor EPANET-drinkwaternetwerken
+Author: NzingaFlow
+License: MIT
+Project-URL: Homepage, https://github.com/nzingaflow/nzingaflow
+Project-URL: Repository, https://github.com/nzingaflow/nzingaflow
+Project-URL: Issues, https://github.com/nzingaflow/nzingaflow/issues
+Project-URL: Documentation, https://github.com/nzingaflow/nzingaflow#readme
+Keywords: water quality,EPANET,Lagrangian transport,drinking water,LTA,simulation
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering
+Classifier: Topic :: Scientific/Engineering :: Hydrology
+Classifier: Typing :: Typed
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Provides-Extra: all
+Provides-Extra: dev
+Provides-Extra: geochem
+Provides-Extra: numba
+License-File: LICENSE
+
 🇳🇱 [Nederlands](README_NL.md) &nbsp;|&nbsp; 🇬🇧 [English](README.md)
 # NzingaFlow
 
