@@ -41,12 +41,13 @@ from epynet.enum import (
     EN_InitHydOption,
     EN_LinkProperty,
     EN_NodeProperty,
+    EN_StatusReport,
     EN_TimeParameter,
 )
 
 __all__ = [
     "EN_CountType", "EN_InitHydOption", "EN_LinkProperty",
-    "EN_NodeProperty", "EN_TimeParameter",
+    "EN_NodeProperty", "EN_StatusReport", "EN_TimeParameter",
     "FLOW_CODE_TO_LABEL", "FLOW_TO_M3S", "US_UNITS",
     "INCH_TO_M", "FT_S_TO_M_S",
     "flow_units_label", "diameter_to_m", "velocity_to_ms", "flow_to_m3s",

@@ -71,7 +71,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 
-from epynet import Network
+from epynet.network import Network
 from epynet.solver import HydraulicSolver
 
 from . import units as u
@@ -191,7 +191,7 @@ class _NoSaveHydraulicSolver(HydraulicSolver):
         """Open de hydraulische solver-sessie (EN_openH). Idempotent."""
         if self._opened:
             return
-        self.network.EN_setstatusreport(0)
+        self.network.EN_setstatusreport(u.EN_StatusReport.EN_NO_REPORT)
         self.network.EN_openH()
         self._opened = True
 
