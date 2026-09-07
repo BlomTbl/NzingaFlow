@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.0] — 2026-08-17
+
+### Hydraulics refactor + `units.py`
+
+`HydraulicModel` internals reworked around `Topology`/`HydraulicState` dataclasses, with a cached topology/pipe list and a read-once hydraulic snapshot after `solve()`. Public API unchanged except two additions: `close()` and context-manager support (`with HydraulicModel(...) as hm:`) for explicit EPANET session cleanup (`EN_closeH`).
+
+- Replaced the internal hydraulic solver with a session-reusing implementation (`EN_openH()` stays open across `solve()` calls; `EN_INITFLOW` used for correct cold-start behaviour), improving EPS performance.
+- New module `nzingaflow/units.py`: centralises EPANET unit-system conversions and enums (fixes AFD/MLD and diameter/velocity US↔SI conversion bugs), now shared by `hydraulics.py` and `parse_inp.py`.
+- `parse_inp.py` updated to use typed node/link classes and the corrected unit conversions.
+- **Bugfix** — `solver.py::_get_tank_volumes()`: used `n.volume`, which does not exist on EPYnetDTD's `Tank` (renamed `tank_volume`, `EN_TANKVOLUME`). The resulting `AttributeError` was silently swallowed by a broad `except Exception`, so every tank's current volume always returned the hardcoded 1000.0 m³ fallback — never the real, EPANET-computed volume. No existing test exercised a tank network against real EPANET, so this went undetected; a regression test (`TestTankVolume`) has been added.
+- New tests: `tests/gen_grid_network.py`; extended `tests/test_epynet_networks.py` with session-reuse/regression, tank-volume, and memoization checks.
+
 ## [1.2.2] — 2026-07-28
 
 ### MSX native library bridge — bundled binaries + critical bugfixes

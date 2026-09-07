@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.0] — 2026-08-17
+
+### Hydraulica-refactor + `units.py`
+
+Interne opbouw van `HydraulicModel` herzien rond `Topology`/`HydraulicState`-dataclasses, met een gecachede topologie/leidinglijst en een read-once hydraulica-snapshot na `solve()`. Publieke API ongewijzigd, op twee toevoegingen na: `close()` en context-manager-ondersteuning (`with HydraulicModel(...) as hm:`) voor expliciete opruiming van de EPANET-sessie (`EN_closeH`).
+
+- De interne hydraulische solver vervangen door een sessie-hergebruikende implementatie (`EN_openH()` blijft open tussen `solve()`-aanroepen; `EN_INITFLOW` voor correct cold-start-gedrag), wat de EPS-performance verbetert.
+- Nieuwe module `nzingaflow/units.py`: centraliseert EPANET-eenhedenconversies en -enums (lost AFD/MLD- en diameter/snelheid-US↔SI-conversiebugs op), nu gedeeld door `hydraulics.py` en `parse_inp.py`.
+- `parse_inp.py` bijgewerkt om typed node/link-klassen en de gecorrigeerde eenhedenconversies te gebruiken.
+- **Bugfix** — `solver.py::_get_tank_volumes()`: gebruikte `n.volume`, dat niet bestaat op EPYnetDTD's `Tank` (heet `tank_volume`, `EN_TANKVOLUME`). De resulterende `AttributeError` werd stil opgevangen door een brede `except Exception`, waardoor elk tankvolume altijd de hardgecodeerde fallback-waarde 1000,0 m³ teruggaf — nooit het echte, door EPANET berekende volume. Geen bestaande test gebruikte een tanknetwerk tegen echte EPANET, dus dit bleef onopgemerkt; een regressietest (`TestTankVolume`) is toegevoegd.
+- Nieuwe tests: `tests/gen_grid_network.py`; `tests/test_epynet_networks.py` uitgebreid met sessie-hergebruik/regressie-, tankvolume- en memoisatiecontroles.
+
 ## [1.2.2] — 2026-07-28
 
 ### MSX native library bridge — meegeleverde binaries + kritieke bugfixes

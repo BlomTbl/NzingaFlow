@@ -1,3 +1,32 @@
+Metadata-Version: 2.1
+Name: nzingaflow
+Version: 1.3.0
+Summary: Lagrangian Transport kwaliteitssimulator voor EPANET-drinkwaternetwerken
+Author: NzingaFlow
+License: MIT
+Project-URL: Homepage, https://github.com/nzingaflow/nzingaflow
+Project-URL: Repository, https://github.com/nzingaflow/nzingaflow
+Project-URL: Issues, https://github.com/nzingaflow/nzingaflow/issues
+Project-URL: Documentation, https://github.com/nzingaflow/nzingaflow#readme
+Keywords: water quality,EPANET,Lagrangian transport,drinking water,LTA,simulation
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Scientific/Engineering
+Classifier: Topic :: Scientific/Engineering :: Hydrology
+Classifier: Typing :: Typed
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Provides-Extra: all
+Provides-Extra: dev
+Provides-Extra: geochem
+Provides-Extra: numba
+License-File: LICENSE
+
 🇳🇱 [Nederlands](README_NL.md) &nbsp;|&nbsp; 🇬🇧 [English](README.md)
 # NzingaFlow
 
@@ -95,7 +124,7 @@ cd nzingaflow
 pip install -e ".[dev]"
 ```
 
-> **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 1.1
+> **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
 
 ---
 
@@ -268,7 +297,9 @@ Steps 1–4 are executed by Numba JIT kernels when Numba is installed, with no i
 | `merging.py` | `merge_segments` | Parallel-reduction segment merging with Numba JIT |
 | `stability.py` | `recommended_dt`, `MassBalanceTracker` | CFL check and mass balance |
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython integration |
-| `msx.py` | `MsxReactionSystem` | MSX-compatible multi-species reaction layer (v1.1.0) |
+| `msx.py` | `MsxReactionSystem` | Pure-Python MSX reaction layer: ODE solvers + expression parser (v1.1.0) |
+| `msxlibrary.py` | `MsxSimulation`, `MsxNativeLib` | Direct ctypes bridge to `libepanetmsx` (EPANET-MSX 2.0); loads `.msx` files unchanged; native libs bundled (v1.2.2) |
+| `units.py` | — | EPANET unit-system conversions and enums shared by `hydraulics.py` and `parse_inp.py` |
 
 ### SegmentStore (Structure-of-Arrays)
 
@@ -420,11 +451,23 @@ HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool 
 
 | Method | Description |
 |---|---|
-| `solve(simtime=0)` | Solve hydraulics for one EPS time step [s] |
+| `solve(simtime=0)` | Solve hydraulics for one EPS time step [s]; memoized — re-solving the same `simtime` is a no-op |
+| `close()` | Close the underlying EPANET hydraulic session (`EN_closeH`). Idempotent; a later `solve()` reopens it automatically |
 | `get_topology()` | Returns `(pipe_start, pipe_end, pipe_length, pipe_area, node_count, pipe_ids, node_names)` — cached |
 | `get_topology_with_reversal()` | Topology with pipe_start/end corrected for actual flow direction |
 | `get_hydraulic_state()` | Returns `(flow [m³/s], velocity [m/s], reversed_mask)` — always SI units |
 | `summary()` | Diagnostic overview of the network as a string |
+
+**Session management**
+
+`HydraulicModel` keeps its EPANET hydraulic session (`EN_openH`) open between `solve()` calls for performance. Call `close()` when done with the model (e.g. at the end of an EPS run), or use it as a context manager:
+
+```python
+with HydraulicModel("network.inp") as hm:
+    hm.solve()
+    ...
+# hm.close() is called automatically
+```
 
 ---
 
@@ -1097,6 +1140,14 @@ solver = NzingaFlowSolver("network.inp", include_valves=True)
 ---
 
 ## Changelog
+
+### Unreleased
+
+- **Hydraulics refactor + `units.py`.** `HydraulicModel` internals reworked around `Topology`/`HydraulicState` dataclasses, with a cached topology/pipe list and a read-once hydraulic snapshot after `solve()`. Public API unchanged except two additions: `close()` and context-manager support (`with HydraulicModel(...) as hm:`) for explicit EPANET session cleanup (`EN_closeH`).
+- Replaced the internal hydraulic solver with a session-reusing implementation (`EN_openH()` stays open across `solve()` calls; `EN_INITFLOW` used for correct cold-start behaviour), improving EPS performance.
+- New module `nzingaflow/units.py`: centralises EPANET unit-system conversions and enums (fixes AFD/MLD and diameter/velocity US↔SI conversion bugs), now shared by `hydraulics.py` and `parse_inp.py`.
+- `parse_inp.py` updated to use typed node/link classes and the corrected unit conversions.
+- New tests: `tests/gen_grid_network.py`; extended `tests/test_epynet_networks.py` with session-reuse/regression and memoization checks.
 
 ### 1.2.2
 

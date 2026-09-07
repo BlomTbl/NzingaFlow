@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.1-informational)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.2-informational)](CHANGELOG.md)
 
 NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken via de **Lagrangian Transport Approach (LTA)**. Stoffen reizen als discrete segmenten mee met de waterstroming — zonder de numerieke diffusie van Euleriaanse methoden. Alle kernberekeningen zijn volledig gevectoriseerd met NumPy en optioneel versneld met Numba JIT-compilatie.
 
@@ -95,7 +95,7 @@ cd nzingaflow
 pip install -e ".[dev]"
 ```
 
-> **Vereisten:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 1.1
+> **Vereisten:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
 
 ---
 
@@ -269,6 +269,7 @@ Stappen 1–4 worden uitgevoerd door Numba JIT-kernels als Numba is geïnstallee
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython-integratie |
 | `msx.py` | `MsxReactionSystem` | Pure-Python MSX reactielaag: ODE-solvers + expressieparser (v1.1.0) |
 | `msxlibrary.py` | `MsxSimulation`, `MsxNativeLib` | Directe ctypes-brug naar `libepanetmsx` (EPANET-MSX 2.0); laadt `.msx`-bestanden ongewijzigd; native libs meegeleverd (v1.2.2) |
+| `units.py` | — | EPANET-eenhedenconversies en -enums, gedeeld door `hydraulics.py` en `parse_inp.py` |
 
 ### SegmentStore (Structure-of-Arrays)
 
@@ -420,11 +421,23 @@ HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool 
 
 | Methode | Omschrijving |
 |---|---|
-| `solve(simtime=0)` | Los hydraulica op voor één EPS-tijdstip [s] |
+| `solve(simtime=0)` | Los hydraulica op voor één EPS-tijdstip [s]; gememoïseerd — opnieuw oplossen voor dezelfde `simtime` is een no-op |
+| `close()` | Sluit de onderliggende EPANET-hydraulicasessie (`EN_closeH`). Idempotent; een volgende `solve()` heropent deze automatisch |
 | `get_topology()` | Retourneert `(pipe_start, pipe_end, pipe_length, pipe_area, node_count, pipe_ids, node_names)` — gecached |
 | `get_topology_with_reversal()` | Topologie met pipe_start/end gecorrigeerd voor stroomrichting |
 | `get_hydraulic_state()` | Retourneert `(flow [m³/s], velocity [m/s], reversed_mask)` — altijd SI |
 | `summary()` | Diagnostisch overzicht als string |
+
+**Sessiebeheer**
+
+`HydraulicModel` houdt de EPANET-hydraulicasessie (`EN_openH`) tussen `solve()`-aanroepen open voor de performance. Roep `close()` aan als je klaar bent met het model (bv. aan het einde van een EPS-run), of gebruik het als context manager:
+
+```python
+with HydraulicModel("netwerk.inp") as hm:
+    hm.solve()
+    ...
+# hm.close() wordt automatisch aangeroepen
+```
 
 ---
 
@@ -1094,6 +1107,26 @@ solver = NzingaFlowSolver("netwerk.inp", include_valves=True)
 ---
 
 ## Versiehistorie
+
+### Unreleased
+
+- **Hydraulica-refactor + `units.py`.** Interne opbouw van `HydraulicModel` herzien rond `Topology`/`HydraulicState`-dataclasses, met een gecachede topologie/leidinglijst en een read-once hydraulica-snapshot na `solve()`. Publieke API ongewijzigd, op twee toevoegingen na: `close()` en context-manager-ondersteuning (`with HydraulicModel(...) as hm:`) voor expliciete opruiming van de EPANET-sessie (`EN_closeH`).
+- De interne hydraulische solver vervangen door een sessie-hergebruikende implementatie (`EN_openH()` blijft open tussen `solve()`-aanroepen; `EN_INITFLOW` voor correct cold-start-gedrag), wat de EPS-performance verbetert.
+- Nieuwe module `nzingaflow/units.py`: centraliseert EPANET-eenhedenconversies en -enums (lost AFD/MLD- en diameter/snelheid-US↔SI-conversiebugs op), nu gedeeld door `hydraulics.py` en `parse_inp.py`.
+- `parse_inp.py` bijgewerkt om typed node/link-klassen en de gecorrigeerde eenhedenconversies te gebruiken.
+- Nieuwe tests: `tests/gen_grid_network.py`; `tests/test_epynet_networks.py` uitgebreid met sessie-hergebruik/regressie- en memoisatiecontroles.
+
+### 1.2.2
+
+- **MSX native library bridge — meegeleverde binaries + kritieke bugfixes.** `msxlibrary.py` (`MsxSimulation`/`MsxNativeLib`) was sinds de introductie in 1.2.0 in de praktijk niet functioneel: er was geen native bibliotheek op het systeem beschikbaar, en zelfs met de bibliotheek aanwezig faalde de brug alsnog door meerdere onderliggende bugs.
+- Native binaries worden nu meegeleverd in `nzingaflow/lib/`: `libepanetmsx.so`/`libepanet2_msx.so` (Linux x86-64) en `epanetmsx.dll`/`epanet2_msx.dll` (Windows x86-64), gebouwd vanuit de officiële EPANET-MSX 2.0-broncode (github.com/USEPA/EPANETMSX). macOS nog niet meegebouwd — zie `nzingaflow/lib/README.txt`.
+- Fix: `MSXstep` gebruikte `c_long` in plaats van `c_double` voor de tijdsparameters — een ABI-mismatch t.o.v. de MSX 2.0 C-API (mogelijk geheugencorruptie op Windows, stilzwijgend foutieve tijdswaarden elders).
+- Fix: `_epanet_open()` was een no-op; `ENopen()` werd nooit aangeroepen vóór `MSXopen()`, terwijl MSX daarvan afhankelijk is voor de gedeelde netwerk-state. Nu daadwerkelijk geopend via een nieuwe `en_open()`/`en_close()`-binding.
+- Fix: node-/link-tellingen en -namen liepen via `MSXgetcount`/`MSXgetID`, die dat objecttype niet ondersteunen (alleen SPECIES/CONSTANT/PARAMETER/PATTERN) — gaf overal `MSX fout 515`. Omgezet naar de juiste EPANET-laag (`ENgetcount`, `ENgetnodeid`, `ENgetlinkid`, `ENgetnodeindex`, `ENgetlinkindex`), met een eigen foutvertaler (`ENgeterror`) omdat EN- en MSX-foutcodes verschillend genummerd zijn.
+- Fix — **naamconflict met epynet**: de epanet2-bibliotheek waartegen `libepanetmsx` linkt, deelde haar naam (en op Linux: haar SONAME) met epynet's eigen bundled epanet2-bibliotheek. Beide tegelijk in hetzelfde proces (zoals bij NzingaFlow, dat van epynet afhankelijk is) liet de dynamic linker/Windows-loader stilzwijgend naar het verkeerde, al-geladen exemplaar resolveren. Opgelost met een unieke naam (`libepanet2_msx.so` / `epanet2_msx.dll`) voor de companion-bibliotheek.
+- Documentatie: de eerdere verwijzing naar EPANET-MSX **1.1** (de bron van de `MSXstep`-bug) is overal gecorrigeerd naar **2.0**.
+- Nieuwe `tests/test_msxlibrary.py`, tegen het officiële arseenoxidatie-voorbeeldnetwerk (USEPA EPANETMSX Examples/), inclusief regressietests voor bovenstaande bugs.
+- Achterwaarts compatibel: de publieke API van `MsxSimulation`/`MsxNativeLib` is ongewijzigd; dit is uitsluitend een bugfix- en bundelingsrelease.
 
 ### 1.2.1
 

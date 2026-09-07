@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.1-informational)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.2-informational)](CHANGELOG.md)
 
 NzingaFlow simulates water quality in drinking water distribution networks using the **Lagrangian Transport Approach (LTA)**. Chemical species are transported as discrete segments carried along with the flow — eliminating the numerical diffusion inherent to Eulerian methods. All core calculations are fully vectorized with NumPy and optionally accelerated with Numba JIT compilation.
 
@@ -26,6 +26,7 @@ NzingaFlow simulates water quality in drinking water distribution networks using
   - [LTA Core Functions](#lta-core-functions)
   - [GeochemSolver & SpeciesMap](#geochemsolver--speciesmap)
   - [MsxReactionSystem](#msxreactionsystem)
+  - [MsxSimulation & MsxNativeLib](#msxsimulation--msxnativelib)
   - [Stability Functions](#stability-functions)
   - [merge\_segments](#merge_segments)
 - [Advanced Usage](#advanced-usage)
@@ -45,6 +46,7 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 - **Temperature correction** — Arrhenius/Hayduk-Laudie correction on D_mol and k_wall (v1.1.0)
 - **Leakage modelling** — proportional volume loss per segment without contaminant ingress (v1.1.0)
 - **MSX reaction system** — EPANET-MSX 2.0 compatible multi-species reaction layer (v1.1.0)
+- **MSX native library bridge** — direct ctypes binding to `libepanetmsx` (EPANET-MSX 2.0); runs an existing `.msx` file unchanged through the official C solver; native libraries bundled for Linux/Windows (v1.2.2)
 - **Valve topology support** — PRV, PSV, TCV, FCV, GPV and PCV included in transport via `include_valves=True` (v1.2.1)
 - **Tanks** — CSTR model with implicit Euler integration (unconditionally stable)
 - **Extended Period Simulation (EPS)** — automatic hydraulic updates every `hyd_dt` seconds
@@ -93,7 +95,7 @@ cd nzingaflow
 pip install -e ".[dev]"
 ```
 
-> **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 1.1
+> **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
 
 ---
 
@@ -184,6 +186,36 @@ runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(decay_k=np.zeros(3))
 ```
 
+### With the EPANET-MSX native library bridge (new in v1.2.2)
+
+Use this to run an existing `.msx` file unchanged through the official MSX C solver,
+without rewriting reaction expressions in Python.
+
+```python
+from nzingaflow import MsxSimulation, run_msx
+
+# Simplest usage: everything in one call
+result = run_msx("network.inp", "network.msx")
+df = result.to_dataframe("CL2", element="node")   # DataFrame: time [h] x node names
+
+# More control via context manager
+with MsxSimulation("network.inp", "network.msx") as sim:
+    state = sim.load()
+    print([s.name for s in state.bulk_species()])
+
+    sim.update_initial_quality(node_values={"R1": {"CL2": 1.0}})
+    sim.configure_source("R1", "CL2", kind="CONCEN", level=1.0)
+
+    result = sim.run()
+
+print(result.time_hours())                   # time axis [h]
+print(result.node_concentrations("CL2"))     # array (T x N)
+```
+
+> Native library (`libepanetmsx`/`epanet2`) ships bundled in `nzingaflow/lib/` —
+> Linux x86-64 and Windows x86-64 included. macOS is not (yet) built; build it
+> yourself via EPANETMSX's own `CMakeLists.txt` (supports Linux/macOS/Windows).
+
 ### With geochemistry (PhreeqPython)
 
 ```python
@@ -236,7 +268,9 @@ Steps 1–4 are executed by Numba JIT kernels when Numba is installed, with no i
 | `merging.py` | `merge_segments` | Parallel-reduction segment merging with Numba JIT |
 | `stability.py` | `recommended_dt`, `MassBalanceTracker` | CFL check and mass balance |
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython integration |
-| `msx.py` | `MsxReactionSystem` | MSX-compatible multi-species reaction layer (v1.1.0) |
+| `msx.py` | `MsxReactionSystem` | Pure-Python MSX reaction layer: ODE solvers + expression parser (v1.1.0) |
+| `msxlibrary.py` | `MsxSimulation`, `MsxNativeLib` | Direct ctypes bridge to `libepanetmsx` (EPANET-MSX 2.0); loads `.msx` files unchanged; native libs bundled (v1.2.2) |
+| `units.py` | — | EPANET unit-system conversions and enums shared by `hydraulics.py` and `parse_inp.py` |
 
 ### SegmentStore (Structure-of-Arrays)
 
@@ -388,11 +422,23 @@ HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool 
 
 | Method | Description |
 |---|---|
-| `solve(simtime=0)` | Solve hydraulics for one EPS time step [s] |
+| `solve(simtime=0)` | Solve hydraulics for one EPS time step [s]; memoized — re-solving the same `simtime` is a no-op |
+| `close()` | Close the underlying EPANET hydraulic session (`EN_closeH`). Idempotent; a later `solve()` reopens it automatically |
 | `get_topology()` | Returns `(pipe_start, pipe_end, pipe_length, pipe_area, node_count, pipe_ids, node_names)` — cached |
 | `get_topology_with_reversal()` | Topology with pipe_start/end corrected for actual flow direction |
 | `get_hydraulic_state()` | Returns `(flow [m³/s], velocity [m/s], reversed_mask)` — always SI units |
 | `summary()` | Diagnostic overview of the network as a string |
+
+**Session management**
+
+`HydraulicModel` keeps its EPANET hydraulic session (`EN_openH`) open between `solve()` calls for performance. Call `close()` when done with the model (e.g. at the end of an EPS run), or use it as a context manager:
+
+```python
+with HydraulicModel("network.inp") as hm:
+    hm.solve()
+    ...
+# hm.close() is called automatically
+```
 
 ---
 
@@ -614,6 +660,115 @@ rxn = chloramine_decay_msx(k_f=2.5e-4, k_ox=5e-5, solver='ros2')
 rxn = chlorine_nom_msx(k_bulk=3e-4, k_wall=1e-5, solver='rk4')
 rxn = arsenic_oxidation_msx(Ka=10.0, Kb=0.1, K1=5.0, K2=1.0, Smax=50.0, solver='radau')
 ```
+
+---
+
+### MsxSimulation & MsxNativeLib
+
+Direct binding to the official EPANET-MSX C library via ctypes. Three layers on top of the `MSX_*` C API (EPANET-MSX 2.0).
+
+> Native library (`libepanetmsx`/`epanet2`) ships bundled in `nzingaflow/lib/` —
+> Linux x86-64 and Windows x86-64 included. For macOS: build it yourself via the
+> `CMakeLists.txt` from [github.com/USEPA/EPANETMSX](https://github.com/USEPA/EPANETMSX)
+> (supports Linux/macOS/Windows).
+
+#### `MsxSimulation` — orchestrator (layer 3)
+
+```python
+MsxSimulation(
+    inp_path:  str,           # path to the EPANET .inp file
+    msx_path:  str,           # path to the EPANET-MSX .msx file
+    lib_path:  str | None = None,  # explicit path to libepanetmsx; None = auto-detect
+    strict:    bool = True,   # raise MsxError on non-zero return codes
+)
+```
+
+**Methods**
+
+| Method | Return type | Description |
+|---|---|---|
+| `load()` | `MsxNetworkState` | Open the MSX file and build a full network snapshot |
+| `run(save_to_file=False, hyd_file=None)` | `MsxSimulationResult` | Run the full simulation; optionally from a previously saved hydraulics file |
+| `update_initial_quality(node_values=None, link_values=None)` | `None` | Adjust initial concentrations before `run()`: `{name: {species: value}}` |
+| `configure_source(node, species, kind, level, pattern_name=None)` | `None` | Configure a source; `kind` = `'CONCEN'`, `'MASS'`, `'SETPOINT'`, `'FLOWPACED'` or `'NOSOURCE'` |
+| `update_constant(name, value)` | `None` | Change a named constant in the .msx file |
+| `add_time_pattern(name, multipliers)` | `None` | Add a new time pattern with the given multipliers |
+| `close()` | `None` | Close the library and free memory |
+
+**Context manager**
+
+```python
+with MsxSimulation("network.inp", "network.msx") as sim:
+    state = sim.load()
+    result = sim.run()
+# sim.close() is called automatically
+```
+
+#### `MsxSimulationResult`
+
+```python
+result.time_s                        # ndarray — timestamps [s]
+result.time_hours()                  # ndarray — timestamps [h]
+result.node_quality                  # ndarray (T, N, S) — node concentrations
+result.link_quality                  # ndarray (T, L, S) — link concentrations
+result.node_names                    # list[str]
+result.link_names                    # list[str]
+result.species                       # list[MsxSpecies]
+
+result.node_concentrations("CL2")   # ndarray (T, N) — single species from node_quality
+result.link_concentrations("CL2")   # ndarray (T, L) — single species from link_quality
+result.to_dataframe("CL2", element="node")  # pandas DataFrame: index=time_h, columns=node names
+```
+
+#### `MsxNetworkState`
+
+Snapshot of the network after `load()`. Contains species, constants, sources, and patterns.
+
+```python
+state.species               # list[MsxSpecies]
+state.constants             # dict[str, float]
+state.sources               # list[MsxSourceRecord]
+state.node_initq            # ndarray (N, S) — initial node quality
+state.link_initq            # ndarray (L, S) — initial link quality
+state.patterns              # dict[int, list[float]]
+
+state.species_by_name("CL2")   # → MsxSpecies
+state.bulk_species()            # → list[MsxSpecies]
+state.wall_species()            # → list[MsxSpecies]
+```
+
+#### `MsxNativeLib` — ctypes wrapper (layer 1)
+
+For advanced use: direct access to all `MSX_*` C functions.
+
+```python
+from nzingaflow import MsxNativeLib
+
+lib = MsxNativeLib(lib_path=None, strict=True)
+lib.open("network.msx")
+lib.solve_hydraulics()
+lib.solve_quality()
+
+n_sp = lib.object_count(3)               # ObjectType.SPECIES = 3
+name = lib.object_id(3, 1)              # name of species 1
+conc = lib.concentration(0, 1, 1)       # NODE=0, node 1, species 1
+
+lib.set_constant(idx, value)
+lib.set_initial_quality(obj_type, idx, sp_idx, value)
+lib.set_source(node, species, type, level, pattern)
+lib.close()
+```
+
+#### Which one: `msx.py` or `msxlibrary.py`?
+
+| Situation | Recommended module |
+|---|---|
+| Writing reaction expressions yourself in Python | `msx.py` — `MsxReactionSystem` |
+| Reusing an existing `.msx` file | `msxlibrary.py` — `MsxSimulation` |
+| No native library available | `msx.py` (no dependency) |
+| The MSX C solver should handle time integration | `msxlibrary.py` |
+| Coupling with `NzingaFlowSolver` via `geochem=` | `msx.py` — `MsxReactionSystem` |
+| Standalone MSX simulation without LTA | `msxlibrary.py` — `run_msx()` |
 
 ---
 
@@ -899,6 +1054,12 @@ smap = SpeciesMap(
 
 Use `MsxReactionSystem` when your reactions can be expressed as ordinary differential equations (first- or higher-order kinetics, biofilm growth, chloramine decay). It is faster than PhreeqPython and requires no extra dependencies. Use `GeochemSolver` when you need full thermodynamic equilibrium, mineral dissolution/precipitation, or pH-buffering via PHREEQC.
 
+**Q: When should I use MsxSimulation (msxlibrary) instead of MsxReactionSystem (msx.py)?**
+
+Use `MsxSimulation` when you want to run an existing `.msx` file unchanged through the official EPANET-MSX C solver — useful when the reaction equations already live in a `.msx` file, or when you want to compare results against the reference MSX implementation. `MsxSimulation` works as a standalone simulator and does not couple with `NzingaFlowSolver`.
+
+Use `MsxReactionSystem` when you want to define reactions in Python and couple them to the NzingaFlow Lagrangian solver via `geochem=rxn`. This requires no native library and is more flexible for parameter studies.
+
 **Q: How do I model pipe leakage?**
 
 Pass `leakage_fraction` to `NzingaFlowSolver`. A value of `0.12` means 12% of the pipe flow is lost. Each segment loses volume proportionally per timestep; concentrations are unchanged (conservative mixing model — no contaminant ingress from groundwater). Typical values for Dutch distribution networks are 0.05–0.20.
@@ -937,6 +1098,7 @@ solver = NzingaFlowSolver("network.inp", include_valves=True)
 | **LTA** | Lagrangian Transport Approach: transport described in the reference frame of the fluid |
 | **LSI** | Langelier Saturation Index: measure of CaCO₃ saturation in water |
 | **MSX** | Multi-Species eXtension: EPANET-MSX compatible reaction layer for arbitrary kinetic systems |
+| **MSX native bridge** | Direct ctypes binding to `libepanetmsx`; implemented in `msxlibrary.py` |
 | **PHREEQC** | Geochemical modelling software by the USGS |
 | **SoA** | Structure of Arrays: memory layout where each property occupies a separate array |
 | **`k_bulk`** | Bulk decay constant [1/s]: first-order decay in the water column |
@@ -950,17 +1112,25 @@ solver = NzingaFlowSolver("network.inp", include_valves=True)
 
 ## Changelog
 
+### Unreleased
+
+- **Hydraulics refactor + `units.py`.** `HydraulicModel` internals reworked around `Topology`/`HydraulicState` dataclasses, with a cached topology/pipe list and a read-once hydraulic snapshot after `solve()`. Public API unchanged except two additions: `close()` and context-manager support (`with HydraulicModel(...) as hm:`) for explicit EPANET session cleanup (`EN_closeH`).
+- Replaced the internal hydraulic solver with a session-reusing implementation (`EN_openH()` stays open across `solve()` calls; `EN_INITFLOW` used for correct cold-start behaviour), improving EPS performance.
+- New module `nzingaflow/units.py`: centralises EPANET unit-system conversions and enums (fixes AFD/MLD and diameter/velocity US↔SI conversion bugs), now shared by `hydraulics.py` and `parse_inp.py`.
+- `parse_inp.py` updated to use typed node/link classes and the corrected unit conversions.
+- New tests: `tests/gen_grid_network.py`; extended `tests/test_epynet_networks.py` with session-reuse/regression and memoization checks.
+
 ### 1.2.2
 
 - **MSX native library bridge — bundled binaries + critical bugfixes.** `msxlibrary.py` (`MsxSimulation`/`MsxNativeLib`) was not actually functional since its introduction in 1.2.0: no native library was available on the system, and even with one present the bridge still failed due to several underlying bugs.
-- Native binaries now ship in `nzingaflow/lib/`: `libepanetmsx.so`/`libepanet2_msx.so` (Linux x86-64) and `epanetmsx.dll`/`epanet2_msx.dll` (Windows x86-64), built from the official EPANET-MSX 2.0 source. macOS not yet built — see `nzingaflow/lib/README.txt`.
-- Fixed: `MSXstep` used `c_long` instead of `c_double` for its time parameters (ABI mismatch against the MSX 2.0 C API).
-- Fixed: `_epanet_open()` was a no-op — `ENopen()` was never called before `MSXopen()`, even though MSX depends on it for the shared network state. Now bound via new `en_open()`/`en_close()` methods.
-- Fixed: node/link counts and names went through `MSXgetcount`/`MSXgetID`, which don't support that object type — raised `MSX error 515` on every call. Rerouted through the correct EPANET-layer calls (`ENgetcount`, `ENgetnodeid`, `ENgetlinkid`, `ENgetnodeindex`, `ENgetlinkindex`).
-- Fixed: the companion epanet2 library shared its name (and, on Linux, its SONAME) with epynet's own bundled epanet2 library, so running both in the same process silently resolved to the wrong, already-loaded copy. Renamed to `libepanet2_msx.so`/`epanet2_msx.dll`.
-- Corrected: earlier docs referenced EPANET-MSX 1.1 (the source of the `MSXstep` bug); this bridge targets 2.0.
-- New `tests/test_msxlibrary.py`, run against the official arsenic oxidation example network, including regression tests for the bugs above.
-- Backward compatible: `MsxSimulation`/`MsxNativeLib`'s public API is unchanged.
+- Native binaries now ship in `nzingaflow/lib/`: `libepanetmsx.so`/`libepanet2_msx.so` (Linux x86-64) and `epanetmsx.dll`/`epanet2_msx.dll` (Windows x86-64), built from the official EPANET-MSX 2.0 source (github.com/USEPA/EPANETMSX). macOS not yet built — see `nzingaflow/lib/README.txt`.
+- Fixed: `MSXstep` used `c_long` instead of `c_double` for its time parameters — an ABI mismatch against the MSX 2.0 C API (potentially memory-corrupting on Windows, silently wrong time values elsewhere).
+- Fixed: `_epanet_open()` was a no-op; `ENopen()` was never called before `MSXopen()`, even though MSX depends on it for the shared network state (see the official CLI reference, `msxmain.c`). The EPANET network is now actually opened via a new `en_open()`/`en_close()` binding.
+- Fixed: node/link counts and names went through `MSXgetcount`/`MSXgetID`, which don't support that object type (only SPECIES/CONSTANT/PARAMETER/PATTERN) — this raised `MSX error 515` everywhere. Rerouted through the correct EPANET-layer calls (`ENgetcount`, `ENgetnodeid`, `ENgetlinkid`, `ENgetnodeindex`, `ENgetlinkindex`), with a dedicated error translator (`ENgeterror`) since EN and MSX error codes use different numbering.
+- Fixed — **library name collision with epynet**: the epanet2 library that `libepanetmsx` links against shared its name (and, on Linux, its SONAME) with epynet's own bundled epanet2 library. Running both in the same process (as NzingaFlow does, since it depends on epynet) made the dynamic linker/Windows loader silently resolve to the wrong, already-loaded copy. Fixed with a unique name (`libepanet2_msx.so` / `epanet2_msx.dll`) for the companion library.
+- Docs: the earlier reference to EPANET-MSX **1.1** (the source of the `MSXstep` bug) has been corrected to **2.0** throughout.
+- New `tests/test_msxlibrary.py`, run against the official arsenic oxidation example network (USEPA EPANETMSX Examples/), including regression tests for the bugs listed above.
+- Backward compatible: `MsxSimulation`/`MsxNativeLib`'s public API is unchanged; this is a bugfix and bundling release only.
 
 ### 1.2.1
 
