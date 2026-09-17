@@ -1,5 +1,74 @@
 # Changelog
 
+## [1.3.1] — 2026-09-17
+
+### Bugfix — `PhreeqSolutionMode` was never actually wired into the simulation loop
+
+`nzingaflow/geochemistry.py::PhreeqSolutionMode` (the solution-number,
+`pp.mix_solutions()`-based geochemistry mode) has existed since it was
+introduced, but was never connected to `NzingaFlowSolver`'s automatic
+step loop beyond the shared `apply_geochemistry()`/`apply_mixing()`
+interface — and that connection was itself broken. The class docstring's
+claim that "`NzingaFlowSolver` doesn't need any changes" was false: nothing
+in `solver.py` ever referenced `PhreeqSolutionMode`-specific state at all.
+Concretely:
+
+- `NzingaFlowSolver.step()` called `self._geochem.apply_mixing(node_C,
+  node_flow, dt)` without the `node_inflows` argument.
+  `PhreeqSolutionMode.apply_mixing()` returns immediately (a no-op) when
+  `node_inflows is None` — so node mixing silently never ran. The
+  simulation appeared to execute normally; no exception was raised.
+- Even with `node_inflows` supplied, `sol_ids` (the array mapping segment
+  store index → PHREEQC solution number) was never kept in sync with
+  `SegmentStore` mutations: segment removal at end nodes uses
+  swap-with-last, and segment splitting adds new rows — neither was
+  mirrored on `sol_ids`, so indices would silently point at the wrong
+  segment's solution after the first removal or split.
+
+**Fixes (`nzingaflow/solver.py`)**
+- `step()` now detects a solution-number-based geochemistry mode via duck
+  typing (`hasattr(self._geochem, 'sol_ids')`) and builds `node_inflows`
+  itself with the new `_build_node_inflows()` helper — same weighting as
+  `_node_mixing_kernel` in `lta.py`, but carrying PHREEQC solution numbers
+  instead of concentration vectors.
+- `_handle_exits()` now calls `geochem.mirror_removal()` before removing
+  end-node segments, and `geochem.copy_solution()` + `on_segment_added()`
+  when a segment splits at a junction, keeping `sol_ids` aligned with the
+  store.
+- `inject()`, `inject_pipe()`, and `booster_inject()` now call the new
+  `_sync_geochem_new_segment()` so newly added segments get at least a
+  safe (background-solution) `sol_ids` entry instead of a stale/orphaned
+  one; these C-vector-based injection methods don't attempt to translate
+  the injected concentration into a PHREEQC solution.
+- Periodic segment merging (`merge_segments`, every `merge_interval`
+  steps) is now skipped when a solution-number geochem mode is active:
+  `merge_segments` fully repacks `SegmentStore` rows (sort + reduce) with
+  no `sol_ids` remap hook, which would otherwise silently desynchronise
+  the array after the first merge.
+
+**Fixes (`nzingaflow/geochemistry.py`)**
+- New `PhreeqSolutionMode` methods: `on_segment_added()`, `mirror_removal()`,
+  `copy_solution()` — the synchronisation primitives `solver.py` needs
+  (see above).
+- Corrected the module-level and class-level usage examples for
+  `PhreeqSolutionMode`, which referenced nonexistent methods
+  (`apply_reactions`, `apply_node_mixing`) and/or never actually called
+  `NzingaFlowSolver.step()` in their sample simulation loop — meaning
+  following the documented usage literally would have run neither
+  advection nor node mixing.
+
+**Docs:** added a `PhreeqSolutionMode` reference section to
+`nzingaflow/documentation/README.md` / `README_NL.md` (previously
+undocumented there entirely) covering the new methods and the
+merge-skipping limitation above.
+
+**Not yet fixed:** `merge_segments()` has no `sol_ids`-remap hook at all;
+segment merging simply doesn't run in this mode rather than running
+correctly. A full fix would extend `merge_segments()` to optionally carry
+a parallel array through its reordering/reduction passes. No regression
+test exercises `PhreeqSolutionMode` against a real network yet (needs
+`phreeqpython` + a PHREEQC database in the test environment).
+
 ## [1.3.0] — 2026-08-17
 
 ### Hydraulics refactor + `units.py`

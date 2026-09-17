@@ -1,5 +1,77 @@
 # Changelog
 
+## [1.3.1] — 2026-09-17
+
+### Bugfix — `PhreeqSolutionMode` was nooit daadwerkelijk aangesloten op de simulatielus
+
+`nzingaflow/geochemistry.py::PhreeqSolutionMode` (de oplossingnummer-modus
+op basis van `pp.mix_solutions()`) bestaat al sinds de introductie, maar
+was nooit gekoppeld aan `NzingaFlowSolver`'s automatische steplus buiten
+de gedeelde `apply_geochemistry()`/`apply_mixing()`-interface — en die
+koppeling was zelf ook stuk. De bewering in de klasse-docstring dat
+"`NzingaFlowSolver` niet aangepast hoeft te worden" klopte niet: niets in
+`solver.py` verwees ooit naar `PhreeqSolutionMode`-specifieke state.
+Concreet:
+
+- `NzingaFlowSolver.step()` riep `self._geochem.apply_mixing(node_C,
+  node_flow, dt)` aan zonder het `node_inflows`-argument.
+  `PhreeqSolutionMode.apply_mixing()` doet niets (`return`) zodra
+  `node_inflows is None` — knoopmenging liep dus stilzwijgend nooit. De
+  simulatie leek normaal te draaien; er werd geen fout gegooid.
+- Ook mét `node_inflows` bleef `sol_ids` (de array die store-index koppelt
+  aan PHREEQC-oplossingnummer) nooit synchroon met mutaties op de
+  `SegmentStore`: segmentverwijdering op eindknopen gebeurt via
+  swap-with-last, en segmentsplitsing voegt nieuwe rijen toe — geen van
+  beide werd op `sol_ids` gespiegeld, waardoor indices na de eerste
+  verwijdering of splitsing stilzwijgend naar de oplossing van het
+  verkeerde segment zouden wijzen.
+
+**Fixes (`nzingaflow/solver.py`)**
+- `step()` herkent een oplossingnummer-gebaseerde geochemie-modus nu via
+  duck typing (`hasattr(self._geochem, 'sol_ids')`) en bouwt `node_inflows`
+  zelf op met de nieuwe helper `_build_node_inflows()` — dezelfde weging
+  als `_node_mixing_kernel` in `lta.py`, maar met PHREEQC-oplossingnummers
+  in plaats van concentratievectoren.
+- `_handle_exits()` roept nu `geochem.mirror_removal()` aan vóór het
+  verwijderen van eindknoop-segmenten, en `geochem.copy_solution()` +
+  `on_segment_added()` wanneer een segment op een splitsingsknoop
+  opsplitst, zodat `sol_ids` uitgelijnd blijft met de store.
+- `inject()`, `inject_pipe()` en `booster_inject()` roepen nu de nieuwe
+  `_sync_geochem_new_segment()` aan zodat nieuw toegevoegde segmenten
+  tenminste een veilige (achtergrondoplossing) `sol_ids`-waarde krijgen
+  in plaats van een verweesde/oude; deze C-vector-gebaseerde
+  injectiemethoden proberen niet de geïnjecteerde concentratie om te
+  zetten naar een PHREEQC-oplossing.
+- Periodieke segment-merging (`merge_segments`, elke `merge_interval`
+  stappen) wordt nu overgeslagen zodra een oplossingnummer-gebaseerde
+  geochemie-modus actief is: `merge_segments` herschikt `SegmentStore`-
+  rijen volledig (sort + reductie) zonder enige `sol_ids`-remap-hook, wat
+  de array anders na de eerste merge stilzwijgend zou desynchroniseren.
+
+**Fixes (`nzingaflow/geochemistry.py`)**
+- Nieuwe `PhreeqSolutionMode`-methoden: `on_segment_added()`,
+  `mirror_removal()`, `copy_solution()` — de synchronisatieprimitieven die
+  `solver.py` hierboven nodig heeft.
+- Gebruiksvoorbeelden op module- en klasseniveau voor `PhreeqSolutionMode`
+  gecorrigeerd: die verwezen naar niet-bestaande methoden
+  (`apply_reactions`, `apply_node_mixing`) en/of riepen in hun
+  voorbeeld-simulatielus nooit daadwerkelijk `NzingaFlowSolver.step()`
+  aan — het voorbeeld letterlijk volgen had dus noch advectie noch
+  knoopmenging laten draaien.
+
+**Documentatie:** een `PhreeqSolutionMode`-referentiesectie toegevoegd aan
+`nzingaflow/documentation/README.md` / `README_NL.md` (daar voorheen
+volledig ongedocumenteerd), met de nieuwe methoden en de bovengenoemde
+merge-beperking.
+
+**Nog niet opgelost:** `merge_segments()` heeft helemaal geen
+`sol_ids`-remap-hook; segment-merging draait in deze modus daarom
+gewoon niet, in plaats van correct te draaien. Een volledige fix zou
+`merge_segments()` moeten uitbreiden zodat die optioneel een parallelle
+array meeneemt door zijn herschik-/reductiepassen. Er is nog geen
+regressietest die `PhreeqSolutionMode` tegen een echt netwerk draait
+(vereist `phreeqpython` + een PHREEQC-database in de testomgeving).
+
 ## [1.3.0] — 2026-08-17
 
 ### Hydraulica-refactor + `units.py`
