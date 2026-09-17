@@ -65,28 +65,37 @@ Gebruik — GeochemSolver (concentratiemodus)
 
 Gebruik — PhreeqSolutionMode (oplossingnummer-modus)
 -----------------------------------------------------
-    from nzingaflow.geochemistry import PhreeqSolutionMode, SpeciesMap
+    from nzingaflow.geochemistry import PhreeqSolutionMode
+    from nzingaflow.solver import NzingaFlowSolver
     import phreeqpython
 
     pp  = phreeqpython.PhreeqPython()
-    sol = pp.add_solution({'temp': '15', 'pH': '7.5', 'units': 'mol/L',
+    bg  = pp.add_solution({'temp': '15', 'pH': '7.5', 'units': 'mol/L',
                            'Ca': '1e-3', 'Cl': '2e-3', 'Alkalinity': '2.5e-3'})
 
-    psm = PhreeqSolutionMode(pp)
+    psm = PhreeqSolutionMode(pp, background_number=bg.number)
+
+    solver = NzingaFlowSolver('netwerk.inp', n_species=1, geochem=psm)
+    # (n_species=1 is een placeholder; chemische queries gaan via psm,
+    #  niet via de C-matrix)
 
     # Initialiseer segmenten met één bronoplossing
-    psm.fill(store, sol.number)
+    psm.fill(solver.segments, bg.number)
 
-    # In de simulatielus (vervangt apply_geochemistry):
-    psm.apply_reactions(store, dt=5.0, kinetics_fn=my_kinetics)
-    psm.apply_node_mixing(node_outflows)   # exacte menging via mix_solutions
+    # Simulatielus — solver.step() roept intern zowel
+    # psm.apply_geochemistry() (reacties per segment) als psm.apply_mixing()
+    # (knoopmenging, met automatisch opgebouwde node_inflows) aan.
+    # Roep apply_geochemistry()/apply_mixing() NIET los aan naast step():
+    # dat zou reacties/menging dubbel toepassen.
+    for _ in range(n_stappen):
+        solver.step(dt=5.0, decay_k=[0.0])
 
     # Query
-    sol_mixed = psm.get_solution(store, seg_idx=42)
-    print(sol_mixed.pH, sol_mixed.total_element('Ca'))
+    sol = psm.get_solution(solver.segments, seg_idx=42)
+    print(sol.pH, sol.total_element('Ca'))
 
     # Geheugen opruimen (verwijder oplossingen die niet meer in gebruik zijn)
-    psm.garbage_collect(store, keep=[sol.number])
+    psm.garbage_collect(solver.segments, keep=[bg.number])
 """
 
 from __future__ import annotations
@@ -796,9 +805,13 @@ class PhreeqSolutionMode:
     - ``sol_ids`` : np.ndarray shape ``(capacity,)`` int32, parallel aan
       ``SegmentStore.pipe`` / ``x`` / ``C``.  Index ``i`` bevat het PHREEQC-
       oplossingnummer van segment ``i``.
-    - ``NzingaFlowSolver`` hoeft niet te worden aangepast: de ``geochem``-
-      interface wordt gerespecteerd via ``apply_geochemistry()`` en
-      ``apply_mixing()``.
+    - ``NzingaFlowSolver.step()`` herkent deze modus aan de aanwezigheid van
+      ``sol_ids`` (duck typing) en bouwt zelf de ``node_inflows``-lijst op
+      voor ``apply_mixing()``, en houdt ``sol_ids`` synchroon bij het
+      verwijderen (eindknopen) en toevoegen (splitsingen) van segmenten via
+      ``mirror_removal()`` / ``on_segment_added()`` / ``copy_solution()``.
+      Segment-merging (``merge_segments()``) wordt in deze modus overgeslagen
+      omdat die geen ``sol_ids``-remap-hook heeft.
     - De C-matrix wordt niet gebruikt; alle chemische queries gaan via
       ``pp.get_solution(sol_ids[i])``.
 
@@ -838,12 +851,14 @@ class PhreeqSolutionMode:
         # (n_species=1 is placeholder; chemische queries gaan via psm)
 
         # Initialiseer segmenten
-        psm.fill(store, bg.number)
+        psm.fill(solver.segments, bg.number)
 
-        # Simulatielus:
+        # Simulatielus: solver.step() roept intern apply_geochemistry() en
+        # apply_mixing() aan (met automatisch opgebouwde node_inflows —
+        # zie NzingaFlowSolver._build_node_inflows). Roep deze methoden
+        # niet zelf nog eens aan; dat past reacties/menging dubbel toe.
         for _ in range(n_stappen):
-            psm.apply_geochemistry(store, dt=5.0)
-            # node-menging via NzingaFlowSolver.step() roept apply_mixing() aan
+            solver.step(dt=5.0, decay_k=[0.0])
     """
 
     def __init__(
@@ -901,6 +916,78 @@ class PhreeqSolutionMode:
             new_arr[:self._capacity] = self.sol_ids[:self._capacity]
         self.sol_ids  = new_arr
         self._capacity = new_cap
+
+    # ── Synchronisatie met SegmentStore-mutaties ──────────────────────────────
+    #
+    # sol_ids is een parallelle array bij SegmentStore: index i moet altijd
+    # het oplossingnummer van hetzelfde segment blijven bevatten. De
+    # SegmentStore weet niets van sol_ids, dus de aanroeper (NzingaFlowSolver)
+    # moet elke add()/remove() hier spiegelen. Zonder deze koppeling raakt
+    # sol_ids stilzwijgend gekoppeld aan het verkeerde segment — precies het
+    # soort fout die niet opvalt totdat de resultaten worden gecontroleerd.
+
+    def on_segment_added(self, idx: int, sol_num: int | None = None) -> None:
+        """
+        Registreer het oplossingnummer voor een segment dat net is
+        toegevoegd aan de SegmentStore op positie ``idx`` (d.w.z. na een
+        ``store.add()``-aanroep is ``idx == store.n - 1``).
+
+        Parameters
+        ----------
+        idx : int
+            Index in de SegmentStore van het nieuwe segment.
+        sol_num : int | None
+            Te gebruiken oplossingnummer. None → ``background_number`` als
+            die is ingesteld, anders 0 (een ongeldig PHREEQC-nummer — dit
+            geeft bij eerste gebruik een duidelijke fout in plaats van
+            stilzwijgend verkeerd gedrag).
+        """
+        self._ensure_capacity(idx + 1)
+        if sol_num is None:
+            sol_num = self.background_number if self.background_number is not None else 0
+        self.sol_ids[idx] = sol_num
+
+    def mirror_removal(self, indices, n_before: int) -> None:
+        """
+        Spiegel ``SegmentStore.remove(indices)`` op ``sol_ids``.
+
+        Moet vóór de ``store.remove(indices)``-aanroep worden uitgevoerd, met
+        exact dezelfde ``indices`` en de segmentcount (``store.n``) van
+        vóór die aanroep — ``store.remove()`` verwijdert via
+        swap-with-last, en die swap moet hier identiek worden nagedaan.
+
+        Parameters
+        ----------
+        indices : lijst/array van te verwijderen indices
+        n_before : ``store.n`` vóór de aanroep naar ``store.remove()``
+        """
+        if self.sol_ids is None:
+            return
+        n = n_before
+        for ri in sorted(indices, reverse=True):
+            last = n - 1
+            if ri != last:
+                self.sol_ids[ri] = self.sol_ids[last]
+            n -= 1
+
+    def copy_solution(self, sol_num: int) -> int:
+        """
+        Maak een onafhankelijke PHREEQC-kopie van oplossing ``sol_num`` en
+        geef het nieuwe oplossingnummer terug.
+
+        Nodig wanneer één segment in meerdere segmenten opsplitst (bijv. op
+        een splitsingsknoop): elke afsplitsing moet een eigen, onafhankelijk
+        oplossingnummer krijgen. Zonder deze kopie zouden meerdere
+        ``sol_ids``-posities naar hetzelfde PHREEQC-nummer verwijzen, en
+        zou ``apply_geochemistry()`` — die per segment ``pp.remove_solutions()``
+        kan aanroepen zodra kinetiek een nieuwe oplossing oplevert — een
+        oplossing verwijderen die een ándere segment nog nodig heeft.
+        """
+        pp = self.pp
+        pp.solution_counter += 1
+        num = pp.solution_counter
+        pp.ip.run_string(f"COPY SOLUTION {sol_num} {num}\nEND")
+        return num
 
     # ── Geochem-interface (zelfde signatuur als GeochemSolver) ────────────────
 

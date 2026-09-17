@@ -13,6 +13,7 @@ Nieuw in deze versie
 
 from __future__ import annotations
 from collections import defaultdict
+from typing import List, Tuple
 import numpy as np
 
 
@@ -490,6 +491,7 @@ class NzingaFlowSolver:
 
         if len(out) == 1:
             self.segments.add(pipe=out[0], x=0.0, volume=volume, C_vector=C_arr)
+            self._sync_geochem_new_segment()
             if self._tracker:
                 self._tracker.record_injection(C_arr, volume)
         else:
@@ -499,6 +501,7 @@ class NzingaFlowSolver:
             if tot_q <= 0:
                 # Geen debiet: injecteer in eerste leiding als fallback
                 self.segments.add(pipe=out[0], x=0.0, volume=volume, C_vector=C_arr)
+                self._sync_geochem_new_segment()
                 if self._tracker:
                     self._tracker.record_injection(C_arr, volume)
                 return
@@ -506,6 +509,7 @@ class NzingaFlowSolver:
                 vol_p = volume * q / tot_q
                 if vol_p > 0:
                     self.segments.add(pipe=p, x=0.0, volume=vol_p, C_vector=C_arr)
+                    self._sync_geochem_new_segment()
             if self._tracker:
                 self._tracker.record_injection(C_arr, volume)
 
@@ -515,8 +519,27 @@ class NzingaFlowSolver:
         pipe_idx = self.pipe_index[pipe_uid]
         C_arr = np.asarray(C_vector, dtype=np.float64)
         self.segments.add(pipe=pipe_idx, x=x, volume=volume, C_vector=C_arr)
+        self._sync_geochem_new_segment()
         if self._tracker:
             self._tracker.record_injection(C_arr, volume)
+
+    def _sync_geochem_new_segment(self, sol_num: int | None = None) -> None:
+        """
+        Koppel het laatst toegevoegde segment aan een oplossingnummer voor
+        oplossingnummer-gebaseerde geochemie-modi (bijv. PhreeqSolutionMode).
+
+        inject()/inject_pipe()/booster_inject() werken met een C_vector; die
+        wordt door PhreeqSolutionMode genegeerd (het gebruikt geen C-matrix).
+        Zonder deze koppeling zou ``sol_ids`` op de nieuwe index een
+        verweesd of hergebruikt oplossingnummer bevatten na een eerdere
+        remove()/add(). Standaard wordt de achtergrondoplossing gebruikt —
+        de geïnjecteerde concentratie wordt dan NIET chemisch gerepresenteerd.
+        Voor scheikundig correcte injecties: maak zelf een PHREEQC-oplossing
+        aan en geef het nummer door via ``sol_num``, of roep na deze aanroep
+        ``self._geochem.on_segment_added(self.segments.n - 1, sol_num)`` aan.
+        """
+        if self._geochem is not None and hasattr(self._geochem, 'sol_ids'):
+            self._geochem.on_segment_added(self.segments.n - 1, sol_num)
 
     def booster_inject(
         self,
@@ -605,6 +628,7 @@ class NzingaFlowSolver:
             C_new = np.zeros(self.n_species, dtype=np.float64)
             C_new[active] = C_set[active]
             self.segments.add(pipe=pipe_idx, x=0.0, volume=vol, C_vector=C_new)
+            self._sync_geochem_new_segment()
             if self._tracker:
                 self._tracker.record_injection(C_new, vol)
 
@@ -734,7 +758,19 @@ class NzingaFlowSolver:
             node_flow = self._buf_node_flow
             node_flow[:] = 0.0
             np.add.at(node_flow, self.pipe_end, np.abs(flow))
-            self._geochem.apply_mixing(node_C, node_flow, dt)
+
+            if hasattr(self._geochem, 'sol_ids'):
+                # PhreeqSolutionMode (of vergelijkbare oplossingnummer-modus):
+                # apply_mixing() doet NIETS zonder node_inflows (zie docstring
+                # PhreeqSolutionMode.apply_mixing) — die moeten we hier zelf
+                # opbouwen uit de PHREEQC-oplossingnummers van de segmenten
+                # die deze stap een knoop bereiken.
+                node_inflows = self._build_node_inflows(exit_mask, flow, n)
+                self._geochem.apply_mixing(
+                    node_C, node_flow, dt, node_inflows=node_inflows,
+                )
+            else:
+                self._geochem.apply_mixing(node_C, node_flow, dt)
 
         # 6. Tank-update
         if len(self._tank_nodes) > 0:
@@ -746,8 +782,17 @@ class NzingaFlowSolver:
         # 8. Merging
         self._step_counter += 1
         if self._step_counter % merge_interval == 0:
-            merge_segments(self.segments, tol=merge_tol,
-                          n_pipes=len(self.pipe_ids))
+            if self._geochem is not None and hasattr(self._geochem, 'sol_ids'):
+                # merge_segments() herschikt/compacteert store-rijen volledig
+                # (lexsort + reductie) zonder enige sol_ids-remap-hook. Voor
+                # een oplossingnummer-modus zoals PhreeqSolutionMode zou dit
+                # sol_ids stilzwijgend aan de verkeerde segmenten koppelen.
+                # Overslaan tot merge_segments zelf een parallelle-array-hook
+                # krijgt.
+                pass
+            else:
+                merge_segments(self.segments, tol=merge_tol,
+                              n_pipes=len(self.pipe_ids))
 
         # 9. Massabalans
         if self._tracker:
@@ -861,6 +906,54 @@ class NzingaFlowSolver:
 
         return node_C
 
+    # ── Oplossingnummer-modus (PhreeqSolutionMode) ─────────────────────────────
+
+    def _build_node_inflows(
+        self,
+        exit_mask: np.ndarray,
+        flow:      np.ndarray,
+        n:         int,
+    ) -> List[List[Tuple[int, float]]]:
+        """
+        Bouw per knoop een lijst van (oplossingnummer, debiet)-paren voor
+        de segmenten die deze stap de knoop bereiken.
+
+        Analoog aan ``node_mixing_multi`` / ``_node_mixing_kernel`` in
+        ``lta.py``, maar met PHREEQC-oplossingnummers (``self._geochem.
+        sol_ids``) in plaats van concentratievectoren als last te mengen
+        grootheid — nodig omdat ``PhreeqSolutionMode`` geen gebruik maakt
+        van de C-matrix.  Het debiet wordt hier ongenormaliseerd doorgegeven
+        (net als ``flow`` in de kernel); ``PhreeqSolutionMode.apply_mixing``
+        normaliseert zelf naar fracties per knoop.
+
+        Parameters
+        ----------
+        exit_mask : (capacity,) bool — welke segmenten deze stap exiten
+        flow      : (n_pipes,) debiet per leiding
+        n         : aantal actieve segmenten
+
+        Returns
+        -------
+        list van lengte ``node_count``; element ``nd`` is een lijst van
+        ``(sol_num, debiet)``-paren voor knoop ``nd`` (leeg als er geen
+        segment deze stap die knoop bereikt).
+        """
+        node_inflows: List[List[Tuple[int, float]]] = [
+            [] for _ in range(self.node_count)
+        ]
+        em = exit_mask[:n]
+        if not em.any():
+            return node_inflows
+
+        sol_ids  = self._geochem.sol_ids
+        exit_idx = np.where(em)[0]
+        for i in exit_idx:
+            p  = int(self.segments.pipe[i])
+            nd = int(self.pipe_end[p])
+            w  = float(flow[p])
+            node_inflows[nd].append((int(sol_ids[i]), w))
+        return node_inflows
+
     # ── Exit-verwerking ───────────────────────────────────────────────────────
 
     def _rebuild_node_routing_cache(self) -> None:
@@ -941,6 +1034,13 @@ class NzingaFlowSolver:
             # Kopieer naar exit-buffers in één bulk-operatie (geen loop)
             self._buf_exit_C[:n_end] = self.segments.C[end_idx]
             self._buf_exit_V[:n_end] = self.segments.volume[end_idx]
+            # Bij PhreeqSolutionMode (of vergelijkbare modus) moet sol_ids
+            # exact dezelfde swap-with-last ondergaan als store.remove()
+            # doet — anders raakt sol_ids[i] gekoppeld aan het verkeerde
+            # segment. Moet vóór store.remove() gebeuren: die heeft de
+            # segmentcount ván vóór de removal nodig.
+            if self._geochem is not None and hasattr(self._geochem, 'sol_ids'):
+                self._geochem.mirror_removal(end_idx.tolist(), self.segments.n)
             # Verwijder via swap-with-last
             self.segments.remove(end_idx.tolist())
 
@@ -959,6 +1059,7 @@ class NzingaFlowSolver:
             s_type = self._node_type[s_nd]
             split_only = s_idx[s_type >= 2]
 
+            use_phreeq = self._geochem is not None and hasattr(self._geochem, 'sol_ids')
             for seg_i in split_only:
                 nd    = int(self.pipe_end[self.segments.pipe[seg_i]])
                 out   = self._node_outpipes.get(nd, [])
@@ -968,6 +1069,10 @@ class NzingaFlowSolver:
                 tot_flow = sum(flow[p] for p in out_s)
                 orig_vol = self.segments.volume[seg_i]
                 orig_C[:]                   = self.segments.C[seg_i]
+                # Bewaar het oplossingnummer van het splitsende segment vóórdat
+                # het zelf wordt herschreven (het houdt het eerste uitgaande
+                # pad; de overige paden krijgen elk een eigen PHREEQC-kopie).
+                orig_sol = int(self._geochem.sol_ids[seg_i]) if use_phreeq else None
                 self.segments.pipe[seg_i]   = out_s[0]
                 self.segments.x[seg_i]      = 0.0
                 self.segments.volume[seg_i] = orig_vol * flow[out_s[0]] / tot_flow
@@ -977,6 +1082,13 @@ class NzingaFlowSolver:
                         volume=orig_vol * flow[p] / tot_flow,
                         C_vector=orig_C,
                     )
+                    if use_phreeq:
+                        # Elke afsplitsing heeft een eigen, onafhankelijk
+                        # oplossingnummer nodig — delen zou apply_geochemistry()
+                        # later een reeds-verwijderde/gemuteerde oplossing
+                        # laten opvragen zodra één van de twee kinetiek toepast.
+                        copy_num = self._geochem.copy_solution(orig_sol)
+                        self._geochem.on_segment_added(self.segments.n - 1, copy_num)
 
         return self._buf_exit_C[:n_end], self._buf_exit_V[:n_end]
 

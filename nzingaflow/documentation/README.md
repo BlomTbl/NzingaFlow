@@ -568,6 +568,69 @@ geo = chlorine_decay_geochem(k_bulk_per_day=0.5)
 geo = full_water_chemistry()
 ```
 
+#### PhreeqSolutionMode (solution-number mode)
+
+Alternative to `GeochemSolver`. Instead of storing concentrations as floats
+in the C-matrix, each segment carries a PHREEQC solution number in a
+parallel array (`sol_ids`); mixing goes through `pp.mix_solutions()`, which
+is thermodynamically exact (correct pH buffering and carbonate equilibrium
+after mixing two waters), instead of `GeochemSolver`'s linear concentration
+mixing. Use it when exact pH after mixing matters, or when downstream code
+needs direct PHREEQC solution objects (e.g. Victoria-style workflows).
+About ~2× slower than `GeochemSolver`; PHREEQC memory grows with the number
+of unique solutions, so call `garbage_collect()` regularly (or set
+`auto_gc_interval`).
+
+```python
+PhreeqSolutionMode(
+    pp,                                 # shared phreeqpython.PhreeqPython instance
+    auto_gc_interval:  int       = 100, # 0 = disabled
+    background_number: int | None = None,  # fallback solution for new segments
+)
+```
+
+| Method | Description |
+|---|---|
+| `fill(store, solution_number)` | Initialize all active segments with one copy each of the source solution |
+| `apply_geochemistry(store, dt, kinetics_fn=None, pipe_diam=None, pipe_vel=None)` | Run `kinetics_fn(sol, dt) -> sol_out` for each active segment |
+| `apply_mixing(node_C, node_flow, dt, node_inflows=None)` | Node mixing via `pp.mix_solutions()`. `node_inflows` (list per node of `(sol_num, fraction)` pairs) is required — `NzingaFlowSolver.step()` builds it automatically when `geochem` exposes `sol_ids`; without it this is a no-op |
+| `new_segment_solution(node_idx)` | Solution number for a new segment leaving `node_idx`, from the last `apply_mixing()` |
+| `on_segment_added(idx, sol_num=None)` | Register the solution number for a segment just added to the store at position `idx` |
+| `mirror_removal(indices, n_before)` | Mirror `SegmentStore.remove()`'s swap-with-last on `sol_ids` — call with the same `indices` and the store's `n` *before* `remove()` |
+| `copy_solution(sol_num)` | Independent PHREEQC copy of a solution — needed when one segment splits into several |
+| `get_solution(store, seg_idx)` | PhreeqPython solution object for one segment |
+| `get_conc(store, element, units='mg/L')` | Concentrations for all active segments as a NumPy array |
+| `garbage_collect(store, keep=None)` | Remove PHREEQC solutions no longer referenced by any active segment |
+
+Used via `NzingaFlowSolver(..., geochem=psm)`: `step()` recognises this mode
+(by the presence of `sol_ids`) and handles the bookkeeping above
+automatically — it builds `node_inflows` from the segments reaching each
+node, and keeps `sol_ids` in sync when segments are removed at end nodes or
+added at split points. One limitation: periodic segment merging
+(`merge_segments`, every `merge_interval` steps) is skipped in this mode,
+since it has no `sol_ids` remap hook and would otherwise silently
+desynchronise the array.
+
+```python
+import phreeqpython
+from nzingaflow.geochemistry import PhreeqSolutionMode
+from nzingaflow.solver import NzingaFlowSolver
+
+pp = phreeqpython.PhreeqPython()
+bg = pp.add_solution({'temp': '15', 'pH': '7.5', 'units': 'mol/L',
+                      'Ca': '1e-3', 'Cl': '2e-3', 'Alkalinity': '2.5e-3'})
+
+psm = PhreeqSolutionMode(pp, background_number=bg.number)
+solver = NzingaFlowSolver('network.inp', n_species=1, geochem=psm)
+psm.fill(solver.segments, bg.number)
+
+for _ in range(n_steps):
+    solver.step(dt=5.0, decay_k=[0.0])   # apply_geochemistry + apply_mixing run internally
+
+sol = psm.get_solution(solver.segments, seg_idx=42)
+print(sol.pH, sol.total_element('Ca'))
+```
+
 ---
 
 ### MsxReactionSystem
