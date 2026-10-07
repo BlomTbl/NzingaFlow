@@ -155,16 +155,17 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         if fn_uid not in node_index or tn_uid not in node_index:
             continue
 
-        # Geometrie — EN_DIAMETER/EN_LENGTH: mm/inch resp. altijd in de
-        # invoereenheid van het .inp (zie units.diameter_to_m()).
+        # Geometrie — EN_DIAMETER/EN_LENGTH: mm/inch resp. m/ft, in de
+        # invoereenheid van het .inp (zie units.diameter_to_m()/length_to_m()).
         try:
             diam_raw = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_DIAMETER))
-            length_m = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_LENGTH))
+            length_raw = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_LENGTH))
         except Exception:
             diam_raw = 100.0
-            length_m = 1.0
+            length_raw = 1.0
 
-        diam_m = u.diameter_to_m(diam_raw, flow_units)
+        diam_m   = u.diameter_to_m(diam_raw, flow_units)
+        length_m = float(u.length_to_m(length_raw, flow_units))
         # Kleppen en pompen krijgen een symbolische minimale lengte
         if length_m <= 0:
             length_m = 0.1

@@ -85,7 +85,7 @@ class EPSRunner:
         inject_schedule  = inject_schedule  or {}
         booster_schedule = booster_schedule or {}
         mass_schedule    = mass_schedule    or {}
-        n_steps = int(self.duration / self.qual_dt)
+        n_steps = self._n_steps()
         results = np.zeros(
             (n_steps, self.solver.node_count, self.solver.n_species),
             dtype=np.float64,
@@ -239,9 +239,22 @@ class EPSRunner:
 
                 self.solver.inject(node_uid, C_inj, volume=V_inj)
 
+    def _n_steps(self) -> int:
+        """
+        Aantal kwaliteitstijdstappen. int(duration/qual_dt) kapte af op
+        floating-point-ruis (0.3 / 0.1 = 2.9999999999999996 → 2 stappen);
+        nu wordt eerst op 1e-9 relatief afgerond.
+        """
+        return int(np.floor(self.duration / self.qual_dt + 1e-9))
+
     def time_axis(self, unit: str = 's') -> np.ndarray:
-        """Tijdas van simulatieresultaten. unit: 's', 'min' of 'h'."""
-        t = np.arange(int(self.duration / self.qual_dt)) * self.qual_dt
+        """
+        Tijdas van simulatieresultaten. unit: 's', 'min' of 'h'.
+
+        results[i] is de toestand ná kwaliteitstijdstap i, dus op
+        t = (i + 1)·qual_dt (niet i·qual_dt).
+        """
+        t = (np.arange(self._n_steps()) + 1) * self.qual_dt
         return t / {'s': 1, 'min': 60, 'h': 3600}.get(unit, 1)
 
     def __repr__(self) -> str:

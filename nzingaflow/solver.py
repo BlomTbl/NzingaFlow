@@ -76,7 +76,7 @@ class NzingaFlowSolver:
                             correctie op D_mol en k_wall (Ea_D≈17 kJ/mol, θ_w=1.047).
                             None = geen temperatuurcorrectie (Rossman 1994-compatibel).
         leakage_fraction  : fractie van leiding-debiet dat lekt (0.0–1.0).
-                            Elk segment verliest per tijdstap proportioneel volume
+                            Elk segment verlaat per tijdstap proportioneel volume
                             zonder chemicaliënadditie (concentratie onveranderd).
                             Typisch 0.05–0.20 voor NL-distributienetwerken.
         wall_mode         : hoe k_wall wordt geïnterpreteerd:
@@ -95,6 +95,8 @@ class NzingaFlowSolver:
         from .segments   import SegmentStore
         from .stability  import MassBalanceTracker
 
+        self._tracker = None
+        self._tank_release: list = []
         self.hyd = HydraulicModel(inp_path, include_valves=include_valves)
         self.hyd.solve()
 
@@ -130,15 +132,12 @@ class NzingaFlowSolver:
         self._tank_V     = self._get_tank_volumes()   # (n_tanks,) m³ — gecached
         self._tank_C     = np.zeros((len(self._tank_nodes), n_species))  # CSTR toestand
 
-        # Uitgaande leidingen per knoop
+        # Uitgaande leidingen per knoop (herbouwd na flow-reversal)
         self._node_outpipes: dict[int, list[int]] = defaultdict(list)
-        for p, s in enumerate(self.pipe_start):
-            self._node_outpipes[int(s)].append(p)
 
         # Cache van in/out leidingen per tank — herbouwd bij update_hydraulics()
         self._tank_in_pipes:  list[np.ndarray] = []   # per tank: array van inkomende pipe-indices
         self._tank_out_pipes: list[np.ndarray] = []   # per tank: array van uitgaande pipe-indices
-        self._rebuild_tank_pipe_cache()
 
         # Per-knoop exit-routing caches (herbouwd bij update_hydraulics)
         # _node_type[nd]  : 0=eindknoop, 1=doorgaand, >=2=splitsing
@@ -146,7 +145,6 @@ class NzingaFlowSolver:
         # Hiermee wordt het dominante pad in _handle_exits volledig vectorized.
         self._node_type: np.ndarray | None = None   # (node_count,) int32
         self._node_out0: np.ndarray | None = None   # (node_count,) int32
-        self._rebuild_node_routing_cache()
 
         # Wandreacties
         self._k_wall_ms  = None    # (n_pipes, n_species) [m/s], None = geen
@@ -159,11 +157,16 @@ class NzingaFlowSolver:
         # Gecached per (n_pipes, n_species); herbouwd bij nieuwe dt of hydraulica.
         self._combined_exp: np.ndarray | None = None
         self._combined_exp_dt: float = -1.0   # dt waarvoor gecached
+        self._combined_exp_k: np.ndarray | None = None  # decay_k waarvoor gecached
 
         # Hydraulica-cache
         self._flow:     np.ndarray | None = None
         self._velocity: np.ndarray | None = None
-        self._reversed: np.ndarray | None = None   # (n_pipes,) bool — flow reversal per leiding
+        self._reversed: np.ndarray | None = None   # (n_pipes,) bool — t.o.v. EPANET-definitie
+        # Corrigeer start/end voor de initiële stromingsrichting vóór routing-caches.
+        self._apply_flow_reversal()
+        self._rebuild_tank_pipe_cache()
+        self._rebuild_node_routing_cache()
         self._update_kwall_vol()   # bereken initiële k_wall_vol
 
         # Massabalans
@@ -213,7 +216,7 @@ class NzingaFlowSolver:
         _warmup(self.n_species)
         _warmup_merge(self.n_species)
 
-    # ── Beginkwaliteit ────────────────────────────────────────────────────────
+    # ── Beginkwaliteit ───────────────────────────────────────────────────────
 
     def set_initial_quality(
         self,
@@ -296,15 +299,25 @@ class NzingaFlowSolver:
                 )
 
         # ── Wis eventuele bestaande segmenten ──────────────────────────────
+        if self._tracker:
+            # Eerder geboekte massa die hier verdwijnt, terugboeken (anders telt
+            # een tweede aanroep de beginmassa dubbel).
+            self._tracker.record_injection_mass(-self._tracker.current_mass(self.segments))
         self.segments.n = 0
+
+        # Tanks starten met de concentratie van hun knoop.
+        if len(self._tank_nodes) > 0:
+            C_t_new = C_node[self._tank_nodes].copy()
+            if self._tracker and len(self._tank_V) == len(self._tank_nodes):
+                self._tracker.record_injection_mass(
+                    ((C_t_new - self._tank_C) * self._tank_V[:, np.newaxis]).sum(axis=0)
+                )
+            self._tank_C[:] = C_t_new
 
         # ── Vul elke leiding met één beginsegment ───────────────────────────
         # Upstream knoop = pipe_start (al gecorrigeerd voor flow-richting)
         n_added = 0
         for pi in range(len(self.pipe_ids)):
-            v = float(velocity[pi])
-            if v < 1e-9:
-                continue   # stilstaand water — geen segment
             L   = float(self.pipe_length[pi])
             A   = float(self.pipe_area[pi])
             vol = L * A    # totale leidinginhoud [m³]
@@ -313,10 +326,16 @@ class NzingaFlowSolver:
                 pipe=pi, x=0.0, volume=vol,
                 C_vector=C_node[src_node],
             )
+            self._sync_geochem_new_segment()
+            if self._tracker:
+                # Beginmassa boeken als 'injectie'; anders blijft injected = 0 en
+                # meldt het rapport (total_in = 0 → fout 0) onterecht 'ok'.
+                self._tracker.record_injection(C_node[src_node], vol)
             n_added += 1
 
         # Invalideer hydraulica-cache (segmenten zijn nieuw)
         self._combined_exp_dt = -1.0
+        self._combined_exp_k = None
 
     # ── Hydraulica ────────────────────────────────────────────────────────────
 
@@ -330,15 +349,41 @@ class NzingaFlowSolver:
         self.hyd.solve(simtime=simtime)
         self._flow     = None
         self._velocity = None
-        self._reversed = None
+        # _reversed niet wissen: _apply_flow_reversal() vergelijkt met de
+        # vorige masker om segmenten alleen te spiegelen bij échte richtingswissel.
         self._apply_flow_reversal()
         self._update_kwall_vol()
         self._combined_exp_dt = -1.0   # invalideer na hydraulica-update
+        self._combined_exp_k = None
         # Tankvolumes kunnen veranderen tijdens EPS (peil varieert)
         if len(self._tank_nodes) > 0:
-            self._tank_V = self._get_tank_volumes()
+            new_V = self._get_tank_volumes()
+            if self._tracker and len(new_V) == len(self._tank_V):
+                # EPANET zet het tankvolume terug op de eigen waarde: dat is water
+                # dat met de tankconcentratie bijkomt/verdwijnt → als injectie boeken.
+                self._tracker.record_injection_mass(
+                    (self._tank_C * (new_V - self._tank_V)[:, np.newaxis]).sum(axis=0)
+                )
+            self._tank_V = new_V
             self._rebuild_tank_pipe_cache()
         self._rebuild_node_routing_cache()
+
+    def _combined_exp_needs_rebuild(self, dt: float, decay_k: np.ndarray) -> bool:
+        """
+        True als de gecachede combined_exp niet meer geldt voor (dt, decay_k).
+
+        Vergelijkt decay_k exact (np.array_equal). Niet np.allclose: de
+        standaard atol=1e-8 is in 1/s zo groot (≈ 0,001/dag) dat een
+        verandering van bijv. [0.0] naar [5e-9] als "gelijk" gold en het
+        nieuwe verval stilzwijgend genegeerd werd.
+        """
+        return (
+            self._combined_exp is None
+            or self._combined_exp_dt != dt
+            or self._combined_exp_k is None
+            or self._combined_exp_k.shape != decay_k.shape
+            or not np.array_equal(self._combined_exp_k, decay_k)
+        )
 
     def _apply_flow_reversal(self) -> None:
         """
@@ -348,8 +393,15 @@ class NzingaFlowSolver:
         Leidingen waarvan EPANET een negatief debiet rapporteert stromen
         feitelijk in omgekeerde richting. We wisselen pipe_start/pipe_end om
         zodat de LTA-advectie (x loopt van 0 naar pipe_length) altijd klopt.
+
+        Segmentposities worden alleen gespiegeld voor leidingen waarvan de
+        stromingsrichting *sinds de vorige aanroep* is omgedraaid. Spiegelen
+        op de actuele reversed-masker zou x bij elke hydraulica-update
+        opnieuw omklappen zolang het debiet negatief blijft, en zou x niet
+        terugzetten wanneer de stroom weer de definitierichting op gaat.
         """
         _, _, reversed_mask = self.hyd.get_hydraulic_state()
+        prev_mask = self._reversed
 
         if not reversed_mask.any():
             # Geen reversals: zorg dat topologie terug op EPANET-waarden staat
@@ -370,24 +422,23 @@ class NzingaFlowSolver:
         for p, s in enumerate(self.pipe_start):
             self._node_outpipes[int(s)].append(p)
 
-        self._reversed = reversed_mask
-
-        # Spiegelen van segmentposities in omgekeerde leidingen.
-        # Na een flow reversal loopt x nog steeds van het OUDE startpunt.
-        # Maar pipe_start en pipe_end zijn nu omgewisseld, dus x=0 is nu
-        # het NIEUWE startpunt (= het oude eindpunt).
-        # Correctie: x_new = pipe_length - x_old  voor elk segment in een omgekeerde leiding.
+        # Spiegelen: x_new = L - x_old, alleen bij échte richtingswissel.
         n = self.segments.n
-        if n > 0 and reversed_mask.any():
-            seg_pipe   = self.segments.pipe[:n]
-            rev_pipes  = np.where(reversed_mask)[0]
-            in_rev     = np.isin(seg_pipe, rev_pipes)
-            if in_rev.any():
-                L_seg = self.pipe_length[seg_pipe[in_rev]]
-                self.segments.x[:n][in_rev] = L_seg - self.segments.x[:n][in_rev]
-                # Klamp negatieve waarden (numerieke ruis) op 0
-                np.clip(self.segments.x[:n], 0.0, None,
-                        out=self.segments.x[:n])
+        if n > 0:
+            if prev_mask is None:
+                prev_mask = np.zeros_like(reversed_mask)
+            changed = prev_mask != reversed_mask
+            if changed.any():
+                seg_pipe   = self.segments.pipe[:n]
+                chg_pipes  = np.where(changed)[0]
+                in_chg     = np.isin(seg_pipe, chg_pipes)
+                if in_chg.any():
+                    L_seg = self.pipe_length[seg_pipe[in_chg]]
+                    self.segments.x[:n][in_chg] = L_seg - self.segments.x[:n][in_chg]
+                    np.clip(self.segments.x[:n], 0.0, None,
+                            out=self.segments.x[:n])
+
+        self._reversed = reversed_mask.copy()
 
     def _get_hydraulics(self) -> tuple:
         if self._flow is None:
@@ -405,7 +456,7 @@ class NzingaFlowSolver:
             EPANET past intern hetzelfde model toe bij orde-1 wandreacties.
 
         wall_mode='direct':
-            k_wall direct als k_eff: k_vol = k_wall·4/D, geen filmweerstand.
+            k_wall direct als k_eff: k_vol=k_wall·4/D, geen filmweerstand.
             Gebruik als k_wall al een effectieve waarde is (bijv. teruggerekend
             zonder twee-film model). Voorkomt dubbele filmweerstand.
         """
@@ -617,6 +668,14 @@ class NzingaFlowSolver:
                     # kopie op — schrijf daarom via expliciete integer-indices.
                     rows = np.where(at_start)[0]
                     cols = np.where(active)[0]
+                    if self._tracker:
+                        # Massa-wijziging door het overschrijven boeken als injectie
+                        # (kan negatief zijn), anders klopt de massabalans niet.
+                        old_C = self.segments.C[np.ix_(rows, cols)]
+                        vol_r = self.segments.volume[rows][:, np.newaxis]
+                        dm = np.zeros(self.n_species, dtype=np.float64)
+                        dm[cols] = ((C_set[active] - old_C) * vol_r).sum(axis=0)
+                        self._tracker.record_injection_mass(dm)
                     self.segments.C[np.ix_(rows, cols)] = C_set[active]
                     continue
 
@@ -682,12 +741,18 @@ class NzingaFlowSolver:
         if check_cfl:
             self.check_stability(dt, decay_k, warn=True)
 
-        if n == 0:
+        # Zonder segmenten én zonder tanks valt er niets te doen. Mét tanks moet
+        # de stap doorlopen: een tank kan een leeg net opnieuw vullen.
+        if n == 0 and len(self._tank_nodes) == 0:
             return np.zeros((self.node_count, self.n_species), dtype=np.float64)
 
         # 1+2. Bulk + wandverval gecombineerd in één pass
         # combined_exp[p,s] = exp(-(k_bulk[s] + k_wall[p,s]) * dt)
         # Gecached; alleen herbouwd als dt of hydraulica verandert.
+        # Massa vóór verval (incl. tussentijdse injecties) voor exacte boekhouding.
+        if self._tracker:
+            _mass_pre = self.segments.C[:n] * self.segments.volume[:n, np.newaxis]
+
         if self._geochem is not None:
             pipe_diam = np.sqrt(4 * self.pipe_area / np.pi)
             _, velocity = self._get_hydraulics()
@@ -697,21 +762,37 @@ class NzingaFlowSolver:
                 pipe_vel=velocity,
             )
         else:
-            if self._combined_exp is None or self._combined_exp_dt != dt:
-                self._combined_exp    = build_combined_exp(
+            if self._combined_exp_needs_rebuild(dt, decay_k):
+                self._combined_exp = build_combined_exp(
                     decay_k, self._k_wall_vol, dt, len(self.pipe_ids)
                 )
                 self._combined_exp_dt = dt
+                self._combined_exp_k = decay_k.copy()
             combined_decay_multi(
                 self.segments.C, self.segments.pipe,
                 self._combined_exp, n=n,
             )
 
+        decay_loss = None
+        if self._tracker:
+            loss_seg = _mass_pre - self.segments.C[:n] * self.segments.volume[:n, np.newaxis]
+            if self._geochem is not None:
+                # Netto-verandering door geochemie: alles onder 'bulk' boeken.
+                decay_loss = (loss_seg.sum(axis=0), np.zeros(self.n_species))
+            else:
+                kw = (self._k_wall_vol[self.segments.pipe[:n]]
+                      if self._k_wall_vol is not None else 0.0)
+                k_tot = decay_k[np.newaxis, :] + kw
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    share_b = np.where(k_tot > 0.0, decay_k[np.newaxis, :] / k_tot, 0.0)
+                bulk = (loss_seg * share_b).sum(axis=0)
+                decay_loss = (bulk, loss_seg.sum(axis=0) - bulk)
+
         # 3. Advectie
         advect(self.segments.x, self.segments.pipe, velocity, dt, n=n)
 
         # 3b. Lekkage: proportioneel volume-verlies per segment
-        # Elk segment verliest een fractie _leakage_fraction van zijn volume
+        # Elk segment verlaat een fractie _leakage_fraction van zijn volume
         # per tijdstap, overeenkomend met het debietverlies door emitters/lekkage.
         # De concentratie blijft constant (geconserveerd mengmodel): het segment
         # krimpt, maar er stroomt geen extern water in. Bij zuigslag (negatief
@@ -725,7 +806,14 @@ class NzingaFlowSolver:
             safe_vel = np.maximum(velocity[self.segments.pipe[:n]], 1e-6)
             t_verblijf = self.pipe_length[self.segments.pipe[:n]] / safe_vel
             lam_lek    = self._leakage_fraction / np.maximum(t_verblijf, 1.0)
+            if self._tracker:
+                _v_old = self.segments.volume[:n].copy()
             self.segments.volume[:n] *= np.exp(-lam_lek * dt)
+            if self._tracker:
+                dV = _v_old - self.segments.volume[:n]
+                self._tracker.record_leakage(
+                    (self.segments.C[:n] * dV[:, np.newaxis]).sum(axis=0)
+                )
 
         # 4. Exit-detectie — in-place in pre-allocated buffer
         exit_detect(
@@ -774,10 +862,14 @@ class NzingaFlowSolver:
 
         # 6. Tank-update
         if len(self._tank_nodes) > 0:
-            node_C = self._update_tanks(node_C, flow, decay_k, dt)
+            node_C = self._update_tanks(node_C, flow, decay_k, dt,
+                                    exit_mask=exit_mask, n=n)
 
         # 7. Pipe-overgang
         exited_C, exited_V = self._handle_exits(exit_mask, flow)
+
+        # 7b. Tanks geven water af aan hun uitgaande leidingen
+        self._release_tanks(flow, dt)
 
         # 8. Merging
         self._step_counter += 1
@@ -799,6 +891,7 @@ class NzingaFlowSolver:
             self._tracker.record_step(
                 self.segments, decay_k, dt,
                 self._k_wall_vol, exited_C, exited_V,
+                decay_loss=decay_loss,
             )
 
         return node_C
@@ -811,7 +904,10 @@ class NzingaFlowSolver:
         """
         if not self._tracker:
             return None
-        return self._tracker.report(self.segments)
+        tank_mass = None
+        if len(self._tank_nodes) and len(self._tank_V) == len(self._tank_nodes):
+            tank_mass = (self._tank_C * self._tank_V[:, np.newaxis]).sum(axis=0)
+        return self._tracker.report(self.segments, tank_mass=tank_mass)
 
     # ── Tank-model ────────────────────────────────────────────────────────────
 
@@ -859,10 +955,14 @@ class NzingaFlowSolver:
         bestaat niet op EPYnetDTD's Tank en gaf hier voorheen altijd de
         stille 1000.0-fallback, voor élke tank, ongeacht het echte volume.
         """
+        from . import units as _u
+        # EPANET geeft tankvolume in ft³ bij US-flow-eenheden (net als lengte in ft).
+        get_units = getattr(self.hyd, '_get_flow_units', None)
+        units = get_units() if callable(get_units) else 'CMH'
         volumes = []
         for n in self.hyd.net.tanks:
             try:
-                volumes.append(float(n.tank_volume))
+                volumes.append(float(_u.volume_to_m3(float(n.tank_volume), units)))
             except Exception:
                 volumes.append(1000.0)   # veilige standaard
         return np.array(volumes, dtype=np.float64) if volumes else np.array([])
@@ -873,38 +973,102 @@ class NzingaFlowSolver:
         flow:    np.ndarray,
         decay_k: np.ndarray,
         dt:      float,
+        exit_mask: np.ndarray | None = None,
+        n:         int | None = None,
     ) -> np.ndarray:
         """
-        Pas CSTR-tankmodel toe en schrijf tankconcentraties naar node_C.
+        Massabehoudend CSTR-tankmodel (impliciet Euler) met tankmassa als toestand.
 
-        Gebruikt gecachede in/out pipe-lijsten per tank (zie _rebuild_tank_pipe_cache)
-        zodat geen O(n_tanks × n_pipes) np.where()-aanroepen nodig zijn per tijdstap.
+        Per stap, per tank (V_start = huidig tankvolume):
+            V_in    = Σ volume van de segmenten die de tank deze stap bereiken
+            C_in    = volumegewogen concentratie van die segmenten
+            V_after = V_start + V_in − Q_out·dt          (≥ 1e-9)
+            M_new   = (M_old + V_in·C_in) / (1 + Q_out·dt/V_after + k·dt)
+            C_new   = M_new / V_after
+
+        Dit is exact massabehoudend: M_new − M_old = V_in·C_in − Q_out·dt·C_new
+        − k·M_new·dt, met Q_out·dt·C_new de massa die via _release_tanks() als
+        nieuw segment de uitgaande leidingen in gaat. Instroom komt uit de
+        daadwerkelijk aangekomen segmenten (niet uit het hydraulische debiet:
+        node_C[tank] was 0 op stappen zonder aankomst → verdunning uit het niets).
+
+        Zonder exit_mask wordt de oude (niet massabehoudende) variant gebruikt:
+        tank_step_implicit() met hydraulisch Q_in, zonder afgifte aan leidingen.
         """
         from .lta import tank_step_implicit
 
-        if len(self._tank_nodes) == 0:
+        n_tanks = len(self._tank_nodes)
+        self._tank_release = []
+        if n_tanks == 0:
             return node_C
 
-        n_tanks = len(self._tank_nodes)
-        # Gebruik pre-allocated buffers — geen nieuwe arrays per tijdstap
-        Q_in  = self._buf_Q_in[:n_tanks];  Q_in[:]  = 0.0
-        Q_out = self._buf_Q_out[:n_tanks]; Q_out[:] = 0.0
-        C_in  = self._buf_C_in[:n_tanks];  C_in[:]  = 0.0
+        if exit_mask is None:
+            Q_in  = self._buf_Q_in[:n_tanks];  Q_in[:]  = 0.0
+            Q_out = self._buf_Q_out[:n_tanks]; Q_out[:] = 0.0
+            C_in  = self._buf_C_in[:n_tanks];  C_in[:]  = 0.0
+            for ti, tank_node in enumerate(self._tank_nodes):
+                ip, op = self._tank_in_pipes[ti], self._tank_out_pipes[ti]
+                Q_in[ti]  = flow[ip].sum() if len(ip) else 0.0
+                Q_out[ti] = flow[op].sum() if len(op) else 0.0
+                C_in[ti]  = node_C[tank_node]
+            if len(self._tank_V) == n_tanks:
+                tank_step_implicit(self._tank_C, Q_in, C_in, Q_out, self._tank_V, decay_k, dt)
+                node_C[self._tank_nodes] = self._tank_C
+            return node_C
 
+        if len(self._tank_V) != n_tanks:
+            return node_C
+
+        n_act = self.segments.n if n is None else n
+        em    = exit_mask[:n_act]
+        exit_idx = np.where(em)[0] if em.any() else np.empty(0, dtype=np.int64)
+        exit_end = self.pipe_end[self.segments.pipe[exit_idx]] if exit_idx.size else exit_idx
+
+        V_in  = np.zeros(n_tanks)
+        C_in  = np.zeros((n_tanks, self.n_species))
+        Q_out = np.zeros(n_tanks)
         for ti, tank_node in enumerate(self._tank_nodes):
-            in_pipes  = self._tank_in_pipes[ti]
-            out_pipes = self._tank_out_pipes[ti]
-            Q_in[ti]  = flow[in_pipes].sum()  if len(in_pipes)  else 0.0
-            Q_out[ti] = flow[out_pipes].sum() if len(out_pipes) else 0.0
-            C_in[ti]  = node_C[tank_node]
+            op = self._tank_out_pipes[ti]
+            Q_out[ti] = flow[op].sum() if len(op) else 0.0
+            idx = exit_idx[exit_end == tank_node] if exit_idx.size else exit_idx
+            if idx.size:
+                vols = self.segments.volume[idx]
+                v_tot = float(vols.sum())
+                if v_tot > 0.0:
+                    V_in[ti] = v_tot
+                    C_in[ti] = (self.segments.C[idx] * vols[:, np.newaxis]).sum(axis=0) / v_tot
 
-        # CSTR update (in-place op self._tank_C) — gebruik gecachede volumes
-        if len(self._tank_V) == len(self._tank_nodes):
-            tank_step_implicit(self._tank_C, Q_in, C_in, Q_out, self._tank_V, decay_k, dt)
-            # Schrijf tankconcentraties terug naar node_C
-            node_C[self._tank_nodes] = self._tank_C
+        V_start = np.asarray(self._tank_V, dtype=np.float64)
+        M_old   = self._tank_C * V_start[:, np.newaxis]
+        V_after = np.maximum(V_start + V_in - Q_out * dt, 1e-9)
+        denom   = 1.0 + (Q_out * dt / V_after)[:, np.newaxis] + decay_k[np.newaxis, :] * dt
+        M_new   = (M_old + V_in[:, np.newaxis] * C_in) / denom
+        C_new   = M_new / V_after[:, np.newaxis]
 
+        if self._tracker:
+            self._tracker.record_tank_decay(
+                (decay_k[np.newaxis, :] * M_new * dt).sum(axis=0)
+            )
+
+        self._tank_C[:] = C_new
+        self._tank_V    = V_after
+        node_C[self._tank_nodes] = self._tank_C
+
+        # Afgifte wordt na _handle_exits toegevoegd (segmentarrays mogen tijdens
+        # de exitverwerking niet groeien: exit_mask hoort bij de oude n).
+        for ti in range(n_tanks):
+            for p in self._tank_out_pipes[ti]:
+                vol = float(flow[p]) * dt
+                if vol > 0.0:
+                    self._tank_release.append((int(p), vol, C_new[ti].copy()))
         return node_C
+
+    def _release_tanks(self, flow: np.ndarray, dt: float) -> None:
+        """Voeg het door _update_tanks berekende tankwater toe als segmenten (x = 0)."""
+        for p, vol, C in getattr(self, '_tank_release', ()):
+            self.segments.add(pipe=p, x=0.0, volume=vol, C_vector=C)
+            self._sync_geochem_new_segment()
+        self._tank_release = []
 
     # ── Oplossingnummer-modus (PhreeqSolutionMode) ─────────────────────────────
 
@@ -954,6 +1118,28 @@ class NzingaFlowSolver:
             node_inflows[nd].append((int(sol_ids[i]), w))
         return node_inflows
 
+    def _phreeq_mixed_number(self, node_idx: int) -> int | None:
+        """Oplossingnummer na apply_mixing voor deze knoop, of None."""
+        node_sols = getattr(self._geochem, '_node_solutions', None)
+        if not node_sols:
+            return None
+        return node_sols.get(int(node_idx))
+
+    def _assign_phreeq_mixed(self, seg_indices, node_ids) -> None:
+        """
+        Koppel doorgaande exit-segmenten aan de gemengde knoopoplossing.
+
+        Elk segment krijgt een eigen PHREEQC-kopie: delen van één nummer
+        zou latere kinetiek de oplossing van een ander segment muteren.
+        Ontbreekt een mengresultaat, dan blijft het bestaande sol_ids-nummer.
+        """
+        geo = self._geochem
+        for seg_i, nd in zip(seg_indices, node_ids):
+            mixed = self._phreeq_mixed_number(int(nd))
+            if mixed is None:
+                continue
+            geo.sol_ids[int(seg_i)] = geo.copy_solution(mixed)
+
     # ── Exit-verwerking ───────────────────────────────────────────────────────
 
     def _rebuild_node_routing_cache(self) -> None:
@@ -977,8 +1163,41 @@ class NzingaFlowSolver:
             [self._node_outpipes.get(i, [0])[0] for i in range(nc)],
             dtype=np.int32,
         )
+        # Tanks absorberen aankomende segmenten (water gaat de tank in, zie
+        # _update_tanks) en geven water af via _release_tanks(): geen doorgaande
+        # of splitsende routing, ook niet als er uitgaande leidingen zijn.
+        is_tank = np.zeros(nc, dtype=bool)
+        if len(self._tank_nodes):
+            is_tank[self._tank_nodes] = True
+            node_type[self._tank_nodes] = 0
+        self._is_tank_node = is_tank
         self._node_type = node_type
         self._node_out0 = node_out0
+
+    # ── Overshoot-carry bij leidingovergang ───────────────────────────────────
+
+    _CARRY_EPS = 1e-12   # houdt x strikt < L zodat een segment niet in dezelfde stap opnieuw "exit"
+
+    def _excess_time(self, x: float, pipe: int, vel: np.ndarray) -> float:
+        """Tijd [s] dat segment al voorbij het einde van `pipe` is (x > L)."""
+        v = float(vel[pipe])
+        if v <= 1e-12:
+            return 0.0
+        return max(x - float(self.pipe_length[pipe]), 0.0) / v
+
+    def _x_after_carry(self, t_excess: float, new_pipe: int, vel: np.ndarray) -> float:
+        """Startpositie in `new_pipe` na `t_excess` seconden stroming daarin."""
+        L = float(self.pipe_length[new_pipe])
+        x = t_excess * float(vel[new_pipe])
+        return min(x, L * (1.0 - self._CARRY_EPS))
+
+    def _carry_over_x(self, x, old_pipes, new_pipes, vel) -> np.ndarray:
+        """Vectorized variant van _excess_time + _x_after_carry."""
+        v_old  = vel[old_pipes]
+        excess = np.maximum(x - self.pipe_length[old_pipes], 0.0)
+        t_ex   = np.where(v_old > 1e-12, excess / np.maximum(v_old, 1e-12), 0.0)
+        x_new  = t_ex * vel[new_pipes]
+        return np.minimum(x_new, self.pipe_length[new_pipes] * (1.0 - self._CARRY_EPS))
 
     def _handle_exits(
         self,
@@ -1019,21 +1238,33 @@ class NzingaFlowSolver:
         nd_type    = self._node_type[exit_nodes]                  # (n_exit,)
 
         # ── 1. Doorgaand: volledig vectorized ─────────────────────────────
+        _, vel = self._get_hydraulics()
         thru_sel = nd_type == 1
         if thru_sel.any():
             thru_idx = exit_idx[thru_sel]
             thru_nd  = exit_nodes[thru_sel]
-            self.segments.pipe[thru_idx] = self._node_out0[thru_nd]
-            self.segments.x[thru_idx]    = 0.0
+            old_p    = self.segments.pipe[thru_idx].copy()
+            new_p    = self._node_out0[thru_nd]
+            x_new    = self._carry_over_x(self.segments.x[thru_idx], old_p, new_p, vel)
+            self.segments.pipe[thru_idx] = new_p
+            self.segments.x[thru_idx]    = x_new
+            if self._geochem is not None and hasattr(self._geochem, 'sol_ids'):
+                self._assign_phreeq_mixed(thru_idx, thru_nd)
 
         # ── 2. Eindknopen: vectorized kopieer, dan bulk-remove ─────────────
         end_sel = nd_type == 0
         n_end   = int(end_sel.sum())
+        n_out   = 0
         if n_end > 0:
             end_idx = exit_idx[end_sel]
-            # Kopieer naar exit-buffers in één bulk-operatie (geen loop)
-            self._buf_exit_C[:n_end] = self.segments.C[end_idx]
-            self._buf_exit_V[:n_end] = self.segments.volume[end_idx]
+            # Kopieer naar exit-buffers in één bulk-operatie (geen loop).
+            # Aankomsten bij een tank verlaten het systeem niet: die massa zit
+            # daarna in de tank (zie _update_tanks) en telt dus niet als outflow.
+            out_sel = ~self._is_tank_node[exit_nodes[end_sel]]
+            out_idx = end_idx[out_sel]
+            n_out   = int(out_idx.size)
+            self._buf_exit_C[:n_out] = self.segments.C[out_idx]
+            self._buf_exit_V[:n_out] = self.segments.volume[out_idx]
             # Bij PhreeqSolutionMode (of vergelijkbare modus) moet sol_ids
             # exact dezelfde swap-with-last ondergaan als store.remove()
             # doet — anders raakt sol_ids[i] gekoppeld aan het verkeerde
@@ -1068,29 +1299,32 @@ class NzingaFlowSolver:
                 out_s    = sorted(out, key=lambda p: -flow[p])
                 tot_flow = sum(flow[p] for p in out_s)
                 orig_vol = self.segments.volume[seg_i]
-                orig_C[:]                   = self.segments.C[seg_i]
-                # Bewaar het oplossingnummer van het splitsende segment vóórdat
-                # het zelf wordt herschreven (het houdt het eerste uitgaande
-                # pad; de overige paden krijgen elk een eigen PHREEQC-kopie).
+                orig_C[:] = self.segments.C[seg_i]
                 orig_sol = int(self._geochem.sol_ids[seg_i]) if use_phreeq else None
+                old_p    = int(self.segments.pipe[seg_i])
+                t_excess = self._excess_time(float(self.segments.x[seg_i]), old_p, vel)
+
                 self.segments.pipe[seg_i]   = out_s[0]
-                self.segments.x[seg_i]      = 0.0
+                self.segments.x[seg_i]      = self._x_after_carry(t_excess, out_s[0], vel)
+                if tot_flow <= 0.0:
+                    # Geen uitgaande debiet: behoud massabalans door het segment
+                    # op het dominante uitgangspad te houden zonder te splitsen.
+                    self.segments.volume[seg_i] = orig_vol
+                    if use_phreeq and orig_sol is not None:
+                        self._geochem.sol_ids[seg_i] = self._geochem.copy_solution(orig_sol)
+                    continue
                 self.segments.volume[seg_i] = orig_vol * flow[out_s[0]] / tot_flow
                 for p in out_s[1:]:
                     self.segments.add(
-                        pipe=p, x=0.0,
+                        pipe=p, x=self._x_after_carry(t_excess, p, vel),
                         volume=orig_vol * flow[p] / tot_flow,
                         C_vector=orig_C,
                     )
-                    if use_phreeq:
-                        # Elke afsplitsing heeft een eigen, onafhankelijk
-                        # oplossingnummer nodig — delen zou apply_geochemistry()
-                        # later een reeds-verwijderde/gemuteerde oplossing
-                        # laten opvragen zodra één van de twee kinetiek toepast.
+                    if use_phreeq and orig_sol is not None:
                         copy_num = self._geochem.copy_solution(orig_sol)
                         self._geochem.on_segment_added(self.segments.n - 1, copy_num)
 
-        return self._buf_exit_C[:n_end], self._buf_exit_V[:n_end]
+        return self._buf_exit_C[:n_out], self._buf_exit_V[:n_out]
 
     # ── Hulpfuncties ──────────────────────────────────────────────────────────
 

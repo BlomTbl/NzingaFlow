@@ -1,5 +1,69 @@
 # Changelog
 
+## [Unreleased]
+
+### Bugfix (batch 2) — overshoot at pipe transitions, tank inflow, CFL, mass balance, EPS step count
+
+- **`solver._handle_exits()` — overshoot dropped.** A segment that left a pipe
+  was placed at `x = 0` in the next pipe, discarding the distance already
+  travelled beyond the pipe end (`x − L`). Every pipe transit was therefore
+  rounded up to a whole number of time steps (≈ dt/2 too long on average per
+  pipe). The excess is now carried over as *time* (`(x − L)/v_old`) and
+  converted with the new pipe's velocity, for through-nodes and splits. Capped
+  just below the new pipe's length so a segment never exits twice in one step.
+- **`solver._update_tanks()` — dilution from nothing.** `Q_in` came from the
+  hydraulic flow, but `node_C[tank]` was 0 on every step without an arriving
+  segment, so the tank was diluted with C = 0 while no mass entered. Inflow is
+  now taken from the segments that actually reach the tank this step
+  (`Q_in = ΣV/dt`, volume-weighted `C_in`).
+- **`stability.recommended_dt()` / `check_dt()` — zero-length elements.**
+  Valves (`include_valves=True`) have length 0 and gave `dt_CFL = 0`, so every
+  dt counted as a CFL violation. Zero-length elements are now ignored.
+- **`MassBalanceTracker`** — (a) leakage mass was never booked (new
+  `leakage` counter and `record_leakage()`); (b) `booster_inject()` overwriting
+  existing segments changed the mass without booking it (new
+  `record_injection_mass()`); (c) decay was estimated from the previous step's
+  mass, missing decay of mass injected in between, and summed bulk and wall
+  losses over the full mass. The solver now measures decay exactly around the
+  decay pass and splits it per segment (`k_bulk/(k_bulk+k_wall)`);
+  `record_step(..., decay_loss=...)` accepts it, the old estimate remains the
+  default for direct callers.
+- **`set_initial_quality()`** did not book the initial mass in the tracker: `injected` stayed 0 and `balance_error` reported 0 (`ok=True`) regardless of the real error. Now booked as injection (verified on EPANET `net1.inp`: error 1e-16).
+- **`EPSRunner`** — `int(duration/qual_dt)` truncated float noise
+  (`0.3/0.1 → 2` steps). New `_n_steps()`, also used by `time_axis()`.
+- **Tank source (new).** Tank nodes now absorb arriving segments (routing type
+  0, also with outflow pipes) and release water to their outflow pipes as new
+  segments at `x = 0` (`volume = Q·dt`, `C = C_tank`), so `_tank_C` finally
+  drives the transport. The CSTR is mass-conserving with tank mass as state:
+  `V_after = V + V_in − Q_out·dt`, `M_new = (M_old + V_in·C_in)/(1 + Q_out·dt/V_after + k·dt)`.
+  `set_initial_quality()` initialises tanks from their node concentration;
+  `mass_balance()` reports `in_tanks`, tank decay is booked as bulk decay, and
+  the EPANET volume reset at `update_hydraulics()` is booked as an injection.
+  `step()` no longer returns early with 0 segments when tanks exist.
+  `PhreeqSolutionMode`: released tank water gets the background solution.
+- **`solver._get_tank_volumes()` — units.** EPANET returns tank volume in ft³
+  for US flow units; it was used as m³ (6980 m³ read as 246 500 on `net1.inp`).
+  New `units.volume_to_m3()`.
+- Tests: `tests/test_regressions_batch2.py` (most fail on the batch-1 code).
+
+### Bugfix — decay cache, pipe length (US units), tank CSTR, time_axis
+
+- **`solver.step()` — stale decay cache.** The rebuild check used
+  `np.allclose(..., atol=1e-8)`; in 1/s that is ≈ 0.001/day, so a change such as
+  `decay_k` `[0.0]` → `[5e-9]` was silently ignored. Now an exact comparison
+  (`np.array_equal` + shape check) via `_combined_exp_needs_rebuild()`.
+- **`hydraulics.get_topology()` / `parse_inp()` — pipe length.** EPANET reports
+  length in ft for US flow units (GPM, CFS, MGD, IMGD, AFD); it was not
+  converted (travel times 3.28× too long). New: `units.length_to_m()`.
+- **`lta.tank_step_implicit()` — CSTR formula.** The denominator used `Q_out`
+  instead of `Q_in`; wrong whenever Q_in ≠ Q_out (a draining tank diluted, a
+  filling tank did not, C could exceed C_in). Correct form:
+  `V·dC/dt = Q_in·(C_in − C) − k·V·C`. Unchanged for Q_in = Q_out. An empty
+  tank (V = 0) produced `NaN`; V is now clamped.
+- **`EPSRunner.time_axis()`** started at 0; `results[i]` belongs to `(i+1)·qual_dt`.
+- Tests: `tests/test_regressions_batch1.py`; `test_mass_balance_tank` (in
+  `test_inzingaflow.py` and `test_validation.py`) encoded the old formula and was updated.
+
 ## [1.3.1] — 2026-09-17
 
 ### Bugfix — `PhreeqSolutionMode` was never actually wired into the simulation loop

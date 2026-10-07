@@ -49,8 +49,9 @@ __all__ = [
     "EN_CountType", "EN_InitHydOption", "EN_LinkProperty",
     "EN_NodeProperty", "EN_StatusReport", "EN_TimeParameter",
     "FLOW_CODE_TO_LABEL", "FLOW_TO_M3S", "US_UNITS",
-    "INCH_TO_M", "FT_S_TO_M_S",
+    "INCH_TO_M", "FT_S_TO_M_S", "FT_TO_M",
     "flow_units_label", "diameter_to_m", "velocity_to_ms", "flow_to_m3s",
+    "length_to_m", "volume_to_m3", "FT3_TO_M3",
 ]
 
 # ── Flow-eenheden ────────────────────────────────────────────────────────────
@@ -93,6 +94,8 @@ US_UNITS: frozenset[str] = frozenset({'CFS', 'GPM', 'MGD', 'IMGD', 'AFD'})
 
 INCH_TO_M: float = 0.0254
 FT_S_TO_M_S: float = 0.3048
+FT_TO_M: float = 0.3048   # leidinglengte: ft → m (US-eenheden)
+FT3_TO_M3: float = FT_TO_M ** 3   # tankvolume: ft³ → m³ (US-eenheden)
 
 
 def flow_units_label(net) -> str:
@@ -126,6 +129,32 @@ def diameter_to_m(diameter, units: str):
     if units in US_UNITS:
         return diameter * INCH_TO_M
     return diameter / 1000.0
+
+
+def length_to_m(length, units: str):
+    """
+    Converteer leidinglengte (scalar of ndarray) van EPANET-eenheden naar meter.
+
+    EPANET-conventie (EN_getlinkvalue(..., EN_LENGTH)):
+        SI  (CMH, LPS, LPM, MLD, CMD) : lengte in m  (geen conversie nodig)
+        US  (CFS, GPM, MGD, IMGD, AFD): lengte in ft → m via FT_TO_M
+    """
+    if units in US_UNITS:
+        return length * FT_TO_M
+    return length
+
+
+def volume_to_m3(volume, units: str):
+    """
+    Converteer volume (scalar of ndarray) van EPANET-eenheden naar m³.
+
+    EPANET-conventie (EN_getnodevalue(..., EN_TANKVOLUME)):
+        SI  (CMH, LPS, LPM, MLD, CMD) : m³  (geen conversie nodig)
+        US  (CFS, GPM, MGD, IMGD, AFD): ft³ → m³ via FT3_TO_M3
+    """
+    if units in US_UNITS:
+        return volume * FT3_TO_M3
+    return volume
 
 
 def velocity_to_ms(velocity, units: str):

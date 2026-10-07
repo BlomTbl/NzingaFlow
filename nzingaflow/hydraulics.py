@@ -376,10 +376,13 @@ class HydraulicModel:
         # getattr(..., 0.0) voorkomt een AttributeError zodra include_valves=True
         # en behandelt een valve in topologie-berekeningen als een lengteloos
         # verbindingselement (lengte 0 m).
-        pipe_length = np.array(
+        # Lengte → m: EPANET geeft ft terug bij US-flow-eenheden (net als
+        # diameter in inch en snelheid in ft/s), zie units.length_to_m().
+        length_raw  = np.array(
             [getattr(lnk, 'length', 0.0) for lnk in links],
             dtype=np.float64,
         )
+        pipe_length = u.length_to_m(length_raw, units)
 
         # ── Diameter → m ───────────────────────────────────────────────────────
         # NB: epynet Pump-objecten hebben geen 'diameter' static_property

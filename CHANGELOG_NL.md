@@ -1,5 +1,70 @@
 # Changelog
 
+## [Unreleased]
+
+### Bugfix (batch 2) — overshoot bij leidingovergang, tankinstroom, CFL, massabalans, EPS-stappen
+
+- **`solver._handle_exits()` — overshoot weggegooid.** Een segment dat een
+  leiding verliet kwam in de volgende leiding op `x = 0`, waardoor de al
+  afgelegde afstand voorbij het leidingeinde (`x − L`) verloren ging. Elke
+  leidingpassage werd zo naar boven afgerond op een geheel aantal tijdstappen
+  (gemiddeld ≈ dt/2 te lang per leiding). De overshoot wordt nu als *tijd*
+  meegenomen (`(x − L)/v_oud`) en met de snelheid van de nieuwe leiding
+  omgerekend, voor doorgaande knopen en splitsingen. Begrensd net onder de
+  lengte van de nieuwe leiding, zodat een segment nooit twee keer in één stap exit.
+- **`solver._update_tanks()` — verdunning uit het niets.** `Q_in` kwam uit het
+  hydraulische debiet, maar `node_C[tank]` was 0 op elke stap zonder aankomend
+  segment: de tank werd verdund met C = 0 terwijl er geen massa binnenkwam. De
+  instroom komt nu uit de segmenten die de tank deze stap werkelijk bereiken
+  (`Q_in = ΣV/dt`, volumegewogen `C_in`).
+- **`stability.recommended_dt()` / `check_dt()` — lengte-0 elementen.**
+  Afsluiters (`include_valves=True`) hebben lengte 0 en gaven `dt_CFL = 0`,
+  waardoor elke dt als CFL-schending gold. Lengte-0 elementen worden genegeerd.
+- **`MassBalanceTracker`** — (a) lekmassa werd nooit geboekt (nieuwe
+  teller `leakage` en `record_leakage()`); (b) `booster_inject()` die bestaande
+  segmenten overschrijft veranderde de massa zonder boeking (nieuw
+  `record_injection_mass()`); (c) verval werd geschat op de massa van de vorige
+  stap, miste verval van tussentijds geïnjecteerde massa en telde bulk- en
+  wandverlies over de volle massa. De solver meet verval nu exact rond de
+  vervalstap en splitst per segment (`k_bulk/(k_bulk+k_wall)`);
+  `record_step(..., decay_loss=...)` accepteert dat, de oude schatting blijft
+  standaard voor directe aanroepers.
+- **`set_initial_quality()`** boekte de beginmassa niet in de tracker: `injected` bleef 0 en `balance_error` meldde 0 (`ok=True`) ongeacht de werkelijke fout. Wordt nu als injectie geboekt (gecontroleerd op EPANET `net1.inp`: fout 1e-16).
+- **`EPSRunner`** — `int(duration/qual_dt)` kapte af op float-ruis
+  (`0.3/0.1 → 2` stappen). Nieuw `_n_steps()`, ook gebruikt door `time_axis()`.
+- **Tankbron (nieuw).** Tankknopen absorberen nu aankomende segmenten
+  (routingtype 0, ook met uitgaande leidingen) en geven water af aan hun
+  uitgaande leidingen als nieuwe segmenten op `x = 0` (`volume = Q·dt`,
+  `C = C_tank`), waardoor `_tank_C` eindelijk het transport aanstuurt. De CSTR
+  is massabehoudend met tankmassa als toestand: `V_na = V + V_in − Q_uit·dt`,
+  `M_nieuw = (M_oud + V_in·C_in)/(1 + Q_uit·dt/V_na + k·dt)`.
+  `set_initial_quality()` initialiseert tanks met de knoopconcentratie;
+  `mass_balance()` rapporteert `in_tanks`, tankverval wordt als bulkverval
+  geboekt en de EPANET-volumereset bij `update_hydraulics()` als injectie.
+  `step()` keert niet meer vroeg terug bij 0 segmenten als er tanks zijn.
+  `PhreeqSolutionMode`: afgegeven tankwater krijgt de achtergrondoplossing.
+- **`solver._get_tank_volumes()` — eenheden.** EPANET geeft tankvolume in ft³
+  bij US-flow-eenheden; dat werd als m³ gebruikt (6980 m³ werd 246 500 op
+  `net1.inp`). Nieuw: `units.volume_to_m3()`.
+- Tests: `tests/test_regressions_batch2.py` (de meeste falen op de batch-1-code).
+
+### Bugfix — decay cache, leidinglengte (US-eenheden), tank-CSTR, time_axis
+
+- **`solver.step()` — stale decay-cache.** Herbouw-controle gebruikte
+  `np.allclose(..., atol=1e-8)`; in 1/s is dat ≈ 0,001/dag, dus een wijziging
+  van bijv. `decay_k` `[0.0]` → `[5e-9]` werd stilzwijgend genegeerd. Nu exacte
+  vergelijking (`np.array_equal` + shape-check) via `_combined_exp_needs_rebuild()`.
+- **`hydraulics.get_topology()` / `parse_inp()` — leidinglengte.** EPANET geeft
+  lengte in ft bij US-flow-eenheden (GPM, CFS, MGD, IMGD, AFD); die werd niet
+  omgerekend (reistijden 3,28× te lang). Nieuw: `units.length_to_m()`.
+- **`lta.tank_step_implicit()` — CSTR-formule.** Noemer bevatte `Q_out` i.p.v.
+  `Q_in`; fout zodra Q_in ≠ Q_out (leegstromende tank verdunde, vullende tank
+  verdunde niet, C kon boven C_in uitkomen). Correct: `V·dC/dt = Q_in·(C_in−C) − k·V·C`.
+  Voor Q_in = Q_out ongewijzigd. Lege tank (V = 0) gaf `NaN`; V wordt nu begrensd.
+- **`EPSRunner.time_axis()`** begon bij 0; `results[i]` hoort bij `(i+1)·qual_dt`.
+- Tests: `tests/test_regressions_batch1.py`; `test_mass_balance_tank` (in
+  `test_inzingaflow.py` en `test_validation.py`) legde de oude formule vast en is aangepast.
+
 ## [1.3.1] — 2026-09-17
 
 ### Bugfix — `PhreeqSolutionMode` was nooit daadwerkelijk aangesloten op de simulatielus
