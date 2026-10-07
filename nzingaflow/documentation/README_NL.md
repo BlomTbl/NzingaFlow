@@ -5,8 +5,8 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.2-informational)](CHANGELOG.md)
+[![License](https://img.shields.io/badge/license-MIT-green)](../LICENSE)
+[![Version](https://img.shields.io/badge/version-1.3.1-informational)](../CHANGELOG_NL.md)
 
 NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken via de **Lagrangian Transport Approach (LTA)**. Stoffen reizen als discrete segmenten mee met de waterstroming — zonder de numerieke diffusie van Euleriaanse methoden. Alle kernberekeningen zijn volledig gevectoriseerd met NumPy en optioneel versneld met Numba JIT-compilatie.
 
@@ -25,6 +25,7 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
   - [SegmentStore](#segmentstore)
   - [LTA-kernfuncties](#lta-kernfuncties)
   - [GeochemSolver & SpeciesMap](#geochemsolver--speciesmap)
+    - [PhreeqSolutionMode](#phreeqsolutionmode-oplossingnummer-modus)
   - [MsxReactionSystem](#msxreactionsystem)
   - [MsxSimulation & MsxNativeLib](#msxsimulation--msxnativelib)
   - [Stabiliteitsfuncties](#stabiliteitsfuncties)
@@ -46,9 +47,9 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
 - **Temperatuurcorrectie** — Arrhenius/Hayduk-Laudie correctie op D_mol en k_wall (v1.1.0)
 - **Lekkagemodellering** — proportioneel volumeverlies per segment zonder contaminantinstroom (v1.1.0)
 - **MSX-reactiesysteem** — EPANET-MSX 2.0-compatibele multi-species reactielaag (v1.1.0)
-- **MSX native library bridge** — directe ctypes-koppeling met `libepanetmsx`; laadt `.msx`-bestanden ongewijzigd (v1.2.0)
+- **MSX native library bridge** — directe ctypes-koppeling met `libepanetmsx`; laadt `.msx`-bestanden ongewijzigd (v1.2.0; meegeleverde binaries sinds v1.2.2)
 - **Afsluiters in topologie** — PRV, PSV, TCV, FCV, GPV en PCV worden meegenomen in transport via `include_valves=True` (v1.2.1)
-- **Tanks** — CSTR-model met impliciet Euler (onvoorwaardelijk stabiel)
+- **Tanks** — massabehoudend CSTR-model met impliciet Euler (onvoorwaardelijk stabiel); tanks nemen aankomende segmenten op en geven water als nieuwe segmenten af aan hun uitgaande leidingen
 - **Extended Period Simulation (EPS)** — automatische hydraulica-updates elke `hyd_dt` seconden
 - **Volledige geochemie** — optionele PhreeqPython/PHREEQC-integratie
 - **CFL-stabiliteitscontrole** — automatische waarschuwing en `recommended_dt()`
@@ -186,7 +187,7 @@ runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(decay_k=np.zeros(3))
 ```
 
-### Met de EPANET-MSX native bibliotheek (nieuw in v1.2.0)
+### Met de EPANET-MSX native bibliotheek (nieuw in v1.2.0; meegeleverde binaries sinds v1.2.2)
 
 Gebruik dit als u een bestaand `.msx`-bestand wilt uitvoeren via de officiële MSX C-solver,
 zonder reactie-expressies in Python te herschrijven.
@@ -248,8 +249,10 @@ Elke tijdstap `dt` doorloopt de solver de volgende fasen:
 2. Advectie             x += v[pipe] * dt
 3. Exit-detectie        x >= L[pipe]  →  segment verlaat leiding
 4. Knoopmenging         debietgewogen  →  node_C (n_knopen × n_stoffen)
-5. Tankmodel            CSTR impliciet Euler  →  node_C bijgewerkt
-6. Pipe-routing         vectorized: doorgaande knopen in één pass; splitsingen in kleine lus
+5. Tankmodel            massabehoudend CSTR (impliciet Euler): aankomende segmenten worden opgenomen, tanktoestand (V, M) bijgewerkt  →  node_C bijgewerkt
+6. Pipe-routing         vectorized: doorgaande knopen in één pass; splitsingen in kleine lus;
+                        afstand voorbij het leidingeinde (overshoot) gaat als tijd mee naar de volgende leiding
+6b. Tankafgifte         tankwater gaat als nieuwe segmenten op x = 0 de uitgaande leidingen in  (volume = Q·dt, C = C_tank)
 7. Merging              aangrenzende segs met |ΔC| < tol  →  samengevoegd (elke merge_interval stappen)
 ```
 
@@ -269,7 +272,7 @@ Stappen 1–4 worden uitgevoerd door Numba JIT-kernels als Numba is geïnstallee
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython-integratie |
 | `msx.py` | `MsxReactionSystem` | Pure-Python MSX reactielaag: ODE-solvers + expressieparser (v1.1.0) |
 | `msxlibrary.py` | `MsxSimulation`, `MsxNativeLib` | Directe ctypes-brug naar `libepanetmsx` (EPANET-MSX 2.0); laadt `.msx`-bestanden ongewijzigd; native libs meegeleverd (v1.2.2) |
-| `units.py` | — | EPANET-eenhedenconversies en -enums, gedeeld door `hydraulics.py` en `parse_inp.py` |
+| `units.py` | `length_to_m`, `volume_to_m3`, … | EPANET-eenhedenconversies (debiet, diameter, snelheid, leidinglengte, tankvolume) en -enums, gedeeld door `hydraulics.py`, `parse_inp.py` en `solver.py` |
 
 ### SegmentStore (Structure-of-Arrays)
 
@@ -329,13 +332,14 @@ NzingaFlowSolver(
 |---|---|---|
 | `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Voer één kwaliteitstijdstap uit |
 | `update_hydraulics(simtime=0)` | `None` | Herbereken hydraulica; detecteert flow reversals en herbouwt routing-caches |
+| `set_initial_quality(node_quality, simtime=0)` | `None` | Vul elke leiding met één segment met de concentraties van de upstream knoop (zoals EPANET-MSX `[QUALITY]`) en initialiseer tanks vanuit hun knoopconcentratie. Met `track_mass=True` wordt de beginmassa als injectie geboekt. Aanroepen vóór `EPSRunner.run()` |
 | `warmup_numba()` | `None` | Trigger Numba JIT-compilatie vóór de simulatie (eenmalig aanroepen na init) |
 | `inject(node_uid, C_vector, volume)` | `None` | Injecteer vanuit knoop, proportioneel over uitgaande leidingen |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Injecteer direct in leiding op positie `x` [m] |
 | `booster_inject(node_uid, C_set, flow_frac=1.0)` | `None` | Stel concentratie vast op uitgaande leidingen |
 | `check_stability(dt, decay_k, warn=True)` | `dict` | CFL + reactie-stabiliteitscheck |
 | `recommended_dt(decay_k)` | `float` | Maximale stabiele tijdstap [s] |
-| `mass_balance()` | `dict \| None` | Massabalansrapport (vereist `track_mass=True`) |
+| `mass_balance()` | `dict \| None` | Massabalansrapport incl. tankmassa en lekkage (vereist `track_mass=True`) |
 | `geochem_report(C_vec)` | `dict` | LSI, verzadigingsindices, pH (vereist `geochem`) |
 
 **Attributen**
@@ -409,6 +413,8 @@ results = runner.run(decay_k=..., inject_fn=mijn_injectie)
 t_uur = runner.time_axis(unit="h")   # "s", "min" of "h"
 ```
 
+`results[i]` is de toestand *na* kwaliteitstijdstap `i` en hoort dus bij `t = (i + 1)·qual_dt`: de as begint bij `qual_dt`, niet bij 0. Het aantal stappen is `floor(duration / qual_dt)`, berekend met een kleine tolerantie zodat floating-point-ruis (`0.3 / 0.1 = 2.9999…`) geen stap kost.
+
 ---
 
 ### HydraulicModel
@@ -423,7 +429,7 @@ HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool 
 |---|---|
 | `solve(simtime=0)` | Los hydraulica op voor één EPS-tijdstip [s]; gememoïseerd — opnieuw oplossen voor dezelfde `simtime` is een no-op |
 | `close()` | Sluit de onderliggende EPANET-hydraulicasessie (`EN_closeH`). Idempotent; een volgende `solve()` heropent deze automatisch |
-| `get_topology()` | Retourneert `(pipe_start, pipe_end, pipe_length, pipe_area, node_count, pipe_ids, node_names)` — gecached |
+| `get_topology()` | Retourneert `(pipe_start, pipe_end, pipe_length, pipe_area, node_count, pipe_ids, node_names)` — gecached; `pipe_length` in m (omgerekend vanuit ft bij US-debieteenheden) |
 | `get_topology_with_reversal()` | Topologie met pipe_start/end gecorrigeerd voor stroomrichting |
 | `get_hydraulic_state()` | Retourneert `(flow [m³/s], velocity [m/s], reversed_mask)` — altijd SI |
 | `summary()` | Diagnostisch overzicht als string |
@@ -494,7 +500,7 @@ from nzingaflow.lta import (
 | `advect` | `(x, pipe, velocity, dt, n=None) → None` | `x += velocity[pipe] * dt` in-place |
 | `exit_detect` | `(x, pipe, pipe_length, exit_mask, n=None) → int` | Vul `exit_mask` in-place; retourneert aantal exiterende segmenten |
 | `node_mixing_multi` | `(exit_mask, pipe, C, flow, pipe_end, node_count, out=None, wC_buf=None, node_flow_buf=None, n=None) → ndarray` | Debietgewogen menging; geen allocaties als pre-allocated buffers worden meegegeven |
-| `tank_step_implicit` | `(C_tank, Q_in, C_in, Q_out, V_tank, k_b, dt) → None` | CSTR impliciet Euler in-place |
+| `tank_step_implicit` | `(C_tank, Q_in, C_in, Q_out, V_tank, k_b, dt) → None` | CSTR impliciet Euler in-place: `C_new = (C + Q_in·C_in/V·dt) / (1 + (Q_in/V + k_b)·dt)`. `Q_out` heeft geen invloed op C (blijft in de signatuur voor compatibiliteit); `V_tank` wordt begrensd op ≥ 1e-9 m³. De tankstap van de solver zelf is een massabehoudende variant (zie Architectuur) |
 | `warmup_numba` | `(n_species=1) → None` | Trigger JIT-compilatie; eenmalig aanroepen na aanmaken van de solver |
 
 > **Prestatietip:** gebruik `combined_decay_multi` samen met `build_combined_exp` in plaats van aparte `bulk_first_order_multi` + `wall_first_order_multi` aanroepen. Dit halveert het aantal geheugenpassages over `C` en elimineert de `exp()`-berekening per tijdstap.
@@ -578,7 +584,7 @@ concentratiemenging. Gebruik dit wanneer exacte pH na menging cruciaal is,
 of wanneer downstream code direct PHREEQC-oplossingsobjecten nodig heeft
 (bijv. Victoria-stijl workflows). Ongeveer 2× trager dan `GeochemSolver`;
 PHREEQC-geheugen groeit met het aantal unieke oplossingen, roep dus
-regelmatig `garbage_collect()` aan (of stel `auto_gc_interval` in).
+regelmatig `garbage_collect()` aan (of stel `auto_gc_interval` in). Water dat uit tanks komt, gaat met de achtergrondoplossing de leidingen in.
 
 ```python
 PhreeqSolutionMode(
@@ -834,6 +840,8 @@ lib.close()
 
 ---
 
+### Stabiliteitsfuncties
+
 ```python
 from nzingaflow import recommended_dt, check_dt
 ```
@@ -853,7 +861,7 @@ recommended_dt(
 ```
 
 Berekent `min(dt_CFL, dt_rxn) × safety` waarbij:
-- **CFL:** `dt_CFL = min(L / v)` over alle leidingen
+- **CFL:** `dt_CFL = min(L / v)` over alle leidingen met `L > 0` (elementen met lengte 0, zoals afsluiters met `include_valves=True` en pompen, worden genegeerd; ze geven anders `dt_CFL = 0`)
 - **Reactie:** `dt_rxn = 0.1 / k_max` (10× veiligheidsmarge)
 
 #### `check_dt()` — retourneert rapport-dict
@@ -881,13 +889,18 @@ mb = solver.mass_balance()
 # {
 #   "injected":      ndarray,   # massa ingespoten per stof
 #   "in_system":     ndarray,   # massa nog in segmenten
+#   "in_tanks":      ndarray,   # massa die nu in tanks zit
 #   "bulk_decay":    ndarray,   # gecumuleerd bulkverlies
 #   "wall_decay":    ndarray,   # gecumuleerd wandverlies
 #   "outflow":       ndarray,   # massa via eindknopen verlaten
-#   "balance_error": ndarray,   # relatieve fout per stof
+#   "leakage":       ndarray,   # massa verloren via lekkage (leakage_fraction)
+#   "accounted":     ndarray,   # in_system + in_tanks + verval + outflow + leakage
+#   "balance_error": ndarray,   # |injected − accounted| / injected per stof
 #   "ok":            bool,      # True als fout < 1%
 # }
 ```
+
+Wat als *injected* wordt geboekt: `inject()` / `inject_pipe()`, de beginmassa uit `set_initial_quality()`, massawijzigingen doordat `booster_inject()` bestaande segmenten overschrijft (`record_injection_mass()`) en de EPANET-tankvolume-reset bij `update_hydraulics()`. Verval wordt exact gemeten rond de vervalstap en per segment gesplitst in bulk- en wandverlies (`k_bulk / (k_bulk + k_wall)`); tankverval wordt als bulkverval geboekt. Wie `MassBalanceTracker.record_step()` zelf aanroept zonder `decay_loss=` krijgt de oudere schatting op basis van de massa van de vorige stap.
 
 ---
 
@@ -993,6 +1006,7 @@ results = runner.run(
 mb = solver.mass_balance()
 print(f"Ingespoten: {mb['injected'][0]:.4f} kg")
 print(f"In systeem: {mb['in_system'][0]:.4f} kg")
+print(f"In tanks:   {mb['in_tanks'][0]:.4f} kg")
 print(f"Bulkverval: {mb['bulk_decay'][0]:.4f} kg")
 print(f"Uitstroom:  {mb['outflow'][0]:.4f} kg")
 print(f"Fout:       {mb['balance_error'][0]*100:.3f}%  OK={mb['ok']}")
@@ -1090,8 +1104,9 @@ Gebruik `solver.recommended_dt()` om de optimale tijdstap te berekenen en geef d
 **Q: De massafout is groter dan 1%. Wat zijn mogelijke oorzaken?**
 
 - De tijdstap is te groot (CFL-schending)
-- Wandreacties zijn actief — de massabalansschatting is een benadering voor wandverval
 - Geochemie is actief: niet-lineaire reacties worden niet bijgehouden in de lineaire massabalans
+- Je roept `MassBalanceTracker.record_step()` zelf aan zonder `decay_loss=` — verval is dan slechts een schatting op basis van de massa van de vorige stap (de solver zelf meet het exact)
+- `balance_error` is relatief ten opzichte van de ingespoten massa, inclusief de beginmassa uit `set_initial_quality()`; een run zonder enige injectie rapporteert 0
 
 **Q: Hoe haal ik de beste prestaties?**
 
@@ -1174,11 +1189,36 @@ solver = NzingaFlowSolver("netwerk.inp", include_valves=True)
 
 ### Unreleased
 
+**Bugfixbatch 2 — overshoot bij leidingovergang, tankinstroom, CFL, massabalans, EPS-stappen**
+
+- `solver._handle_exits()`: de afstand voorbij het leidingeinde gaat nu als *tijd* mee naar de volgende leiding; eerder werd elke leidingpassage naar boven afgerond op hele tijdstappen (gemiddeld ≈ dt/2 te lang per leiding).
+- **Tankbron (nieuw).** Tanks nemen aankomende segmenten op en geven water als nieuwe segmenten (`x = 0`, `volume = Q·dt`, `C = C_tank`) af aan hun uitgaande leidingen. De CSTR is massabehoudend met tankmassa als toestand; `set_initial_quality()` initialiseert tanks; `mass_balance()` rapporteert `in_tanks`. `_update_tanks()` verdunt niet meer met C = 0 op stappen zonder aankomend segment.
+- `solver._get_tank_volumes()`: tankvolume omgerekend van ft³ naar m³ bij US-debieteenheden (`units.volume_to_m3()`).
+- `recommended_dt()` / `check_dt()`: elementen met lengte 0 worden genegeerd (afsluiters met `include_valves=True` gaven `dt_CFL = 0`).
+- `MassBalanceTracker`: lekkage wordt geboekt (`leakage`, `record_leakage()`); overschrijvingen door `booster_inject()` worden geboekt (`record_injection_mass()`); verval wordt exact gemeten (`record_step(..., decay_loss=...)`); `set_initial_quality()` boekt de beginmassa.
+- `EPSRunner`: floating-point-veilig aantal stappen (`_n_steps()`, ook gebruikt door `time_axis()`).
+
+**Bugfixbatch 1 — vervalcache, leidinglengte (US-eenheden), tank-CSTR, `time_axis`**
+
+- `solver.step()`: de gecombineerde-vervalcache wordt herbouwd bij elke wijziging van `decay_k` (exacte vergelijking i.p.v. `atol=1e-8`, dat wijzigingen onder ≈ 0,001/dag negeerde).
+- Leidinglengte omgerekend van ft naar m bij US-debieteenheden in `hydraulics.get_topology()` en `parse_inp()` (`units.length_to_m()`).
+- `lta.tank_step_implicit()`: de noemer gebruikt `Q_in` i.p.v. `Q_out`; een lege tank geeft geen `NaN` meer.
+- `EPSRunner.time_axis()` begint bij `qual_dt` in plaats van bij 0.
+
+Details: zie [CHANGELOG_NL.md](../CHANGELOG_NL.md).
+
+### 1.3.1
+
+- **Bugfix — `PhreeqSolutionMode` zat niet daadwerkelijk in de simulatielus.** `step()` bouwt `node_inflows` nu zelf op, `sol_ids` blijft synchroon bij verwijderen, splitsen en injecteren, en segment-merging wordt in deze modus overgeslagen (bekende beperking). Nieuwe methoden `on_segment_added()`, `mirror_removal()`, `copy_solution()`; gebruiksvoorbeelden gecorrigeerd.
+
+### 1.3.0
+
 - **Hydraulica-refactor + `units.py`.** Interne opbouw van `HydraulicModel` herzien rond `Topology`/`HydraulicState`-dataclasses, met een gecachede topologie/leidinglijst en een read-once hydraulica-snapshot na `solve()`. Publieke API ongewijzigd, op twee toevoegingen na: `close()` en context-manager-ondersteuning (`with HydraulicModel(...) as hm:`) voor expliciete opruiming van de EPANET-sessie (`EN_closeH`).
 - De interne hydraulische solver vervangen door een sessie-hergebruikende implementatie (`EN_openH()` blijft open tussen `solve()`-aanroepen; `EN_INITFLOW` voor correct cold-start-gedrag), wat de EPS-performance verbetert.
 - Nieuwe module `nzingaflow/units.py`: centraliseert EPANET-eenhedenconversies en -enums (lost AFD/MLD- en diameter/snelheid-US↔SI-conversiebugs op), nu gedeeld door `hydraulics.py` en `parse_inp.py`.
 - `parse_inp.py` bijgewerkt om typed node/link-klassen en de gecorrigeerde eenhedenconversies te gebruiken.
-- Nieuwe tests: `tests/gen_grid_network.py`; `tests/test_epynet_networks.py` uitgebreid met sessie-hergebruik/regressie- en memoisatiecontroles.
+- **Bugfix** — `_get_tank_volumes()` gebruikte een niet-bestaand attribuut (`n.volume`); de ingeslikte `AttributeError` zorgde dat elke tank de fallback van 1000 m³ meldde i.p.v. het EPANET-volume.
+- Nieuwe tests: `tests/gen_grid_network.py`; `tests/test_epynet_networks.py` uitgebreid met sessie-hergebruik/regressie-, tankvolume- en memoisatiecontroles.
 
 ### 1.2.2
 
