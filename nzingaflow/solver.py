@@ -1689,6 +1689,29 @@ class NzingaFlowSolver:
         x_new  = t_ex * vel[new_pipes]
         return np.minimum(x_new, self.pipe_length[new_pipes] * (1.0 - self._CARRY_EPS))
 
+    def _record_pipe_out_chem(self, pipes, seg_idx):
+        """
+        PhreeqSolutionMode: bewaar per pijp de chemie (pH, alkaliniteit, koolstof)
+        van het laatste segment dat de pijp volledig heeft doorlopen. Dat is de
+        uitlaat-chemie van die pijp, de tegenhanger van _pipe_out_C voor concentraties.
+        Zonder geochemie is dit een no-op.
+        """
+        geo = self._geochem
+        if geo is None or not hasattr(geo, 'sol_ids'):
+            return
+        if getattr(self, '_pipe_out_ph', None) is None:
+            n = len(self.pipe_ids)
+            self._pipe_out_ph  = np.full(n, np.nan)
+            self._pipe_out_alk = np.full(n, np.nan)
+            self._pipe_out_ct  = np.full(n, np.nan)
+        for p, j in zip(np.asarray(pipes), np.asarray(seg_idx)):
+            so = geo.get_solution(self.segments, int(j))
+            alk = (so.species.get('HCO3-', 0) + 2 * so.species.get('CO3-2', 0)
+                   + so.species.get('OH-', 0) - so.species.get('H+', 0)) * 1000.0
+            self._pipe_out_ph[int(p)]  = so.pH
+            self._pipe_out_alk[int(p)] = alk
+            self._pipe_out_ct[int(p)]  = so.total_element('C')
+
     def _cascade_thru(self, thru_idx, old_p, first_p, vel):
         """
         Verplaats doorgaande segmenten over de resterende reistijd van deze stap.
@@ -1724,6 +1747,9 @@ class NzingaFlowSolver:
             fa = active[finish]
             out_p[fa] = p[finish]
             out_x[fa] = np.minimum(dist[finish], L[finish] * (1.0 - self._CARRY_EPS))
+            # Water dat aan het eind van een pijp tot stilstand komt: de chemie van
+            # die pijp is dat water (zie _record_pipe_out_chem).
+            self._record_pipe_out_chem(out_p[fa], thru_idx[fa])
             ca = active[~finish]
             if ca.size == 0:
                 break
@@ -1732,6 +1758,7 @@ class NzingaFlowSolver:
             # (anders zien knopen onderweg de aankomst niet).
             if self._pipe_out_C is not None:
                 self._pipe_out_C[cur[ca]] = C_thru[ca]
+            self._record_pipe_out_chem(cur[ca], thru_idx[ca])
             # verbruik de reistijd en ga naar de volgende pijp
             t_rem[ca] = t_rem[ca] - self.pipe_length[cur[ca]] / vel[cur[ca]]
             nxt_first = self._node_out0[self.pipe_end[cur[ca]]]
@@ -1860,6 +1887,8 @@ class NzingaFlowSolver:
                     for _p in out:
                         if int(self._skip_target[_p]) != _p:
                             self._pipe_out_C[_p] = orig_C
+                if use_phreeq:
+                    self._record_pipe_out_chem(out, [seg_i] * len(out))
                 orig_sol = int(self._geochem.sol_ids[seg_i]) if use_phreeq else None
                 old_p    = int(self.segments.pipe[seg_i])
                 t_excess = self._excess_time(float(self.segments.x[seg_i]), old_p, vel)
