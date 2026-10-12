@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### PHREEQC-route: chemie van doorstromende segmenten bijhouden
+
+- `solver._record_pipe_out_chem()` (nieuw): per pijp de pH, alkaliniteit en koolstof
+  van het laatste segment dat de pijp volledig doorliep, of tot stilstand kwam aan het eind.
+  Tegenhanger van `_pipe_out_C` voor de PhreeqSolutionMode-route.
+- Aangeroepen in `_cascade_thru` (doorgang en eindplaatsing) en in de splitsingstak.
+- Reden: bij een doorgaande knoop (bijv. een doelknoop met een uitgaande leiding in een
+  deelnetwerk) gaan segmenten door de knoop heen in de cascade en komen nooit op de
+  inkomende pijp te staan. Met de uitgangen van de pijp was de pH dan niet uit te lezen.
+- Gecontroleerd: FRL-10, doelknoop 164593422, 48 u: deelnetwerk en volledig netwerk
+  geven exact dezelfde pH per uur (verschil 0,0).
+
+
 ### Transport: a segment may cross several short through-pipes in one time step
 
 - **`solver._handle_exits()` / new `_cascade_thru()`.** Remaining travel time after
