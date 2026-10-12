@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Transport: een segment kan in één tijdstap over meerdere korte doorgaande leidingen gaan
+
+- **`solver._handle_exits()` / nieuw `_cascade_thru()`.** De reistijd die na het verlaten van een leiding over is, wordt nu binnen dezelfde tijdstap doorgegeven over opeenvolgende doorgaande knopen. Eerder stopte een segment na één leiding per stap, wat ongeveer één tijdstap vertraging per korte leiding gaf. Op FRL-10 gaf dat een vertraging van 2 u bij de piek van EC op knoop 164593422; na de wijziging ongeveer 0,6 u (passagetijden 15–20 min achter EPANET). Splitsingen, eindknopen en leidingen die niet volledig worden doorlopen, stoppen zoals voorheen.
+- De uitlaatconcentratie (`_pipe_out_C`) van elke volledig doorlopen leiding wordt gelijk gesteld aan de concentratie van het segment, zodat tussenliggende knopen de aankomst zien.
+- Testen aangepast aan het fysische gedrag: `test_short_pipe_is_crossed_within_one_step` (vervangt de regel "max één leiding per stap") en `test_zero_length_valve_costs_no_extra_step` (vervangt `test_without_skip_valve_costs_a_step`). Geen segment verlaat een leiding twee keer in dezelfde stap.
+
+### PHREEQC-route: chemie van doorstromende segmenten bijhouden
+
+- **`solver._record_pipe_out_chem()` (nieuw).** Per leiding worden pH, alkaliniteit en koolstof bewaard van het laatste segment dat de leiding volledig heeft doorlopen of aan het eind tot stilstand is gekomen. Dit is de PHREEQC-tegenhanger van `_pipe_out_C`. Aangeroepen in `_cascade_thru` (doorgang en eindplaatsing) en in de splitsingstak.
+- Reden: bij een doorgaande knoop (bijvoorbeeld een doelknoop met een uitgaande leiding in een deelnetwerk) gaan segmenten door de knoop heen, en komen ze niet op de inkomende leiding te staan. De pH was dan uit de uitgangen van de leiding niet te lezen.
+- Gecontroleerd: FRL-10, doelknoop 164593422, 48 u: deelnetwerk en volledig netwerk geven per uur exact dezelfde pH (verschil 0,0).
+
+### Waterkwaliteit-fixes uit de vergelijking met pulse4.inp (EPANET)
+
+- **Externe instroom bij junctions met negatieve vraag.** Zulke knopen krijgen water met concentratie 0 (of `set_source_quality(node, C)`), gemengd met het aankomende water en afgegeven aan de uitgaande leidingen. Reservoirs zijn uitgesloten.
+- **Knoopmenging is continu over de leidingstroom.** Elke inkomende leiding draagt Q·dt bij met de uitlaatconcentratie (laatste aankomst). Dat vervangt het mengen van segmenten die in één stap aankomen, wat in stappen zonder aankomst onechte nullen gaf.
+- **Persistente knoopconcentratie.** `step()` geeft de laatste bekende knoopwaarde terug in plaats van 0; `node_arrived` markeert aankomsten in de huidige stap.
+- **Beginconditie.** Leidingen worden geïnitialiseerd met segmenten van ongeveer v·dt (maximaal 50 per leiding), met de stroomafwaartse knoop als beginconcentratie.
+
+### Kleppen: korte open afsluiters overslaan, gesloten blokkeren
+
+- **`skip_short_valves=True` (nieuw, alleen met `include_valves=True`).** Een open klep met `L < v·dt` wordt overgeslagen: een segment passeert hem in dezelfde stap, in plaats van een hele tijdstap in een element van lengte nul door te brengen. Ketens van kleppen worden opgelost; de tijd in overgeslagen kleppen (`L/v`) wordt van de meegenomen overshoot afgetrokken. Overslaan gebeurt alleen over doorgaande knopen; kleppen vóór een splitsing, eindknoop of tank blijven normale elementen. `solver.skip_info()` geeft het aantal kleppen, gesloten kleppen en overgeslagen kleppen.
+- **`cache_links=True` (nieuwe optie, standaard uit).** `HydraulicModel`/`NzingaFlowSolver` bouwen de lijst met linkobjecten niet meer na elke `solve()`, met identieke resultaten.
+
+### Documentatie
+
+- README's (NL en EN, in de root en in `nzingaflow/documentation/`) bijgewerkt: stap 6 van de rekenstappen beschrijft de reistijd over opeenvolgende doorgaande knopen; signaturen van `NzingaFlowSolver` en `HydraulicModel` compleet (`skip_short_valves`, `cache_links`, `reversal_deadband`); nieuwe sectie over de stroomrichting-deadband, `merge_span`, `set_source_quality()` en het experimentele `set_mixed_pipes()`.
+
+
 ### Bugfix (batch 2) — overshoot bij leidingovergang, tankinstroom, CFL, massabalans, EPS-stappen
 
 - **`solver._handle_exits()` — overshoot weggegooid.** Een segment dat een

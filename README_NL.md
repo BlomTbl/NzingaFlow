@@ -29,6 +29,7 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
   - [MsxReactionSystem](#msxreactionsystem)
   - [MsxSimulation & MsxNativeLib](#msxsimulation--msxnativelib)
   - [Stabiliteitsfuncties](#stabiliteitsfuncties)
+  - [Stroomrichting-deadband en externe instroom](#stroomrichting-deadband-en-externe-instroom)
   - [merge\_segments](#merge_segments)
 - [Geavanceerd gebruik](#geavanceerd-gebruik)
 - [Wandreacties](#wandreacties)
@@ -251,7 +252,8 @@ Elke tijdstap `dt` doorloopt de solver de volgende fasen:
 4. Knoopmenging         debietgewogen  →  node_C (n_knopen × n_stoffen)
 5. Tankmodel            massabehoudend CSTR (impliciet Euler): aankomende segmenten worden opgenomen, tanktoestand (V, M) bijgewerkt  →  node_C bijgewerkt
 6. Pipe-routing         vectorized: doorgaande knopen in één pass; splitsingen in kleine lus;
-                        afstand voorbij het leidingeinde (overshoot) gaat als tijd mee naar de volgende leiding
+                        afstand voorbij het leidingeinde (overshoot) gaat als tijd mee over opeenvolgende
+                        doorgaande knopen binnen dezelfde stap (een segment kan meerdere korte leidingen per stap passeren)
 6b. Tankafgifte         tankwater gaat als nieuwe segmenten op x = 0 de uitgaande leidingen in  (volume = Q·dt, C = C_tank)
 7. Merging              aangrenzende segs met |ΔC| < tol  →  samengevoegd (elke merge_interval stappen)
 ```
@@ -306,6 +308,9 @@ NzingaFlowSolver(
     leakage_fraction: float = 0.0,             # fractioneel leidingverlies (v1.1.0)
     wall_mode:        str   = 'two_film',      # 'two_film' of 'direct' (v1.1.0)
     include_valves:   bool  = False,           # afsluiters in transporttopologie (v1.2.1)
+    skip_short_valves: bool = True,            # open korte afsluiters worden overgeslagen (include_valves=True)
+    cache_links:      bool  = False,           # link-gegevens in het hydraulische model cachen
+    reversal_deadband: float = 1e-5,           # dode zone voor stroomrichting [m³/s], zie hieronder
 )
 ```
 
@@ -422,7 +427,8 @@ t_uur = runner.time_axis(unit="h")   # "s", "min" of "h"
 Lage-niveau EPANET-koppeling via epynet. Normaliter intern aangemaakt door `NzingaFlowSolver`.
 
 ```python
-HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool = False)
+HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool = False,
+               cache_links: bool = False, reversal_deadband: float = 1e-5)
 ```
 
 | Methode | Omschrijving |
@@ -839,6 +845,16 @@ lib.close()
 | Standalone MSX-simulatie zonder LTA | `msxlibrary.py` — `run_msx()` |
 
 ---
+
+### Stroomrichting-deadband en externe instroom
+
+Leidingen waarvan de stroming kleiner is dan `reversal_deadband` [m³/s] behouden hun vorige stroomrichting. Zonder dit draait bijna stilstaand water bij elke hydraulische stap om, en worden de segmenten dan telkens gespiegeld. De standaard `1e-5` m³/s is de waarde die het beste overeenkwam met EPANET op `wst.inp`. Zet `reversal_deadband=0` om het vorige gedrag terug te krijgen.
+
+`merge_span` (argument van `step()`, standaard `1.0`) beperkt het samenvoegen: aangrenzende segmenten worden alleen samengevoegd als hun positiespreiding hooguit `merge_span · v · dt` is. Met `None` wordt die controle uitgeschakeld.
+
+`set_source_quality(node_uid, C_vector)` stelt de concentratie in van water dat via een externe instroom een knoop binnenkomt (een junction met een negatieve vraag, bijvoorbeeld `J7` in `pulse4.inp`). De standaard is 0. De instelling geldt tot de volgende aanroep. Reservoirs worden niet beïnvloed. Dit komt overeen met EPANET met een bron van die concentratie.
+
+`set_mixed_pipes(mask)` behandelt de leidingen in `mask` als volledig gemengde volumes (zoals een tank) in plaats van als Lagrangiaanse segmenten. Dit is **experimenteel**: het werkt niet goed voor leidingen met echte doorstroming, omdat het de volumebalans kan verstoren. Gebruik het alleen voor leidingen met vooral stilstaand water dat heen-en-weer beweegt.
 
 ### Stabiliteitsfuncties
 

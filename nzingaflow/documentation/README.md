@@ -29,6 +29,7 @@ NzingaFlow simulates water quality in drinking water distribution networks using
   - [MsxReactionSystem](#msxreactionsystem)
   - [MsxSimulation & MsxNativeLib](#msxsimulation--msxnativelib)
   - [Stability Functions](#stability-functions)
+  - [Flow reversal dead band and external inflow](#flow-reversal-dead-band-and-external-inflow)
   - [merge\_segments](#merge_segments)
 - [Advanced Usage](#advanced-usage)
 - [Wall Reactions](#wall-reactions)
@@ -252,7 +253,8 @@ Each time step `dt`, the solver executes the following phases:
 4. Node mixing     flow-weighted  →  node_C (n_nodes × n_species)
 5. Tank model      mass-conserving CSTR (implicit Euler): arriving segments are absorbed, tank state (V, M) updated  →  node_C updated
 6. Pipe routing    vectorized: through-nodes updated in one pass; splits in small loop;
-                   distance travelled beyond the pipe end (overshoot) is carried into the next pipe as time
+                   distance travelled beyond the pipe end (overshoot) is carried as time across consecutive
+                   through-nodes within the same step (a segment may cross several short pipes per step)
 6b. Tank release   tank water enters the outflow pipes as new segments at x = 0  (volume = Q·dt, C = C_tank)
 7. Merging         adjacent segs with |ΔC| < tol  →  merged (every merge_interval steps)
 ```
@@ -307,6 +309,9 @@ NzingaFlowSolver(
     leakage_fraction: float = 0.0,             # fractional pipe flow loss (v1.1.0)
     wall_mode:        str   = 'two_film',      # 'two_film' or 'direct' (v1.1.0)
     include_valves:   bool  = False,           # include valves in transport topology (v1.2.1)
+    skip_short_valves: bool = True,            # open short valves are skipped (include_valves=True)
+    cache_links:      bool  = False,           # cache link data in the hydraulic model
+    reversal_deadband: float = 1e-5,           # flow-reversal dead band [m³/s], see below
 )
 ```
 
@@ -423,7 +428,8 @@ t_hours = runner.time_axis(unit="h")   # "s", "min", or "h"
 Low-level EPANET coupling via epynet. Normally instantiated internally by `NzingaFlowSolver`.
 
 ```python
-HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool = False)
+HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool = False,
+               cache_links: bool = False, reversal_deadband: float = 1e-5)
 ```
 
 | Method | Description |
@@ -840,6 +846,16 @@ lib.close()
 | Standalone MSX simulation without LTA | `msxlibrary.py` — `run_msx()` |
 
 ---
+
+### Flow reversal dead band and external inflow
+
+Pipes whose flow magnitude is below `reversal_deadband` [m³/s] keep their previous flow direction. Without this, nearly stagnant water flips direction every hydraulic step and the segments are mirrored each time. The default `1e-5` m³/s is the value that gave the best agreement with EPANET on `wst.inp`. Set `reversal_deadband=0` to restore the previous behaviour.
+
+`merge_span` (argument of `step()`, default `1.0`) limits merging: adjacent segments are only merged when their position spread is at most `merge_span · v · dt`. Pass `None` to disable this check.
+
+`set_source_quality(node_uid, C_vector)` sets the concentration of water entering a node through an external inflow (a junction with negative demand, for example `J7` in `pulse4.inp`). The default is 0. It applies to all steps until the next call. Reservoirs are not affected. This matches EPANET with a source of that concentration.
+
+`set_mixed_pipes(mask)` treats the pipes in `mask` as fully mixed volumes (like a tank) instead of Lagrangian segments. This is **experimental**: it does not work well for pipes with real through-flow, because it can break the volume balance. Use it only for pipes that mostly contain stagnant water going back and forth.
 
 ### Stability Functions
 
