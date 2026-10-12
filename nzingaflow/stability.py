@@ -173,14 +173,20 @@ class MassBalanceTracker:
     - Gecumuleerde verdwenen massa via bulkverval
     - Gecumuleerde verdwenen massa via wandreacties
     - Massa bij eindknopen (uit het systeem gevloeid)
+    - Massa die via lekkage verdween (record_leakage)
+    - Massa in tanks (tank_mass bij report(); tankverval telt als bulkverval)
+    - Massawijzigingen door ingrijpen, zoals boosters die bestaande segmenten
+      overschrijven (record_injection_mass)
 
     Gebruik
     -------
         tracker = MassBalanceTracker(n_species=2)
         tracker.record_injection(C_vector, volume)   # bij elke injectie
-        tracker.record_step(store, node_C, flow,
-                            decay_k, k_wall_vol, dt)  # na elke tijdstap
-        report = tracker.report()
+        tracker.record_step(store, decay_k, dt,
+                            k_wall_vol=k_wall_vol,
+                            exited_C=exited_C, exited_V=exited_V,
+                            decay_loss=(bulk, wall))  # na elke tijdstap
+        report = tracker.report(store, tank_mass=tank_mass)
     """
 
     def __init__(self, n_species: int):
@@ -284,16 +290,25 @@ class MassBalanceTracker:
         """
         Geeft een massabalansrapport terug.
 
+        Parameters
+        ----------
+        store     : SegmentStore voor de massa in segmenten (optioneel)
+        tank_mass : (n_species,) massa die nu in tanks zit (optioneel)
+
         Returns
         -------
         dict met:
-            injected      : massa ingespoten per stof
+            injected      : massa ingespoten per stof (incl. beginmassa en
+                            massawijzigingen door boosters)
             in_system     : massa nog in segmenten (als store opgegeven)
-            bulk_decay    : gecumuleerd bulkverlies
+            in_tanks      : massa in tanks (als tank_mass opgegeven, anders 0)
+            bulk_decay    : gecumuleerd bulkverlies (incl. tankverval)
             wall_decay    : gecumuleerd wandverlies
             outflow       : massa via eindknopen verlaten
-            balance_error : relatieve massabalansfout
-            ok            : True als error < 1%
+            leakage       : massa verloren via lekkage
+            accounted     : in_system + in_tanks + verval + outflow + leakage
+            balance_error : |injected − accounted| / injected per stof
+            ok            : True als error < 1% voor alle stoffen
         """
         in_sys = self.current_mass(store) if store is not None else np.zeros(self.n_species)
 

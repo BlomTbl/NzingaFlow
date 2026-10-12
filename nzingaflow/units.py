@@ -25,8 +25,15 @@ Gevonden verschillen (nu hier gecorrigeerd, één keer):
   ook voor US-eenheden waarin EPANET diameter in **inch** teruggeeft —
   `hydraulics.py` had hier al de juiste SI/US-vertakking.
 
-Beide modules gebruiken nu uitsluitend de functies/tabellen hieronder, dus
-een toekomstige correctie hoeft maar op één plek.
+Later toegevoegd:
+- **Leidinglengte** (`length_to_m()`): EPANET geeft lengte in ft voor
+  US-debieteenheden (CFS/GPM/MGD/IMGD/AFD); die werd niet omgerekend.
+- **Tankvolume** (`volume_to_m3()`): EPANET geeft tankvolume in ft³ voor
+  US-debieteenheden; gebruikt door `NzingaFlowSolver._get_tank_volumes()`.
+
+Deze modules gebruiken nu uitsluitend de functies/tabellen hieronder
+(`hydraulics.py`, `parse_inp.py` en `solver.py`), dus een toekomstige
+correctie hoeft maar op één plek.
 """
 
 from __future__ import annotations

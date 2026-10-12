@@ -2,6 +2,80 @@
 
 ## [Unreleased]
 
+### Transport: a segment may cross several short through-pipes in one time step
+
+- **`solver._handle_exits()` / new `_cascade_thru()`.** Remaining travel time after
+  leaving a pipe is now carried across consecutive through-nodes within the same
+  time step, instead of stopping after one pipe. Previously a segment could cross
+  only one pipe per step, which added ~one time step of delay per short pipe. On
+  FRL-10 (many pipes of a few metres, flow ~0.1 m³/s) this produced a 2 h lag on
+  the peak EC at node 164593422 against EPANET; after the change the lag is
+  ~0.6 h (passage times 15–20 min behind EPANET). Splits, end nodes and pipes not
+  fully traversed still stop as before.
+- The uitlaatconcentratie (`_pipe_out_C`) of each pipe fully traversed in the
+  cascade is set to the segment's concentration, so intermediate nodes see the
+  arrival.
+- Tests changed to the physical travel-time behaviour:
+  `test_short_pipe_is_crossed_within_one_step` (replaces the one-pipe-per-step
+  assertion) and `test_zero_length_valve_costs_no_extra_step` (replaces
+  `test_without_skip_valve_costs_a_step`). No segment exits twice in one step; the
+  double-exit concern is unchanged.
+
+
+### Water-quality fixes from the pulse4.inp comparison against EPANET
+
+- **External inflow at junctions with negative demand.** Such junctions now receive
+  water with concentration 0 (or `set_source_quality(node, C)`), mixed with the
+  arriving water and released into the outflow pipes. Reservoirs are excluded
+  (their negative demand is supply, not inflow).
+- **Node mixing is continuous over pipe flow.** Each inflowing pipe contributes Q·dt
+  with the concentration at its outlet (last arrival). This replaces mixing of the
+  segments that arrive in a single step, which produced spurious zeros in steps
+  without arrivals. Outflow of nodes with ≥2 inflows or external inflow gets one mixed
+  concentration.
+- **Persistent node concentration.** `step()` returns the last known node value
+  instead of 0; `node_arrived` flags arrivals in the current step.
+- **Initial condition.** Pipes are initialised with the initial quality of their
+  downstream node (EPANET behaviour) and split into segments of length ≈ v·dt
+  (`set_initial_quality(..., dt=...)`).
+- **Merging with a position constraint.** `merge_segments(..., max_span=...)`;
+  `step()` uses `merge_span·v·dt` (default 1.0).
+- **Skipped open valves update their outlet concentration.** Nodes downstream of a
+  skipped valve (J9, J10 in pulse4.inp) were stuck on a stale value.
+- **Tank mixing models.** A warning is issued for tanks whose [MIXING] model is not
+  MIXED (FIFO, LIFO, 2COMP are not implemented; tanks are CSTR).
+- **Hydraulic source.** The node demand is read optionally; a hydraulic source without
+  `get_node_demand()` still works.
+
+Regression: `tests/test_pulse4_regression.py` (RMSE ≤ 1.5 mg/L per node vs EPANET
+2.3.3, scenario: 6 h, hydraulic step 300 s, quality step 1 s). Measured: mean RMSE
+0.23 mg/L, maximum 0.6 mg/L (tank T1, MIXED vs FIFO).
+
+
+### Valves: skip open short valves, block closed ones
+
+- **`skip_short_valves=True` (new, only with `include_valves=True`).** An open valve with
+  `L < v·dt` is skipped: a segment passes it within the same step instead of spending a
+  whole time step in a zero-length element (which delayed transport by up to one step per
+  valve). Chains of valves are resolved, the time spent in skipped valves (`L/v`) is
+  subtracted from the carried overshoot. Skipping only happens over through-nodes;
+  valves before a split, end node or tank stay normal elements. `solver.skip_info()` reports
+  valves / closed / skipped. On FRL-10 (dt = 300 s): 3433 valves, 37 closed, 3278 skipped;
+  tracer arrives a median of 25 min earlier within 6 h.
+- **`cache_links=True` (new option, default off).** `HydraulicModel`/`NzingaFlowSolver` no longer
+  rebuild the link-object list after every `solve()`: identical results (tested bit-for-bit),
+  ~0.08 s less per hydraulic step on 27.6k links (FRL-10, 6 h EC run: 1.17× faster).
+- **Closed valves never pass water (bug).** A zero-length element satisfied `x >= L` at
+  `x = 0` also at zero velocity, so segments went straight through *closed* valves. Exit
+  detection now requires `v > 0`; closed valves (EPANET status CLOSED / flow ≈ 0) are never
+  skipped and block.
+- **Routing counts only outlets with flow.** A closed valve or dead branch no longer turns a
+  through-node into a split (no more zero-volume segments in closed branches). If a node has
+  only stagnant outlets, behaviour is unchanged.
+- **`_on_store_resize()` lost exit buffers (bug).** When the segment store doubled during a
+  split loop, `_buf_exit_*` were replaced by empty arrays, so exited mass of that step
+  disappeared from the mass balance (0.5 % on FRL-10). Contents are now preserved.
+
 ### Bugfix (batch 2) — overshoot at pipe transitions, tank inflow, CFL, mass balance, EPS step count
 
 - **`solver._handle_exits()` — overshoot dropped.** A segment that left a pipe
@@ -63,6 +137,11 @@
 - **`EPSRunner.time_axis()`** started at 0; `results[i]` belongs to `(i+1)·qual_dt`.
 - Tests: `tests/test_regressions_batch1.py`; `test_mass_balance_tank` (in
   `test_inzingaflow.py` and `test_validation.py`) encoded the old formula and was updated.
+
+### Docs
+
+- `README.md`, `README_NL.md` and `nzingaflow/documentation/README*.md` brought in line with the code: version badge (1.3.1); root READMEs now contain the `PhreeqSolutionMode` section (previously only in `documentation/`); tank model, LTA phase list (incl. tank release and overshoot carry-over), `set_initial_quality()`, `EPSRunner.time_axis()` semantics, `recommended_dt()` zero-length handling, `MassBalanceTracker` report keys (`in_tanks`, `leakage`, `accounted`) and the FAQ on mass-balance errors; the in-README changelog now lists 1.3.1, 1.3.0 and the batch-1/2 fixes (the 1.3.0 items were still listed as "Unreleased"); MSX bridge version wording made consistent (introduced 1.2.0, bundled binaries 1.2.2); missing `### Stability Functions` heading restored in the Dutch README (broken ToC anchor); relative links in `documentation/` fixed (`../LICENSE`, `../CHANGELOG*.md`); `PKG-INFO` description regenerated from the root README.
+- Docstrings updated: `MassBalanceTracker` (usage example had a stale `record_step` signature; `report()` keys), `NzingaFlowSolver` class and `step()` (tank source, overshoot, phase 7b), `units.py` (`length_to_m`, `volume_to_m3`).
 
 ## [1.3.1] — 2026-09-17
 

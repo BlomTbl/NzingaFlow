@@ -65,6 +65,11 @@
 - Tests: `tests/test_regressions_batch1.py`; `test_mass_balance_tank` (in
   `test_inzingaflow.py` en `test_validation.py`) legde de oude formule vast en is aangepast.
 
+### Documentatie
+
+- `README.md`, `README_NL.md` en `nzingaflow/documentation/README*.md` in lijn gebracht met de code: versiebadge (1.3.1); de root-README's bevatten nu de sectie `PhreeqSolutionMode` (stond alleen in `documentation/`); tankmodel, fasenlijst van de LTA (incl. tankafgifte en overshoot-doorgifte), `set_initial_quality()`, de betekenis van `EPSRunner.time_axis()`, `recommended_dt()` met lengte-0-elementen, de rapportsleutels van `MassBalanceTracker` (`in_tanks`, `leakage`, `accounted`) en de FAQ over massabalansfouten; de versiehistorie in de README noemt nu 1.3.1, 1.3.0 en de fixes van batch 1/2 (de 1.3.0-punten stonden nog als "Unreleased"); versieverwijzingen voor de MSX-brug consistent gemaakt (geïntroduceerd in 1.2.0, meegeleverde binaries sinds 1.2.2); ontbrekende kop `### Stabiliteitsfuncties` in de NL-README hersteld (kapotte ToC-anker); relatieve links in `documentation/` gerepareerd (`../LICENSE`, `../CHANGELOG*.md`); beschrijving in `PKG-INFO` opnieuw gegenereerd uit de root-README.
+- Docstrings bijgewerkt: `MassBalanceTracker` (gebruiksvoorbeeld had een verouderde `record_step`-signatuur; `report()`-sleutels), `NzingaFlowSolver`-klasse en `step()` (tankbron, overshoot, fase 7b), `units.py` (`length_to_m`, `volume_to_m3`).
+
 ## [1.3.1] — 2026-09-17
 
 ### Bugfix — `PhreeqSolutionMode` was nooit daadwerkelijk aangesloten op de simulatielus

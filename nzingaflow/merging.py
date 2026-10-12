@@ -51,7 +51,7 @@ except ImportError:
 
 @_njit(cache=True)
 def _detect_candidates_kernel(
-    pipe, C, V,
+    pipe, C, V, x, span,
     n, n_species,
     tol, min_volume,
     cand_buf,          # (n-1,) int32 uitvoerbuffer voor kandidaatindices
@@ -61,6 +61,7 @@ def _detect_candidates_kernel(
 
     Paar (i, i+1) is kandidaat als:
       - pipe[i] == pipe[i+1]
+      - x[i+1] - x[i] <= span[pipe[i]]   (positie-voorwaarde, punt 2)
       - V[i] >= min_volume en V[i+1] >= min_volume
       - max_s |C[i+1,s] - C[i,s]| < tol   (met early-exit)
 
@@ -71,6 +72,8 @@ def _detect_candidates_kernel(
     n1 = n - 1
     for i in range(n1):
         if pipe[i] != pipe[i + 1]:
+            continue
+        if x[i + 1] - x[i] > span[pipe[i]]:
             continue
         if V[i] < min_volume or V[i + 1] < min_volume:
             continue
@@ -136,14 +139,15 @@ def _build_keep_mask(
 
 # ── NumPy fallbacks ───────────────────────────────────────────────────────────
 
-def _detect_candidates_numpy(pipe, C, V, n, n_species, tol, min_volume, cand_buf):
+def _detect_candidates_numpy(pipe, C, V, x, span, n, n_species, tol, min_volume, cand_buf):
     n1 = n - 1
     same = pipe[:n1] == pipe[1:n]
     dC   = C[1:n] - C[:n1]
     np.abs(dC, out=dC)
     dC_max = dC.max(axis=1)
     big  = (V[:n1] >= min_volume) & (V[1:n] >= min_volume)
-    cand = np.where(same & (dC_max < tol) & big)[0]
+    near = (x[1:n] - x[:n1]) <= span[pipe[:n1]]
+    cand = np.where(same & (dC_max < tol) & big & near)[0]
     n_cand = len(cand)
     cand_buf[:n_cand] = cand
     return n_cand
@@ -225,6 +229,7 @@ def merge_segments(
     tol:        float = 1e-6,
     min_volume: float = 1e-12,
     n_pipes:    int   = 0,
+    max_span:   np.ndarray | float | None = None,
 ) -> int:
     """
     Voeg aangrenzende segmenten samen die (bijna) dezelfde concentratie hebben.
@@ -242,6 +247,10 @@ def merge_segments(
     tol       : concentratietolerantie [mg/L]
     min_volume: minimumvolume [m³]
     n_pipes   : leidingaantal voor CSR-index (0 = auto)
+    max_span  : maximale positiespreiding [m] van een samen te voegen paar.
+                Per leiding een array (n_pipes,) of één getal. None = geen
+                beperking (oud gedrag). Een samengevoegd segment houdt één
+                positie, dus de span bepaalt de fout in de aankomsttijd.
 
     Returns
     -------
@@ -258,6 +267,13 @@ def merge_segments(
     # ── Gesorteerde kopieën via CSR-index ─────────────────────────────────
     n_pipes_use = n_pipes if n_pipes > 0 else int(store.pipe[:n].max()) + 1
     order, _    = store.build_csr(n_pipes_use)
+
+    if max_span is None:
+        span_arr = np.full(n_pipes_use, np.inf, dtype=np.float64)
+    else:
+        span_arr = np.broadcast_to(
+            np.asarray(max_span, dtype=np.float64), (n_pipes_use,)
+        ).copy()
 
     # Werk op lokale gesorteerde kopieën — store pas aan het einde bijwerken
     pipe = store.pipe[:n][order].copy()
@@ -278,7 +294,7 @@ def merge_segments(
 
         # 1. Detecteer kandidaten in één pass
         n_cand = _detect_impl(
-            pipe, C, V,
+            pipe, C, V, x, span_arr,
             n_cur, n_species,
             tol, min_volume,
             _cand_buf,
@@ -337,7 +353,9 @@ def warmup_numba_merging(n_species: int = 1) -> None:
     buf  = np.empty(n, dtype=np.int32)
     keep = np.empty(n, dtype=np.bool_)
 
-    nc = _detect_candidates_kernel(pipe, C, V, n, n_species, 1e-6, 1e-12, buf)
+    x    = np.arange(n, dtype=np.float64) * 1e-3
+    span = np.full(1, np.inf)
+    nc = _detect_candidates_kernel(pipe, C, V, x, span, n, n_species, 1e-6, 1e-12, buf)
     if nc > 0:
         sel = buf[:nc].copy()
         _merge_pairs_kernel(C, V, sel, nc, n_species)
