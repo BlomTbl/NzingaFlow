@@ -567,7 +567,8 @@ class GeochemSolver:
         self._n_failed = getattr(self, '_n_failed', 0) + 1
         if self._n_failed == 1:
             warnings.warn(
-                f"PHREEQC kon segment {i} niet verwerken; het blijft ongewijzigd. "
+                f"PHREEQC kon {'een oplossing' if i < 0 else f'segment {i}'} niet verwerken; "
+                f"de waarde blijft ongewijzigd. "
                 f"Verdere mislukkingen worden geteld in geochem._n_failed.",
                 RuntimeWarning,
             )
@@ -795,7 +796,8 @@ class GeochemSolver:
                     raw = _sol_value(sol, pname)   # mmol/L-equivalent
                     C_out[s_idx] = max(0.0, raw * fac[s_idx])
             except Exception:
-                pass  # houd oorspronkelijke waarde bij als PHREEQC faalt
+                # oorspronkelijke waarde blijft; wel geteld en (eenmalig) gemeld
+                self._record_failure(-1)
 
         return C_out
 

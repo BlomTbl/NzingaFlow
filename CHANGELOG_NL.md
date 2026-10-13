@@ -13,6 +13,8 @@
   `epynet>=2.0` niet op PyPI staat en hoe je het installeert.
 - **Docs:** installatiesectie van README/README_NL belooft geen NumPy-only installatie meer.
 - **Packaging:** de dubbele `nzingaflow/pyproject.toml` is verwijderd.
+- `geochemistry._read_back()`: een mislukte PHREEQC-terugleesactie wordt nu geteld en gemeld via `_record_failure` i.p.v. stil genegeerd.
+- Nieuw `tests/test_validatie_numeriek.py`: aankomsttijd, massabalans (enkele leiding, serie), stationaire menging (analytisch), gesloten/open afsluiter, stroomomkering en vergelijking met een EPANET-kwaliteitsberekening. Bekende afwijking vastgelegd als strikte xfail: bij knopen met ≥2 inkomende leidingen gaat massa verloren zolang een front aankomt (continue Q·Δt-menging; constant ~0,07 m³·C in het testnetwerk, onafhankelijk van dt).
 - Tests: `tests/test_foutafhandeling.py`; verouderde verwachting in `test_mass_balance_tank`
   gelijkgetrokken met de (correcte) `Q_in`-formule.
 
