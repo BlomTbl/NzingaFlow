@@ -71,8 +71,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 
-from epynet.network import Network
-from epynet.solver import HydraulicSolver
+try:
+    from epynet.network import Network
+    from epynet.solver import HydraulicSolver
+except ImportError as _exc:   # pragma: no cover - afhankelijk van omgeving
+    raise ImportError(
+        "NzingaFlow vereist EPYnetDTD (epynet >= 2.0, met epynet.solver). "
+        "Dat staat niet op PyPI (daar bestaat alleen epynet <= 1.1); installeer "
+        "het vanuit de broncode, bijvoorbeeld: pip install ./epynet-clone  "
+        "of pip install git+<url van je epynet-repository>. "
+        "Zie 'Installatie' in de README."
+    ) from _exc
 
 from . import units as u
 
@@ -611,14 +620,21 @@ class HydraulicModel:
         toestand gesloten zijn (EPANET-status CLOSED, 0).  Gesloten
         afsluiters worden door de solver nooit overgeslagen: ze blokkeren.
         Alleen afsluiters worden uitgelezen; overige links zijn False.
+        Is de status van een afsluiter niet uit te lezen, dan volgt een
+        RuntimeError (geen stille aanname dat de afsluiter open is).
         """
         links = self._get_links()
         out = np.zeros(len(links), dtype=bool)
         for i in np.where(self.get_valve_mask())[0]:
             try:
                 out[i] = float(links[i].status) == 0.0
-            except Exception:
-                out[i] = False
+            except Exception as exc:
+                # Onbekende status mag niet als 'open' worden behandeld: dan
+                # zou transport door een mogelijk gesloten afsluiter lopen.
+                raise RuntimeError(
+                    f"Status van afsluiter '{getattr(links[i], 'uid', i)}' kon "
+                    f"niet worden uitgelezen ({type(exc).__name__}: {exc})."
+                ) from exc
         return out
 
     def _get_flow_units(self) -> str:

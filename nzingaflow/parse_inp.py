@@ -37,6 +37,7 @@ Beide functies geven dezelfde dict-structuur terug:
 
 from __future__ import annotations
 import re
+import warnings
 import numpy as np
 from pathlib import Path
 from math import pi
@@ -132,8 +133,10 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         solver = _NoSaveHydraulicSolver(net)
         solver.solve_step(pattern_start_time=simtime)
         solver.close()
-    except Exception:
-        pass   # als solve faalt: flow/velocity worden 0
+    except Exception as exc:
+        warnings.warn(
+            f"Hydraulische berekening mislukt ({type(exc).__name__}: {exc}); "
+            f"debieten en snelheden zijn 0.", RuntimeWarning, stacklevel=2)
 
     # ── 5. Leidingen + pompen + kleppen ──────────────────────────────────────
     pipe_ids    = []
@@ -160,7 +163,11 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         try:
             diam_raw = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_DIAMETER))
             length_raw = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_LENGTH))
-        except Exception:
+        except Exception as exc:
+            warnings.warn(
+                f"Diameter/lengte van leiding '{getattr(link, 'uid', idx)}' niet "
+                f"leesbaar ({type(exc).__name__}: {exc}); noodwaarden 100 / 1.0.",
+                RuntimeWarning, stacklevel=2)
             diam_raw = 100.0
             length_raw = 1.0
 
@@ -176,7 +183,11 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         try:
             raw_flow = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_FLOW))
             raw_vel  = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_VELOCITY))
-        except Exception:
+        except Exception as exc:
+            warnings.warn(
+                f"Debiet/snelheid van leiding '{getattr(link, 'uid', idx)}' niet "
+                f"leesbaar ({type(exc).__name__}: {exc}); waarde 0 gebruikt.",
+                RuntimeWarning, stacklevel=2)
             raw_flow = 0.0
             raw_vel  = 0.0
 
@@ -232,8 +243,11 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
             mults    = [float(net.EN_getpatternvalue(pi_idx, k + 1))
                         for k in range(pat_len)]
             patterns[pat_uid] = mults
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(
+                f"Patroon met index {pi_idx} kon niet worden gelezen "
+                f"({type(exc).__name__}: {exc}); dit patroon wordt overgeslagen.",
+                RuntimeWarning, stacklevel=2)
 
     # ── 7. Bronpatronen per reservoir ─────────────────────────────────────────
     source_patterns = {}
@@ -243,14 +257,26 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         try:
             base_q    = float(net.EN_getnodevalue(nidx, u.EN_NodeProperty.EN_SOURCEQUAL))
             pat_idx   = int(net.EN_getnodevalue(nidx, u.EN_NodeProperty.EN_SOURCEPAT))
-        except Exception:
+        except Exception as exc:
+            # EPANET-fout 240 = geen [SOURCES]-regel voor dit reservoir: dat is
+            # een normale situatie (bewuste standaard base_q=1.0, geen patroon).
+            # Elke andere fout is een echte leesfout en wordt gemeld.
+            if 'Error 240' not in str(exc):
+                warnings.warn(
+                    f"Bronkwaliteit of -patroon van reservoir '{uid}' kon niet worden "
+                    f"gelezen ({type(exc).__name__}: {exc}); noodwaarde base_q=1.0 "
+                    f"zonder patroon gebruikt.", RuntimeWarning, stacklevel=2)
             base_q, pat_idx = 1.0, 0
 
         if pat_idx > 0:
             try:
                 pat_uid = net.EN_getpatternid(pat_idx)
                 mults   = patterns.get(pat_uid, [1.0])
-            except Exception:
+            except Exception as exc:
+                warnings.warn(
+                    f"Bronpatroon (index {pat_idx}) van reservoir '{uid}' kon niet "
+                    f"worden gelezen ({type(exc).__name__}: {exc}); constante "
+                    f"vermenigvuldiger 1.0 gebruikt.", RuntimeWarning, stacklevel=2)
                 mults = [1.0]
         else:
             mults = [1.0]

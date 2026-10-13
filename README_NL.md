@@ -73,10 +73,24 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
 
 ## Installatie
 
+**Stap 1 — EPYnetDTD (verplicht).** NzingaFlow draait op EPYnetDTD (`epynet >= 2.0`, met
+`epynet.solver`). Die versie staat **niet** op PyPI (daar bestaat alleen `epynet <= 1.1`, dat
+niet werkt). Installeer EPYnetDTD eerst vanuit de broncode:
+
+```bash
+pip install ./epynet            # lokale kloon van de EPYnetDTD-repository
+# of: pip install git+<url van je epynet-repository>
+python -c "import epynet.solver"   # moet zonder fout lopen
+```
+
+Zonder deze stap geeft `import nzingaflow` een ImportError met deze uitleg.
+
+**Stap 2 — NzingaFlow.**
+
 ### Via PyPI
 
 ```bash
-# Minimaal (alleen NumPy)
+# Basisinstallatie (NumPy; EPYnetDTD uit stap 1 moet al aanwezig zijn)
 pip install nzingaflow
 
 # Met Numba JIT (~4–5× sneller)
@@ -97,7 +111,7 @@ cd nzingaflow
 pip install -e ".[dev]"
 ```
 
-> **Vereisten:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
+> **Vereisten:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0 (EPYnetDTD, niet via PyPI — zie hierboven)
 
 ---
 

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Error handling: no silent fallbacks, installation docs corrected
+
+- **`solver._get_tank_volumes()`** raises `RuntimeError` (naming the tank) instead of silently
+  using 1000 m³.
+- **`hydraulics.get_closed_mask()`** raises `RuntimeError` when a valve status cannot be read,
+  instead of treating the valve as open.
+- **`parse_inp.load_from_epynet()`** emits a `RuntimeWarning` (with link/reservoir/pattern id)
+  for every emergency value (source quality 1.0, pattern 1.0, diameter/length, flow, failed solve).
+- **Import guard:** a missing EPYnetDTD now gives an ImportError explaining that `epynet>=2.0`
+  is not on PyPI and how to install it.
+- **Docs:** README/README_NL installation section no longer claims a NumPy-only install.
+- **Packaging:** removed the stray duplicate `nzingaflow/pyproject.toml`.
+- Tests: `tests/test_foutafhandeling.py`; stale expectation in `test_mass_balance_tank` aligned
+  with the (correct) `Q_in` formula.
+
 ### PHREEQC-route: chemie van doorstromende segmenten bijhouden
 
 - `solver._record_pipe_out_chem()` (nieuw): per pijp de pH, alkaliniteit en koolstof

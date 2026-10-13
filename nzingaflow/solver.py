@@ -1140,8 +1140,13 @@ class NzingaFlowSolver:
         for n in self.hyd.net.tanks:
             try:
                 volumes.append(float(_u.volume_to_m3(float(n.tank_volume), units)))
-            except Exception:
-                volumes.append(1000.0)   # veilige standaard
+            except Exception as exc:
+                # Geen stille standaardwaarde: een verkeerd tankvolume geeft
+                # een verkeerde menging zonder dat de gebruiker het ziet.
+                raise RuntimeError(
+                    f"Tankvolume van tank '{getattr(n, 'uid', '?')}' kon niet "
+                    f"worden uitgelezen of omgerekend ({type(exc).__name__}: {exc})."
+                ) from exc
         return np.array(volumes, dtype=np.float64) if volumes else np.array([])
 
     def _update_tanks(

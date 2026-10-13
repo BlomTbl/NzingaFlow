@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Foutafhandeling: geen stille terugvalwaarden, installatiedocumentatie gecorrigeerd
+
+- **`solver._get_tank_volumes()`** geeft een `RuntimeError` (met tanknaam) i.p.v. stil 1000 m³.
+- **`hydraulics.get_closed_mask()`** geeft een `RuntimeError` als de afsluiterstatus niet te
+  lezen is, i.p.v. de afsluiter als open te behandelen.
+- **`parse_inp.load_from_epynet()`** geeft een `RuntimeWarning` (met link-/reservoir-/patroon-id)
+  bij elke noodwaarde (bronkwaliteit 1.0, patroon 1.0, diameter/lengte, debiet, mislukte solve).
+- **Importcontrole:** ontbrekende EPYnetDTD geeft nu een ImportError met uitleg dat
+  `epynet>=2.0` niet op PyPI staat en hoe je het installeert.
+- **Docs:** installatiesectie van README/README_NL belooft geen NumPy-only installatie meer.
+- **Packaging:** de dubbele `nzingaflow/pyproject.toml` is verwijderd.
+- Tests: `tests/test_foutafhandeling.py`; verouderde verwachting in `test_mass_balance_tank`
+  gelijkgetrokken met de (correcte) `Q_in`-formule.
+
 ### Transport: een segment kan in één tijdstap over meerdere korte doorgaande leidingen gaan
 
 - **`solver._handle_exits()` / nieuw `_cascade_thru()`.** De reistijd die na het verlaten van een leiding over is, wordt nu binnen dezelfde tijdstap doorgegeven over opeenvolgende doorgaande knopen. Eerder stopte een segment na één leiding per stap, wat ongeveer één tijdstap vertraging per korte leiding gaf. Op FRL-10 gaf dat een vertraging van 2 u bij de piek van EC op knoop 164593422; na de wijziging ongeveer 0,6 u (passagetijden 15–20 min achter EPANET). Splitsingen, eindknopen en leidingen die niet volledig worden doorlopen, stoppen zoals voorheen.
