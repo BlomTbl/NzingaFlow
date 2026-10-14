@@ -15,7 +15,7 @@
 - **Docs:** README/README_NL installation section no longer claims a NumPy-only install.
 - **Packaging:** removed the stray duplicate `nzingaflow/pyproject.toml`.
 - `geochemistry._read_back()`: a PHREEQC read-back failure is now counted/warned via `_record_failure` instead of silently ignored.
-- New `tests/test_validatie_numeriek.py`: arrival time, mass balance (single pipe, series), steady-state mixing (analytical), closed/open valve, flow reversal and comparison with an EPANET quality run. Known deviation documented as strict xfail: mass is lost at junctions with ≥2 inflows while a front arrives (continuous Q·Δt mixing; constant ~0.07 m³·C in the test network, independent of dt).
+- New `tests/test_validatie_numeriek.py`: arrival time, mass balance (single pipe, series), steady-state mixing (analytical), closed/open valve, flow reversal and comparison with an EPANET quality run. Finding: with empty pipes (no `set_initial_quality()`), mixing junctions with ≥2 inflows dilute with water that has no segments, losing a fixed amount of mass (~0.07 m³·C in the test network, independent of dt). With pre-filled pipes mass is conserved (<0.1 %). Documented in `EPSRunner.run` and tested.
 - Tests: `tests/test_foutafhandeling.py`; stale expectation in `test_mass_balance_tank` aligned
   with the (correct) `Q_in` formula.
 

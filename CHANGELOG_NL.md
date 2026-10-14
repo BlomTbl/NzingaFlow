@@ -14,7 +14,7 @@
 - **Docs:** installatiesectie van README/README_NL belooft geen NumPy-only installatie meer.
 - **Packaging:** de dubbele `nzingaflow/pyproject.toml` is verwijderd.
 - `geochemistry._read_back()`: een mislukte PHREEQC-terugleesactie wordt nu geteld en gemeld via `_record_failure` i.p.v. stil genegeerd.
-- Nieuw `tests/test_validatie_numeriek.py`: aankomsttijd, massabalans (enkele leiding, serie), stationaire menging (analytisch), gesloten/open afsluiter, stroomomkering en vergelijking met een EPANET-kwaliteitsberekening. Bekende afwijking vastgelegd als strikte xfail: bij knopen met ≥2 inkomende leidingen gaat massa verloren zolang een front aankomt (continue Q·Δt-menging; constant ~0,07 m³·C in het testnetwerk, onafhankelijk van dt).
+- Nieuw `tests/test_validatie_numeriek.py`: aankomsttijd, massabalans (enkele leiding, serie), stationaire menging (analytisch), gesloten/open afsluiter, stroomomkering en vergelijking met een EPANET-kwaliteitsberekening. Bevinding: met lege leidingen (zonder `set_initial_quality()`) verdunnen mengknopen met ≥2 inkomende leidingen met water zonder segmenten, waardoor een vaste hoeveelheid massa verloren gaat (~0,07 m³·C in het testnetwerk, onafhankelijk van dt). Met gevulde leidingen blijft massa behouden (<0,1 %). Vastgelegd in `EPSRunner.run` en getest.
 - Tests: `tests/test_foutafhandeling.py`; verouderde verwachting in `test_mass_balance_tank`
   gelijkgetrokken met de (correcte) `Q_in`-formule.
 

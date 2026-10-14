@@ -53,6 +53,12 @@ class EPSRunner:
         verbose:          bool  = False,
     ) -> np.ndarray:
         """
+        LET OP — beginwater: zonder aanroep van ``solver.set_initial_quality()``
+        zijn de leidingen leeg. Bij knopen met twee of meer instromende leidingen
+        verdunt de menging dan met water dat niet als segment bestaat, waardoor
+        een vaste hoeveelheid massa verloren gaat (zie tests/test_validatie_numeriek.py).
+        Roep daarom ``set_initial_quality()`` aan, ook bij beginconcentratie 0.
+
         Voer de volledige EPS-simulatie uit.
 
         Parameters

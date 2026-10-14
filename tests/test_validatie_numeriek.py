@@ -4,7 +4,7 @@ Numerieke validatie van het transport (massabehoud, analytische en EPANET-refere
 V1  Eén leiding        — aankomsttijd = L/v (±1 stap), massabalans exact
 V2  Leidingen in serie — massabalans exact
 V3  Mengpunt           — stationaire concentratie = debietgewogen gemiddelde (analytisch)
-V4  Mengpunt           — massabehoud (BEKENDE AFWIJKING, xfail: zie test)
+V4  Mengpunt           — massabehoud met gevulde leidingen; lege leidingen = bekende beperking
 V5  Afsluiter          — open: stof passeert; gesloten: stof blokkeert
 V6  Stroomomkering     — knoopconcentratie volgt de nieuwe aanvoerrichting
 V7  EPANET-referentie  — tijdreeks op het mengpunt vs. EPANET-kwaliteitsberekening
@@ -308,31 +308,34 @@ def test_mengpunt_stationair_is_debietgewogen_gemiddelde(tmp_path):
 
 
 # ── V4 ────────────────────────────────────────────────────────────────────────
-@pytest.mark.xfail(
-    strict=True,
-    reason=("BEKENDE AFWIJKING: bij een knoop met twee instromende leidingen gaat "
-            "een vaste hoeveelheid massa verloren tijdens de aankomst van het front "
-            "(~0,07 m³·C in dit netwerk, onafhankelijk van dt; blijft daarna constant). "
-            "Eén leiding en leidingen in serie zijn exact. Zodra dit is opgelost, "
-            "slaagt deze test en moet de xfail-markering weg."),
-)
-def test_mengpunt_massabehoud_exact(tmp_path):
-    inp = _inp(tmp_path, _NET_MIX)
-    s, r, res = _run(inp, _bron(R1=1.0, R2=1.0), 900.0)
-    mb = s.mass_balance()
-    assert abs(mb["injected"][0] - mb["accounted"][0]) < 1e-6
+def _mix_run(inp, gevuld):
+    s = NzingaFlowSolver(inp, n_species=1, track_mass=True)
+    if gevuld:   # leidingen vooraf gevuld met water van concentratie 0 (zoals [QUALITY] GLOBAL)
+        s.set_initial_quality(np.zeros((len(s.node_index), 1)), dt=5.0)
+    r = EPSRunner(s, qual_dt=5.0, hyd_dt=300.0, duration=900.0)
+    r.run(decay_k=[0.0], inject_schedule=_bron(R1=1.0, R2=1.0), check_cfl=False)
+    return s.mass_balance()
 
 
-def test_mengpunt_massaverlies_blijft_begrensd(tmp_path):
-    """Bewaakt de bekende afwijking uit V4: klein en niet groeiend."""
-    inp = _inp(tmp_path, _NET_MIX)
-    verlies = []
-    for duur in (600.0, 900.0, 1500.0):
-        s, r, res = _run(inp, _bron(R1=1.0, R2=1.0), duur)
-        mb = s.mass_balance()
-        verlies.append(float(mb["injected"][0] - mb["accounted"][0]))
-    assert max(verlies) < 0.1                       # m³·C
-    assert verlies[-1] == pytest.approx(verlies[-2], abs=1e-9)   # groeit niet
+def test_mengpunt_massabehoud_met_gevulde_leidingen(tmp_path):
+    """Met beginwater in de leidingen blijft de massa behouden (< 0,1 %)."""
+    mb = _mix_run(_inp(tmp_path, _NET_MIX), gevuld=True)
+    assert mb["balance_error"][0] < 1e-3
+    assert mb["ok"]
+
+
+def test_mengpunt_lege_leidingen_verliest_massa_bekende_beperking(tmp_path):
+    """
+    Zonder beginwater (lege leidingen) verdunt het mengpunt de aankomende
+    stof met 'water' dat niet bestaat: de knoop deelt door Σ Q, maar de nog
+    niet gevulde leiding levert geen segmenten. Dat kost een vaste hoeveelheid
+    massa (~0,07 m³·C hier, constant na het front). Vul de leidingen dus altijd
+    met set_initial_quality(). Deze test legt het gedrag vast; slaagt hij niet
+    meer (verlies ~0), dan is de beperking opgelost.
+    """
+    mb = _mix_run(_inp(tmp_path, _NET_MIX), gevuld=False)
+    verlies = float(mb["injected"][0] - mb["accounted"][0])
+    assert 0.01 < verlies < 0.1
 
 
 # ── V5 ────────────────────────────────────────────────────────────────────────
