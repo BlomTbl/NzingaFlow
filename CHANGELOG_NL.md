@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Distributie: privé-pakketten, wheels per platform, release-workflow
+
+- **Installatie** beschrijft nu de privé-opzet: EPYnetDTD eerst uit de privé-repository (`git+ssh`), daarna NzingaFlow uit een GitHub-release (wheel per platform) of uit de broncode. De PyPI-instructies zijn verwijderd.
+- **Wheel-tags:** wheels krijgen de tag `py3-none-<platform>` in plaats van `py3-none-any`, omdat ze de MSX-binaries bevatten (`setup.py`, `PlatformBdistWheel`). Daarvoor vereist `build-system` nu `setuptools>=70.1`.
+- **Release-workflow** `.github/workflows/release.yml`: draait de tests en bouwt bij elke `v*`-tag een wheel op Linux en Windows, plus één keer een sdist, en maakt een concept-GitHub-release. Vereist het secret `EPYNET_DEPLOY_KEY`.
+- De `ImportError`-melding in `hydraulics.py` verwijst naar de privé-installatie.
+
 ### Foutafhandeling: geen stille terugvalwaarden, installatiedocumentatie gecorrigeerd
 
 - **`solver._get_tank_volumes()`** geeft een `RuntimeError` (met tanknaam) i.p.v. stil 1000 m³.
