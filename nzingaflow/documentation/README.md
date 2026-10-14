@@ -49,7 +49,7 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 - **Leakage modelling** — proportional volume loss per segment without contaminant ingress (v1.1.0)
 - **MSX reaction system** — EPANET-MSX 2.0 compatible multi-species reaction layer (v1.1.0)
 - **MSX native library bridge** — direct ctypes binding to `libepanetmsx` (EPANET-MSX 2.0); runs an existing `.msx` file unchanged through the official C solver; native libraries bundled for Linux/Windows (introduced in v1.2.0; functional with bundled binaries since v1.2.2)
-- **Valve topology support** — PRV, PSV, TCV, FCV, GPV and PCV included in transport via `include_valves=True` (v1.2.1)
+- **Valve topology support** — PRV, PSV, PBV, TCV, FCV, GPV and PCV included in transport via `include_valves=True` (v1.2.1)
 - **Tanks** — mass-conserving CSTR model with implicit Euler integration (unconditionally stable); tanks absorb arriving segments and release water to their outflow pipes as new segments
 - **Extended Period Simulation (EPS)** — automatic hydraulic updates every `hyd_dt` seconds
 - **Full geochemistry** — optional PhreeqPython/PHREEQC integration
@@ -98,6 +98,14 @@ pip install -e ".[dev]"
 ```
 
 > **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
+>
+> **Important:** epynet 2.0 is not available on PyPI (PyPI only has epynet ≤ 1.1). Install it from source *before* NzingaFlow. Without epynet ≥ 2.0, `import nzingaflow` raises an `ImportError`.
+>
+> ```bash
+> pip install ./epynet                                # local clone of the epynet 2.0 repository
+> # or: pip install git+<url-of-your-epynet-repository>
+> pip install nzingaflow
+> ```
 
 ---
 
@@ -331,14 +339,17 @@ NzingaFlowSolver(
 | `leakage_fraction` | `float` | Fraction of pipe flow lost as leakage (0.0–1.0). Each segment loses proportional volume per timestep; concentration remains constant. Typically 0.05–0.20 for distribution networks. *(v1.1.0)* |
 | `wall_mode` | `str` | `'two_film'` (default): EPANET-compatible series resistance `k_eff = k_f·k_w/(k_f+k_w)`. `'direct'`: k_wall is already k_eff — use when k_wall comes from direct calibration rather than EPANET. *(v1.1.0)* |
 | `include_valves` | `bool` | When `True`, valves (PRV, PSV, PBV, FCV, TCV, GPV, PCV) are included in the transport topology. EPANET always solves hydraulics for valves correctly; this option ensures NzingaFlow also computes residence time and species transport across them. Default `False` for backward compatibility. *(v1.2.1)* |
+| `skip_short_valves` | `bool` | When `include_valves=True`, open short valves are skipped in the transport topology. *(v1.2.1)* |
+| `cache_links` | `bool` | Cache link data in the hydraulic model (see `HydraulicModel`). Default `False`. |
+| `reversal_deadband` | `float` | Flow-reversal dead band [m³/s]: pipes with a flow magnitude below this value keep their previous direction. Default `1e-5`; `0` disables it. See [Flow reversal dead band](#flow-reversal-dead-band-and-external-inflow). |
 
 **Methods**
 
 | Method | Return type | Description |
 |---|---|---|
-| `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Execute one water quality time step |
+| `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False, merge_span=1.0)` | `ndarray (node_count, n_species)` | Execute one water quality time step |
 | `update_hydraulics(simtime=0)` | `None` | Recompute hydraulics; detects flow reversals and rebuilds routing caches |
-| `set_initial_quality(node_quality, simtime=0)` | `None` | Fill every pipe with one segment carrying the concentrations of its upstream node (EPANET-MSX `[QUALITY]` style) and initialise tanks from their node concentration. With `track_mass=True` the initial mass is booked as injection. Call before `EPSRunner.run()` |
+| `set_initial_quality(node_quality, simtime=0, dt=None)` | `None` | Fill every pipe with one segment carrying the concentrations of its upstream node (EPANET-MSX `[QUALITY]` style) and initialise tanks from their node concentration. With `track_mass=True` the initial mass is booked as injection. `dt` [s] (quality step) splits each pipe into segments of about v·dt so that the initial water arrives at the right times; without `dt` each pipe keeps one segment and a warning is issued. Call before `EPSRunner.run()` |
 | `warmup_numba()` | `None` | Trigger Numba JIT compilation before the simulation (call once after init) |
 | `inject(node_uid, C_vector, volume)` | `None` | Inject from a node, distributed proportionally over outgoing pipes |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Inject directly into a pipe at position `x` [m] |
@@ -383,6 +394,7 @@ run(
     inject_schedule:  dict  = None,     # {node: [(t_start, t_end, C_vec), ...]}
     inject_fn:        callable = None,  # dynamic injection callback
     booster_schedule: dict  = None,     # {node: [(t_start, t_end, C_set), ...]}
+    mass_schedule:    dict  = None,     # {node: [(t_start, t_end, mass_flux_vec), ...]} MASS source [mass/s]
     merge_interval:   int   = 10,
     merge_tol:        float = 1e-6,
     check_cfl:        bool  = True,
@@ -503,7 +515,7 @@ from nzingaflow.lta import (
 | `combined_decay_multi` | `(C, pipe, combined_exp, n=None) → None` | `C *= combined_exp[pipe]` in-place; one memory pass for both bulk and wall decay |
 | `bulk_first_order_multi` | `(C, k_vec, dt, n=None) → None` | `C *= exp(-k_vec * dt)` in-place; broadcasts over all segments |
 | `wall_first_order_multi` | `(C, pipe, k_wall, dt, n=None) → None` | Wall decay per segment in-place |
-| `compute_wall_k` | `(diam, velocity, k_w, D_mol, nu) → (n_pipes, n_species) [1/s]` | Volumetric wall reaction rate via two-film model |
+| `compute_wall_k` | `(diam, velocity, k_w, D_mol, nu, pipe_length=None, temperature=None) → (n_pipes, n_species) [1/s]` | Volumetric wall reaction rate via two-film model |
 | `advect` | `(x, pipe, velocity, dt, n=None) → None` | `x += velocity[pipe] * dt` in-place |
 | `exit_detect` | `(x, pipe, pipe_length, exit_mask, n=None) → int` | Fill `exit_mask` in-place; returns number of exiting segments |
 | `node_mixing_multi` | `(exit_mask, pipe, C, flow, pipe_end, node_count, out=None, wC_buf=None, node_flow_buf=None, n=None) → ndarray` | Flow-weighted mixing; zero allocations when pre-allocated buffers are provided |
@@ -659,9 +671,13 @@ rxn = MsxReactionSystem(
     wall_species=[],       # list of wall-bound species names
     params={},             # {name: value} reaction parameters
     pipe_rates={},         # {species: expression} in pipes
+    pipe_equil={},         # EQUIL expressions in pipes (optional)
     pipe_formulas={},      # {species: expression} derived variables
     tank_rates={},         # {species: expression} in tanks
+    tank_formulas={},      # FORMULA expressions in tanks (optional)
     solver='rk4',          # 'euler', 'rk4', 'ros2' (stiff, no scipy), 'rk45', 'radau'
+    rtol=1e-3,             # relative tolerance for adaptive solvers
+    atol=1e-6,             # absolute tolerance for adaptive solvers
 )
 ```
 
@@ -695,7 +711,7 @@ rxn = MsxReactionSystem(
     bulk_species = ['Cl2', 'NH3', 'NH2Cl'],
     wall_species = ['BF'],
     params       = {'k1': 1.5e-4, 'k2': 3e-3, 'k4': 0.01,
-                    'k5': 0.005, 'BFmax': 100.0},
+                    'k3': 1e-3, 'k5': 0.005, 'BFmax': 100.0},
     pipe_rates   = {
         'Cl2':   '-k1 * Cl2 * NH3 - k2 * Cl2 * BF * Av',
         'NH3':   '-k1 * Cl2 * NH3',
@@ -765,7 +781,7 @@ MsxSimulation(
 | `load()` | `MsxNetworkState` | Open the MSX file and build a full network snapshot |
 | `run(save_to_file=False, hyd_file=None)` | `MsxSimulationResult` | Run the full simulation; optionally from a previously saved hydraulics file |
 | `update_initial_quality(node_values=None, link_values=None)` | `None` | Adjust initial concentrations before `run()`: `{name: {species: value}}` |
-| `configure_source(node, species, kind, level, pattern_name=None)` | `None` | Configure a source; `kind` = `'CONCEN'`, `'MASS'`, `'SETPOINT'`, `'FLOWPACED'` or `'NOSOURCE'` |
+| `configure_source(node_name, species_name, kind, level, pattern_name=None)` | `None` | Configure a source; `kind` = `'CONCEN'`, `'MASS'`, `'SETPOINT'`, `'FLOWPACED'` or `'NOSOURCE'` |
 | `update_constant(name, value)` | `None` | Change a named constant in the .msx file |
 | `add_time_pattern(name, multipliers)` | `None` | Add a new time pattern with the given multipliers |
 | `close()` | `None` | Close the library and free memory |
@@ -877,7 +893,7 @@ recommended_dt(
 ) -> float
 ```
 
-Computes `min(dt_CFL, dt_rxn) × safety` where:
+Computes `min(dt_CFL, dt_rxn) × safety`, clamped between `min_dt` and `max_dt` (the lower clamp never exceeds the CFL limit), where:
 - **CFL:** `dt_CFL = min(L / v)` over all pipes with `L > 0` (zero-length elements such as valves with `include_valves=True` and pumps are ignored; they would otherwise give `dt_CFL = 0`)
 - **Reaction:** `dt_rxn = 0.1 / k_max` (10× safety margin)
 
@@ -1071,7 +1087,8 @@ Re    = v · D / ν
 Sh    = 0.023 · Re^0.83 · Sc^(1/3)                                (turbulent, Re > 4000)
 Sh    = (3.66³ + max(1.615·(Re·Sc·D/L)^(1/3) − 0.7, 0)³)^(1/3)  (laminar, Re < 2300)
 Sh    = linear interpolation Sh_lam ↔ Sh_turb                     (transition, 2300 ≤ Re ≤ 4000)
-k_f   = max(Sh · D_mol / D, 4·D_mol/D)   [m/s]   (stagnation floor)
+k_f   = Sh · D_mol / D                       [m/s]   (convective film)
+k_f   = max(k_f, 4·D_mol/D)  for Re < 10    [m/s]   (stagnation floor)
 k_eff = k_f · k_w / (k_f + k_w)                  (series resistance, wall_mode='two_film')
 k_vol = k_eff · 4 / D                    [1/s]    (cylinder A/V = 4/D)
 ```
@@ -1087,7 +1104,7 @@ D_mol(T) = D_mol_20 · exp(17000/R · (1/T₀ − 1/T))   [Hayduk & Laudie 1974]
 k_wall(T) = k_wall · 1.047^(T−20)                    [Rossman 2000]
 ```
 
-Effect: factor 0.59× at 5°C to 1.38× at 30°C on k_wall_vol.
+Effect on k_wall_vol: the factor depends on how the film and wall resistances compare. When the wall reaction is the limiting resistance (k_w ≪ k_f) it approaches θ_w^(T−20), i.e. 0.50× at 5 °C and 1.58× at 30 °C. For a worked example (D = 0.1 m, v = 0.05 m/s, L = 500 m, k_w = 1e-5 m/s), `compute_wall_k()` gives 0.69× at 5 °C and 1.25× at 30 °C.
 
 ### Specifying k_wall per pipe
 
@@ -1267,8 +1284,8 @@ Details: see [CHANGELOG.md](../CHANGELOG.md).
 ### 1.1.0
 
 - **Three-regime Sherwood correlation** in `compute_wall_k()`: laminar (Graetz + entry-length), transition (linear interpolation), turbulent (Dittus-Boelter). Eliminates factor 1.5× error at night-time flows in DN100 pipes.
-- **Temperature correction** (`temperature=` parameter): Arrhenius correction on D_mol (Hayduk & Laudie 1974) and θ=1.047 correction on k_wall (Rossman 2000). Effect: 0.59× at 5°C to 1.38× at 30°C.
-- **Stagnation floor** in `compute_wall_k()`: minimum film transport `k_f_min = 4·D_mol/D` at near-zero velocity.
+- **Temperature correction** (`temperature=` parameter): Arrhenius correction on D_mol (Hayduk & Laudie 1974) and θ=1.047 correction on k_wall (Rossman 2000). Effect: depends on conditions; see the Wall Reactions section.
+- **Stagnation floor** in `compute_wall_k()`: minimum film transport `k_f_min = 4·D_mol/D` for Re < 10.
 - **Leakage modelling** (`leakage_fraction=` parameter): proportional volume loss per segment per timestep without contaminant ingress.
 - **`wall_mode` parameter**: `'two_film'` (default, EPANET-compatible) or `'direct'` (k_wall already k_eff).
 - **`MsxReactionSystem`** (`nzingaflow.msx`): EPANET-MSX 2.0 compatible reaction layer supporting `RATE`, `EQUIL`, `FORMULA`, and wall species. Five numerical solvers: `euler`, `rk4`, `ros2` (stiff, no scipy), `rk45`, `radau`.

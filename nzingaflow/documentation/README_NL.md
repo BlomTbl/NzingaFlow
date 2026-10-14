@@ -49,7 +49,7 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
 - **Lekkagemodellering** — proportioneel volumeverlies per segment zonder contaminantinstroom (v1.1.0)
 - **MSX-reactiesysteem** — EPANET-MSX 2.0-compatibele multi-species reactielaag (v1.1.0)
 - **MSX native library bridge** — directe ctypes-koppeling met `libepanetmsx`; laadt `.msx`-bestanden ongewijzigd (v1.2.0; meegeleverde binaries sinds v1.2.2)
-- **Afsluiters in topologie** — PRV, PSV, TCV, FCV, GPV en PCV worden meegenomen in transport via `include_valves=True` (v1.2.1)
+- **Afsluiters in topologie** — PRV, PSV, PBV, TCV, FCV, GPV en PCV worden meegenomen in transport via `include_valves=True` (v1.2.1)
 - **Tanks** — massabehoudend CSTR-model met impliciet Euler (onvoorwaardelijk stabiel); tanks nemen aankomende segmenten op en geven water als nieuwe segmenten af aan hun uitgaande leidingen
 - **Extended Period Simulation (EPS)** — automatische hydraulica-updates elke `hyd_dt` seconden
 - **Volledige geochemie** — optionele PhreeqPython/PHREEQC-integratie
@@ -98,6 +98,14 @@ pip install -e ".[dev]"
 ```
 
 > **Vereisten:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
+>
+> **Belangrijk:** epynet 2.0 staat niet op PyPI (daar bestaat alleen epynet ≤ 1.1). Installeer het eerst vanuit de broncode, vóór NzingaFlow. Zonder epynet ≥ 2.0 geeft `import nzingaflow` een `ImportError`.
+>
+> ```bash
+> pip install ./epynet                                # lokale kloon van de epynet 2.0-repository
+> # of: pip install git+<url-van-je-epynet-repository>
+> pip install nzingaflow
+> ```
 
 ---
 
@@ -330,14 +338,17 @@ NzingaFlowSolver(
 | `leakage_fraction` | `float` | Fractie van leidingdebiet dat lekt (0.0–1.0). Elk segment verliest per tijdstap proportioneel volume; concentratie blijft constant. Typisch 0.05–0.20 voor distributienetwerken. *(v1.1.0)* |
 | `wall_mode` | `str` | `'two_film'` (standaard): EPANET-compatibel serieschakeling `k_eff = k_f·k_w/(k_f+k_w)`. `'direct'`: k_wall is al k_eff — gebruik als k_wall uit directe kalibratie komt. *(v1.1.0)* |
 | `include_valves` | `bool` | Als `True` worden afsluiters (PRV, PSV, PBV, FCV, TCV, GPV, PCV) opgenomen in de transporttopologie. EPANET lost de hydraulica voor afsluiters altijd correct op; deze optie zorgt dat NzingaFlow de verblijftijd en het stoftransport over afsluiters ook berekent. Standaard `False` voor achterwaartse compatibiliteit. *(v1.2.1)* |
+| `skip_short_valves` | `bool` | Bij `include_valves=True` worden open korte afsluiters overgeslagen in de transporttopologie. *(v1.2.1)* |
+| `cache_links` | `bool` | Link-gegevens in het hydraulische model cachen (zie `HydraulicModel`). Standaard `False`. |
+| `reversal_deadband` | `float` | Dode zone voor stroomrichting [m³/s]: leidingen met een debiet onder deze waarde behouden hun vorige richting. Standaard `1e-5`; `0` schakelt uit. Zie [Stroomrichting-deadband](#stroomrichting-deadband-en-externe-instroom). |
 
 **Methoden**
 
 | Methode | Retourtype | Omschrijving |
 |---|---|---|
-| `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Voer één kwaliteitstijdstap uit |
+| `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False, merge_span=1.0)` | `ndarray (node_count, n_species)` | Voer één kwaliteitstijdstap uit |
 | `update_hydraulics(simtime=0)` | `None` | Herbereken hydraulica; detecteert flow reversals en herbouwt routing-caches |
-| `set_initial_quality(node_quality, simtime=0)` | `None` | Vul elke leiding met één segment met de concentraties van de upstream knoop (zoals EPANET-MSX `[QUALITY]`) en initialiseer tanks vanuit hun knoopconcentratie. Met `track_mass=True` wordt de beginmassa als injectie geboekt. Aanroepen vóór `EPSRunner.run()` |
+| `set_initial_quality(node_quality, simtime=0, dt=None)` | `None` | Vul elke leiding met één segment met de concentraties van de upstream knoop (zoals EPANET-MSX `[QUALITY]`) en initialiseer tanks vanuit hun knoopconcentratie. Met `track_mass=True` wordt de beginmassa als injectie geboekt. `dt` [s] (kwaliteitstijdstap) verdeelt elke leiding in segmenten van ongeveer v·dt, zodat het beginwater op de juiste tijden aankomt; zonder `dt` blijft één segment per leiding (met waarschuwing). Aanroepen vóór `EPSRunner.run()` |
 | `warmup_numba()` | `None` | Trigger Numba JIT-compilatie vóór de simulatie (eenmalig aanroepen na init) |
 | `inject(node_uid, C_vector, volume)` | `None` | Injecteer vanuit knoop, proportioneel over uitgaande leidingen |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Injecteer direct in leiding op positie `x` [m] |
@@ -382,6 +393,7 @@ run(
     inject_schedule:  dict  = None,     # {knoop: [(t_start, t_end, C_vec), ...]}
     inject_fn:        callable = None,  # dynamische injectie-callback
     booster_schedule: dict  = None,     # {knoop: [(t_start, t_end, C_set), ...]}
+    mass_schedule:    dict  = None,     # {knoop: [(t_start, t_end, massaflux_vec), ...]} MASS-bron [massa/s]
     merge_interval:   int   = 10,
     merge_tol:        float = 1e-6,
     check_cfl:        bool  = True,
@@ -502,7 +514,7 @@ from nzingaflow.lta import (
 | `combined_decay_multi` | `(C, pipe, combined_exp, n=None) → None` | `C *= combined_exp[pipe]` in-place; één geheugenpass voor bulk- én wandverval |
 | `bulk_first_order_multi` | `(C, k_vec, dt, n=None) → None` | `C *= exp(-k_vec * dt)` in-place; broadcasting over segmenten |
 | `wall_first_order_multi` | `(C, pipe, k_wall, dt, n=None) → None` | Wandverval per segment in-place |
-| `compute_wall_k` | `(diam, velocity, k_w, D_mol, nu) → (n_pipes, n_species) [1/s]` | Volumetrische wandreactiesnelheid via twee-film-model |
+| `compute_wall_k` | `(diam, velocity, k_w, D_mol, nu, pipe_length=None, temperature=None) → (n_pipes, n_species) [1/s]` | Volumetrische wandreactiesnelheid via twee-film-model |
 | `advect` | `(x, pipe, velocity, dt, n=None) → None` | `x += velocity[pipe] * dt` in-place |
 | `exit_detect` | `(x, pipe, pipe_length, exit_mask, n=None) → int` | Vul `exit_mask` in-place; retourneert aantal exiterende segmenten |
 | `node_mixing_multi` | `(exit_mask, pipe, C, flow, pipe_end, node_count, out=None, wC_buf=None, node_flow_buf=None, n=None) → ndarray` | Debietgewogen menging; geen allocaties als pre-allocated buffers worden meegegeven |
@@ -659,9 +671,13 @@ rxn = MsxReactionSystem(
     wall_species=[],       # lijst van wandgebonden soortsnamen
     params={},             # {naam: waarde} reactieparameters
     pipe_rates={},         # {soort: expressie} in leidingen
+    pipe_equil={},         # EQUIL-expressies in leidingen (optioneel)
     pipe_formulas={},      # {soort: expressie} afgeleide variabelen
     tank_rates={},         # {soort: expressie} in tanks
+    tank_formulas={},      # FORMULA-expressies in tanks (optioneel)
     solver='rk4',          # 'euler', 'rk4', 'ros2' (stijf, geen scipy), 'rk45', 'radau'
+    rtol=1e-3,             # relatieve tolerantie voor adaptieve solvers
+    atol=1e-6,             # absolute tolerantie voor adaptieve solvers
 )
 ```
 
@@ -695,7 +711,7 @@ rxn = MsxReactionSystem(
     bulk_species = ['Cl2', 'NH3', 'NH2Cl'],
     wall_species = ['BF'],
     params       = {'k1': 1.5e-4, 'k2': 3e-3, 'k4': 0.01,
-                    'k5': 0.005, 'BFmax': 100.0},
+                    'k3': 1e-3, 'k5': 0.005, 'BFmax': 100.0},
     pipe_rates   = {
         'Cl2':   '-k1 * Cl2 * NH3 - k2 * Cl2 * BF * Av',
         'NH3':   '-k1 * Cl2 * NH3',
@@ -764,7 +780,7 @@ MsxSimulation(
 | `load()` | `MsxNetworkState` | Open het MSX-bestand en bouw een volledig netwerk-snapshot op |
 | `run(save_to_file=False, hyd_file=None)` | `MsxSimulationResult` | Voer volledige simulatie uit; optioneel via eerder opgeslagen hydraulicabestand |
 | `update_initial_quality(node_values=None, link_values=None)` | `None` | Pas beginconcentraties aan vóór `run()`: `{naam: {stof: waarde}}` |
-| `configure_source(node, species, kind, level, pattern_name=None)` | `None` | Stel bron in; `kind` = `'CONCEN'`, `'MASS'`, `'SETPOINT'`, `'FLOWPACED'` of `'NOSOURCE'` |
+| `configure_source(node_name, species_name, kind, level, pattern_name=None)` | `None` | Stel bron in; `kind` = `'CONCEN'`, `'MASS'`, `'SETPOINT'`, `'FLOWPACED'` of `'NOSOURCE'` |
 | `update_constant(name, value)` | `None` | Wijzig een named constant in het .msx-bestand |
 | `add_time_pattern(name, multipliers)` | `None` | Voeg een nieuw tijdpatroon toe met de gegeven vermenigvuldigers |
 | `close()` | `None` | Sluit de bibliotheek en geef geheugen vrij |
@@ -876,7 +892,7 @@ recommended_dt(
 ) -> float
 ```
 
-Berekent `min(dt_CFL, dt_rxn) × safety` waarbij:
+Berekent `min(dt_CFL, dt_rxn) × safety`, begrensd tussen `min_dt` en `max_dt` (de ondergrens wordt nooit groter dan de CFL-grens), waarbij:
 - **CFL:** `dt_CFL = min(L / v)` over alle leidingen met `L > 0` (elementen met lengte 0, zoals afsluiters met `include_valves=True` en pompen, worden genegeerd; ze geven anders `dt_CFL = 0`)
 - **Reactie:** `dt_rxn = 0.1 / k_max` (10× veiligheidsmarge)
 
@@ -1070,7 +1086,8 @@ Re    = v · D / ν
 Sh    = 0.023 · Re^0.83 · Sc^(1/3)                                (turbulent, Re > 4000)
 Sh    = (3.66³ + max(1.615·(Re·Sc·D/L)^(1/3) − 0.7, 0)³)^(1/3)  (laminair, Re < 2300)
 Sh    = lineaire interpolatie Sh_lam ↔ Sh_turb                    (transitie, 2300 ≤ Re ≤ 4000)
-k_f   = max(Sh · D_mol / D, 4·D_mol/D)   [m/s]   (stagnatie-minimum)
+k_f   = Sh · D_mol / D                       [m/s]   (convectief)
+k_f   = max(k_f, 4·D_mol/D)  voor Re < 10   [m/s]   (stagnatie-minimum)
 k_eff = k_f · k_w / (k_f + k_w)                  (serieschakeling, wall_mode='two_film')
 k_vol = k_eff · 4 / D                    [1/s]    (cilinder A/V = 4/D)
 ```
@@ -1086,7 +1103,7 @@ D_mol(T) = D_mol_20 · exp(17000/R · (1/T₀ − 1/T))   [Hayduk & Laudie 1974]
 k_wall(T) = k_wall · 1.047^(T−20)                    [Rossman 2000]
 ```
 
-Effect: factor 0.59× bij 5°C tot 1.38× bij 30°C op k_wall_vol.
+Effect op k_wall_vol: de factor hangt af van de verhouding tussen film- en wandweerstand. Wanneer de wandreactie de beperkende weerstand is (k_w ≪ k_f), nadert hij θ_w^(T−20), dus 0,50× bij 5 °C en 1,58× bij 30 °C. Voor een uitgewerkt voorbeeld (D = 0,1 m, v = 0,05 m/s, L = 500 m, k_w = 1e-5 m/s) geeft `compute_wall_k()` 0,69× bij 5 °C en 1,25× bij 30 °C.
 
 ### k_wall per leiding opgeven
 
@@ -1269,8 +1286,8 @@ Details: zie [CHANGELOG_NL.md](../CHANGELOG_NL.md).
 ### 1.1.0
 
 - **Drieregime Sherwood-correlatie** in `compute_wall_k()`: laminair (Graetz + entry-length), transitie (lineaire interpolatie), turbulent (Dittus-Boelter). Elimineert factor 1.5× fout bij nachtsituaties in DN100-leidingen.
-- **Temperatuurcorrectie** (`temperature=`-parameter): Arrhenius-correctie op D_mol (Hayduk & Laudie 1974) en θ=1.047-correctie op k_wall (Rossman 2000). Effect: 0.59× bij 5°C tot 1.38× bij 30°C.
-- **Stagnatie-minimum** in `compute_wall_k()`: minimaal filmtransport `k_f_min = 4·D_mol/D` bij nagenoeg nul-snelheid.
+- **Temperatuurcorrectie** (`temperature=`-parameter): Arrhenius-correctie op D_mol (Hayduk & Laudie 1974) en θ=1.047-correctie op k_wall (Rossman 2000). Effect: afhankelijk van de condities; zie de sectie Wandreacties.
+- **Stagnatie-minimum** in `compute_wall_k()`: minimaal filmtransport `k_f_min = 4·D_mol/D` voor Re < 10.
 - **Lekkagemodellering** (`leakage_fraction=`-parameter): proportioneel volumeverlies per segment per tijdstap zonder contaminantinstroom.
 - **`wall_mode`-parameter**: `'two_film'` (standaard, EPANET-compatibel) of `'direct'` (k_wall is al k_eff).
 - **`MsxReactionSystem`** (`nzingaflow.msx`): EPANET-MSX 2.0-compatibele reactielaag met `RATE`, `EQUIL`, `FORMULA` en wandsoorten. Vijf numerieke solvers: `euler`, `rk4`, `ros2` (stijf, geen scipy), `rk45`, `radau`.
