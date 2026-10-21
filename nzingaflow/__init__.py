@@ -130,3 +130,6 @@ __all__ = [
     "check_dt",
     "MassBalanceTracker",
 ]
+
+# Vaste PHREEQC-invoer (decimaalteken), zie locale_guard.py
+from . import locale_guard  # noqa: F401
