@@ -53,7 +53,7 @@ except ImportError:
 def _detect_candidates_kernel(
     pipe, C, V, x, span,
     n, n_species,
-    tol, min_volume,
+    tol, rel_tol, min_volume,
     cand_buf,          # (n-1,) int32 uitvoerbuffer voor kandidaatindices
 ) -> int:
     """
@@ -77,10 +77,16 @@ def _detect_candidates_kernel(
             continue
         if V[i] < min_volume or V[i + 1] < min_volume:
             continue
-        # Early-exit: zodra één stof dC > tol is het paar niet mergeable
+        # Early-exit: zodra één stof dC > drempel is het paar niet mergeable.
+        # drempel per stof = max(tol, rel_tol * max(|C_i|, |C_i+1|))
         ok = True
         for s in range(n_species):
-            if abs(C[i + 1, s] - C[i, s]) >= tol:
+            thr = tol
+            if rel_tol > 0.0:
+                m = max(abs(C[i, s]), abs(C[i + 1, s]))
+                if rel_tol * m > thr:
+                    thr = rel_tol * m
+            if abs(C[i + 1, s] - C[i, s]) >= thr:
                 ok = False
                 break
         if ok:
@@ -139,15 +145,17 @@ def _build_keep_mask(
 
 # ── NumPy fallbacks ───────────────────────────────────────────────────────────
 
-def _detect_candidates_numpy(pipe, C, V, x, span, n, n_species, tol, min_volume, cand_buf):
+def _detect_candidates_numpy(pipe, C, V, x, span, n, n_species, tol, rel_tol, min_volume, cand_buf):
     n1 = n - 1
     same = pipe[:n1] == pipe[1:n]
-    dC   = C[1:n] - C[:n1]
-    np.abs(dC, out=dC)
-    dC_max = dC.max(axis=1)
+    dC   = np.abs(C[1:n] - C[:n1])
+    thr  = tol
+    if rel_tol > 0.0:
+        thr = np.maximum(tol, rel_tol * np.maximum(np.abs(C[:n1]), np.abs(C[1:n])))
+    ok_c = (dC < thr).all(axis=1)
     big  = (V[:n1] >= min_volume) & (V[1:n] >= min_volume)
     near = (x[1:n] - x[:n1]) <= span[pipe[:n1]]
-    cand = np.where(same & (dC_max < tol) & big & near)[0]
+    cand = np.where(same & ok_c & big & near)[0]
     n_cand = len(cand)
     cand_buf[:n_cand] = cand
     return n_cand
@@ -230,13 +238,18 @@ def merge_segments(
     min_volume: float = 1e-12,
     n_pipes:    int   = 0,
     max_span:   np.ndarray | float | None = None,
+    rel_tol:    float = 0.0,
 ) -> int:
     """
     Voeg aangrenzende segmenten samen die (bijna) dezelfde concentratie hebben.
 
     Criteria voor samenvoegen van buurpaar (i, i+1) in dezelfde leiding:
-    - max_s |C[i+1,s] - C[i,s]| < tol
+    - per stof s: |C[i+1,s] - C[i,s]| < max(tol, rel_tol * max(|C[i,s]|, |C[i+1,s]|))
     - V[i] >= min_volume en V[i+1] >= min_volume
+
+    Met rel_tol = 0 (standaard) geldt uitsluitend de absolute tolerantie tol,
+    zoals voorheen. Met rel_tol > 0 groeit de toegestane verschil mee met de
+    concentratie; tol blijft dan de ondergrens voor concentraties nabij nul.
 
     Resultaat: downstream segment (i+1) absorbeert upstream (i).
     Volume-gewogen concentratie; positie van i+1 behouden.
@@ -247,6 +260,7 @@ def merge_segments(
     tol       : concentratietolerantie [mg/L]
     min_volume: minimumvolume [m³]
     n_pipes   : leidingaantal voor CSR-index (0 = auto)
+    rel_tol   : relatieve concentratietolerantie (0 = uit). Zie Criteria hierboven.
     max_span  : maximale positiespreiding [m] van een samen te voegen paar.
                 Per leiding een array (n_pipes,) of één getal. None = geen
                 beperking (oud gedrag). Een samengevoegd segment houdt één
@@ -296,7 +310,7 @@ def merge_segments(
         n_cand = _detect_impl(
             pipe, C, V, x, span_arr,
             n_cur, n_species,
-            tol, min_volume,
+            tol, rel_tol, min_volume,
             _cand_buf,
         )
         if n_cand == 0:
@@ -355,7 +369,7 @@ def warmup_numba_merging(n_species: int = 1) -> None:
 
     x    = np.arange(n, dtype=np.float64) * 1e-3
     span = np.full(1, np.inf)
-    nc = _detect_candidates_kernel(pipe, C, V, x, span, n, n_species, 1e-6, 1e-12, buf)
+    nc = _detect_candidates_kernel(pipe, C, V, x, span, n, n_species, 1e-6, 0.0, 1e-12, buf)
     if nc > 0:
         sel = buf[:nc].copy()
         _merge_pairs_kernel(C, V, sel, nc, n_species)

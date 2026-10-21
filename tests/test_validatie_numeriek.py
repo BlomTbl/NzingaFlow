@@ -233,6 +233,9 @@ def _inp(tmp_path, tekst, naam="net.inp"):
 
 
 def _run(inp, sched, duur, dt=5.0, hyd_dt=300.0, **kw):
+    # Bronnen komen hier via inject_schedule; automatische reservoirbronnen uit
+    # zouden dat dubbel tellen (zie test_reservoir_auto.py voor de auto-modus).
+    kw.setdefault("auto_reservoir_sources", False)
     s = NzingaFlowSolver(inp, n_species=1, track_mass=True, **kw)
     r = EPSRunner(s, qual_dt=dt, hyd_dt=hyd_dt, duration=duur)
     res = r.run(decay_k=[0.0], inject_schedule=sched, check_cfl=False)
@@ -309,7 +312,7 @@ def test_mengpunt_stationair_is_debietgewogen_gemiddelde(tmp_path):
 
 # ── V4 ────────────────────────────────────────────────────────────────────────
 def _mix_run(inp, gevuld):
-    s = NzingaFlowSolver(inp, n_species=1, track_mass=True)
+    s = NzingaFlowSolver(inp, n_species=1, track_mass=True, auto_reservoir_sources=False)
     if gevuld:   # leidingen vooraf gevuld met water van concentratie 0 (zoals [QUALITY] GLOBAL)
         s.set_initial_quality(np.zeros((len(s.node_index), 1)), dt=5.0)
     r = EPSRunner(s, qual_dt=5.0, hyd_dt=300.0, duration=900.0)

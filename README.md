@@ -399,10 +399,28 @@ run(
     mass_schedule:    dict  = None,     # {node: [(t_start, t_end, mass_flux_vec), ...]} MASS source [mass/s]
     merge_interval:   int   = 10,
     merge_tol:        float = 1e-6,
+    merge_rel_tol:    float = 0.0,      # relative merge tolerance (0 = off)
     check_cfl:        bool  = True,
     verbose:          bool  = False,
-) -> ndarray  # shape: (n_steps, node_count, n_species)
+    record_every:     int   = 1,        # store every n-th quality step
+    merge_span:       float | None = 1.0,  # None = no span limit
+) -> ndarray  # shape: (n_steps // record_every, node_count, n_species)
 ```
+
+**Memory: `record_every`.** By default `run()` stores the node concentrations after every quality step: `n_steps × node_count × n_species × 8` bytes. With a small `qual_dt` that is most of the memory (24 h at 10 s on a 27,000-node network: 1.9 GB). `record_every=int(3600 / qual_dt)` keeps only hourly values, and `time_axis()` follows. On that network the stored values were identical and the run time unchanged, and peak memory fell from 2081 MB to 334 MB. Steps that do not complete an interval are not stored.
+
+**Quality time step and merging (one network).** On one network (26,893 nodes, 24 h, one CPU), a smaller `qual_dt` improved agreement with EPANET (run with a 60 s step) more than any merge setting. Mean error after 24 h:
+
+| Merge settings | `qual_dt` | Run time | Error (mg/L) |
+|---|---|---|---|
+| defaults | 300 s | 190 s | 2.46 |
+| defaults | 60 s | 274 s | 1.34 |
+| defaults | 30 s | 429 s | 0.71 |
+| `merge_rel_tol=0.005, merge_span=None, merge_interval=5` | 30 s | 187 s | 1.10 |
+| same | 15 s | 271 s | 0.69 |
+| same | 10 s | 313 s | 0.59 |
+
+At the same step the defaults are more accurate and the relative merge is cheaper (about 40 to 55 % less time, 3 to 4 times fewer segments). At the same run time the relative merge with a smaller step was more accurate in the measured range. This is one network and one machine; the defaults are unchanged. See `benchmark_joure/RESULTATEN_EPYNET.md`.
 
 **`inject_schedule` format**
 
@@ -557,6 +575,8 @@ smap = SpeciesMap(
 ```
 
 Supported PHREEQC elements: `Cl`, `Ca`, `Mg`, `Na`, `K`, `Fe`, `Mn`, `N(5)` (NO₃), `N(3)` (NO₂), `N(-3)` (NH₄), `Alk`, `C(4)` (TIC/CO₂), `S(6)` (SO₄), `P` (phosphate).
+
+**Units and PHREEQC.** PHREEQC works per kg of water. NzingaFlow therefore writes every concentration to PHREEQC per kg of water (`mg/L` becomes `mmol/kgw` through the molar mass table in `GeochemSolver._MOLAR_MASS`, `meq/L` becomes `meq/kgw`) and reads it back the same way, so a round trip through PHREEQC returns exactly what went in. In practice "mg/L" in the species vector is treated as mg per kg of water (about 0.03 to 0.3 % different from mg per litre of solution). Alkalinity is read back from PHREEQC's own `ALK`, which includes ion pairs and hydroxo complexes (for example with iron and manganese). Earlier versions converted per litre on the way in and per kg on the way out, which made water drift on every step (in one test 73 % alkalinity and 1.7 % calcium after 60 steps); see the changelog.
 
 #### GeochemSolver
 
@@ -871,7 +891,23 @@ Pipes whose flow magnitude is below `reversal_deadband` [m³/s] keep their previ
 
 `merge_span` (argument of `step()`, default `1.0`) limits merging: adjacent segments are only merged when their position spread is at most `merge_span · v · dt`. Pass `None` to disable this check.
 
-`set_source_quality(node_uid, C_vector)` sets the concentration of water entering a node through an external inflow (a junction with negative demand, for example `J7` in `pulse4.inp`). The default is 0. It applies to all steps until the next call. Reservoirs are not affected. This matches EPANET with a source of that concentration.
+`set_source_quality(node_uid, C_vector)` sets the concentration of water entering a node through an external inflow (a junction with negative demand, for example `J7` in `pulse4.inp`). The default is 0. It applies to all steps until the next call. Reservoirs are not affected; see *Automatic reservoir sources* below.
+
+### Automatic reservoir sources
+
+By default (`auto_reservoir_sources=True`) the solver feeds every reservoir with a head above 0 automatically:
+
+- With a `[SOURCES]` entry of type `CONCEN`, the reservoir water has concentration `strength × pattern(t)`.
+- Without a source, the reservoir keeps its initial quality (from `set_initial_quality`), as EPANET does.
+- The volume is the reservoir's outgoing flow × the quality time step. Reservoirs with head 0 are switched off and skipped.
+
+### Junctions with negative demand
+
+A junction with a negative demand is an external inflow. The inflowing water has the concentration of the junction's `[SOURCES]` entry (`CONCEN` × pattern), as in EPANET. A junction without a source delivers water with concentration 0 (or the value set with `set_source_quality`). A `CONCEN` source is applied only in steps where the junction's demand is negative. Other source types on a junction give a warning and are not applied automatically.
+
+Other source types (`MASS`, `SETPOINT`, `FLOWPACED`) on an active reservoir raise a `NotImplementedError`; use `auto_reservoir_sources=False` and feed them with `inject()`.
+
+If you already feed a reservoir with `inject()` (for example through `inject_schedule`), set `auto_reservoir_sources=False`. Otherwise the reservoir water is counted twice; `inject()` warns when it targets an automatically fed reservoir.
 
 `set_mixed_pipes(mask)` treats the pipes in `mask` as fully mixed volumes (like a tank) instead of Lagrangian segments. This is **experimental**: it does not work well for pipes with real through-flow, because it can break the volume balance. Use it only for pipes that mostly contain stagnant water going back and forth.
 

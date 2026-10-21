@@ -91,6 +91,7 @@ class NzingaFlowSolver:
         skip_short_valves: bool = True,
         cache_links:      bool  = False,
         reversal_deadband: float = 1e-5,
+        auto_reservoir_sources: bool = True,
     ):
         """
         Parameters
@@ -126,6 +127,12 @@ class NzingaFlowSolver:
         cache_links       : link-objectlijst niet na elke hydraulische oplossing opnieuw
                             opbouwen (zie HydraulicModel).  Zelfde resultaten, sneller
                             bij grote netwerken.  Standaard False.
+        auto_reservoir_sources : bool
+            Injecteer reservoirs met head > 0 automatisch: bron (CONCEN, uit
+            [SOURCES] met patroon) of, zonder bron, de beginkwaliteit; het volume
+            is het uitgaande debiet × dt. Reservoirs met head 0 worden overgeslagen.
+            Zet op False als je reservoirs zelf via inject() wilt voeden (anders
+            dubbele massa).
         skip_short_valves : (alleen met include_valves=True) open afsluiters waarvan
                             de lengte kleiner is dan de afstand die water in één
                             tijdstap aflegt (L < v·dt) worden overgeslagen: een
@@ -186,6 +193,16 @@ class NzingaFlowSolver:
         self._tank_V     = self._get_tank_volumes()   # (n_tanks,) m³ — gecached
         self._tank_C     = np.zeros((len(self._tank_nodes), n_species))  # CSTR toestand
 
+        # Automatische reservoir- en junctionbronnen (zie network_sources.py)
+        self._qual_clock: float = 0.0            # kwaliteitstijd [s], telt mee met elke step()
+        self._res_sources: list = []
+        self._junc_sources: list = []
+        self._warned_auto_res: set[str] = set()
+        self._in_auto_inject: bool = False
+        if auto_reservoir_sources:
+            self._res_sources = self._build_reservoir_sources(n_species)
+            self._junc_sources = self._build_junction_sources(n_species)
+
         # Uitgaande leidingen per knoop (herbouwd na flow-reversal)
         self._node_outpipes: dict[int, list[int]] = defaultdict(list)
 
@@ -207,6 +224,7 @@ class NzingaFlowSolver:
         self._ext_C: np.ndarray | None = None        # (node_count, n_species)
         # Persistente knoopconcentratie (laatste aankomst) en aankomstvlag
         self._node_C_hold: np.ndarray | None = None  # (node_count, n_species)
+        self._res_init_C: np.ndarray | None = None   # beginkwaliteit per knoop (vast, voor reservoirs)
         self.node_arrived: np.ndarray | None = None  # (node_count,) bool, deze stap
         # Uitlaat-concentratie per leiding (laatst aangekomen), voor knoopmenging
         self._pipe_out_C: np.ndarray | None = None   # (n_pipes, n_species)
@@ -404,6 +422,9 @@ class NzingaFlowSolver:
         # Persistente knoopconcentratie start met de beginconditie (punt 5):
         # knopen die pas later een aankomst krijgen, tonen tot dan deze waarde.
         self._node_C_hold = C_node.copy()
+        # Beginkwaliteit blijft bewaard: een reservoir zonder bron houdt in EPANET
+        # altijd deze waarde, ook als het zelf water ontvangt.
+        self._res_init_C = C_node.copy()
         # Uitlaatconcentratie per leiding = begininhoud (stroomafwaarts, zie hieronder)
         self._pipe_out_C = C_node[self.pipe_end].copy()
 
@@ -466,6 +487,9 @@ class NzingaFlowSolver:
         en _node_outpipes aan zodat advectie altijd in de juiste richting loopt.
         """
         self.hyd.solve(simtime=simtime)
+        # Kwaliteitsklok volgt de hydraulische tijd (patronen van automatische bronnen);
+        # binnen een hydraulische stap telt step() er dt bij op.
+        self._qual_clock = float(simtime)
         self._flow     = None
         self._velocity = None
         # Knoopvraag is optioneel: een hydraulische bron zonder get_node_demand()
@@ -650,6 +674,89 @@ class NzingaFlowSolver:
 
     # ── Injectie ──────────────────────────────────────────────────────────────
 
+    def _build_reservoir_sources(self, n_species: int) -> list:
+        """Lijst (naam, knoopindex, sterkte, patroonwaarden, patroonstap, patroonstart)."""
+        from .network_sources import reservoir_sources, pattern_values, pattern_timing
+        net = self.hyd.net
+        found: list = []
+        pstep, pstart = pattern_timing(net)
+        for r in reservoir_sources(net):
+            if r.name not in self.node_index:
+                continue
+            if r.kind is not None and r.kind != "CONCEN":
+                raise NotImplementedError(
+                    f"Reservoir '{r.name}': bronsoort {r.kind} wordt niet automatisch "
+                    f"ondersteund. Gebruik auto_reservoir_sources=False en injecteer "
+                    f"zelf met inject().")
+            if r.kind == "CONCEN" and n_species != 1:
+                raise NotImplementedError(
+                    f"Reservoir '{r.name}' heeft een CONCEN-bron; automatische "
+                    f"reservoirbronnen werken alleen met n_species=1. Gebruik "
+                    f"auto_reservoir_sources=False.")
+            values: list = pattern_values(net, r.pattern) if r.pattern is not None else []
+            found.append((r.name, self.node_index[r.name], r.strength, values,
+                          pstep, pstart))
+        return found
+
+    def _build_junction_sources(self, n_species: int) -> list:
+        """Bronnen op junctions (negatieve vraag = instroom). Zelfde tuple-vorm als reservoirs."""
+        from .network_sources import junction_sources, pattern_values, pattern_timing
+        net = self.hyd.net
+        found: list = []
+        pstep, pstart = pattern_timing(net)
+        for r in junction_sources(net):
+            if r.name not in self.node_index:
+                continue
+            if r.kind != "CONCEN":
+                import warnings
+                warnings.warn(
+                    f"Knoop '{r.name}': bronsoort {r.kind} op een junction wordt niet "
+                    f"automatisch toegepast (alleen CONCEN). Gebruik set_source_quality().",
+                    UserWarning, stacklevel=3)
+                continue
+            if n_species != 1:
+                raise NotImplementedError(
+                    f"Knoop '{r.name}' heeft een CONCEN-bron; automatische bronnen werken "
+                    f"alleen met n_species=1. Gebruik auto_reservoir_sources=False.")
+            values: list = pattern_values(net, r.pattern) if r.pattern is not None else []
+            found.append((r.name, self.node_index[r.name], r.strength, values, pstep, pstart))
+        return found
+
+    def _apply_junction_sources(self, t: float) -> None:
+        """Stel de instroomconcentratie in van junctions met bron en negatieve vraag."""
+        if not self._junc_sources or self._node_demand is None:
+            return
+        from .network_sources import pattern_multiplier
+        for name, ni, strength, values, pstep, pstart in self._junc_sources:
+            if self._node_demand[ni] < 0.0:
+                c = strength * pattern_multiplier(values, t, pstep, pstart)
+                self.set_source_quality(name, np.array([c]))
+
+    def _auto_inject_reservoirs(self, dt: float) -> None:
+        """Voed actieve reservoirs met hun bron; wordt aan het begin van elke step() aangeroepen."""
+        t = self._qual_clock
+        self._qual_clock += float(dt)
+        self._apply_junction_sources(t)
+        if not self._res_sources:
+            return
+        from .network_sources import pattern_multiplier
+        flow, _ = self._get_hydraulics()
+        for name, ni, strength, values, pstep, pstart in self._res_sources:
+            vol = float(flow[self.pipe_start == ni].sum()) * float(dt)
+            if vol <= 0.0:
+                continue
+            if strength is None:
+                # Geen bron: vaste beginkwaliteit van het reservoir (zoals EPANET)
+                c = (self._res_init_C[ni].copy() if self._res_init_C is not None
+                     else np.zeros(self.n_species))
+            else:
+                c = np.array([strength * pattern_multiplier(values, t, pstep, pstart)])
+            self._in_auto_inject = True
+            try:
+                self.inject(name, c, vol)
+            finally:
+                self._in_auto_inject = False
+
     def inject(self, node_uid: str, C_vector, volume: float) -> None:
         """
         Injecteer vanuit een knoop proportioneel over alle uitgaande leidingen.
@@ -667,6 +774,16 @@ class NzingaFlowSolver:
         node_idx = self.node_index.get(node_uid)
         if node_idx is None:
             raise KeyError(f"Onbekende knoopnaam: '{node_uid}'")
+        if not self._in_auto_inject \
+                and any(src[1] == node_idx for src in self._res_sources) \
+                and node_uid not in self._warned_auto_res:
+            self._warned_auto_res.add(node_uid)
+            import warnings
+            warnings.warn(
+                f"Reservoir '{node_uid}' wordt automatisch gevoed "
+                f"(auto_reservoir_sources=True). Deze inject() voegt daar extra "
+                f"water toe. Verwijder de handmatige injectie of zet "
+                f"auto_reservoir_sources=False.", UserWarning, stacklevel=2)
         out = self._node_outpipes.get(node_idx, [])
         if not out:
             # Geen uitgaande leidingen op dit tijdstip (eindknoop of flow
@@ -837,6 +954,7 @@ class NzingaFlowSolver:
         merge_tol:      float = 1e-6,
         check_cfl:      bool  = False,
         merge_span:     float | None = 1.0,
+        merge_rel_tol:  float = 0.0,
     ) -> np.ndarray:
         """
         Voer één kwaliteitstijdstap uit.
@@ -863,6 +981,7 @@ class NzingaFlowSolver:
         decay_k        : (n_species,) bulkvervalconstanten [1/s]
         merge_interval : voer merging uit elke N stappen
         merge_tol      : concentratietolerantie voor merging
+        merge_rel_tol  : relatieve concentratietolerantie voor merging (0 = uit)
         check_cfl      : als True, controleer CFL en waarschuw indien nodig
         merge_span     : samenvoegen alleen als de span van het paar blijft
                          onder merge_span·v·dt. None of 0 schakelt de
@@ -888,6 +1007,8 @@ class NzingaFlowSolver:
 
         if check_cfl:
             self.check_stability(dt, decay_k, warn=True)
+        self._auto_inject_reservoirs(dt)
+        n = self.segments.n
 
         # Zonder segmenten én zonder tanks valt er niets te doen. Mét tanks moet
         # de stap doorlopen: een tank kan een leeg net opnieuw vullen.
@@ -1051,7 +1172,8 @@ class NzingaFlowSolver:
                 if merge_span is not None and merge_span > 0.0:
                     span = merge_span * velocity * dt
                 merge_segments(self.segments, tol=merge_tol,
-                              n_pipes=len(self.pipe_ids), max_span=span)
+                              n_pipes=len(self.pipe_ids), max_span=span,
+                              rel_tol=merge_rel_tol)
 
         # 9. Massabalans
         if self._tracker:
@@ -1561,6 +1683,12 @@ class NzingaFlowSolver:
             self._node_C_hold = np.zeros((nc, ns), dtype=np.float64)
         flowing = node_V_tot > 0.0
         self._node_C_hold[flowing] = node_C[flowing]
+        # Reservoir zonder bron: rapporteer de vaste beginkwaliteit (EPANET), ook als
+        # het reservoir zelf water ontvangt.
+        if self._res_sources and self._res_init_C is not None:
+            for _name, _ni, _strength, *_rest in self._res_sources:
+                if _strength is None:
+                    self._node_C_hold[_ni] = self._res_init_C[_ni]
         arr = getattr(self, '_arrived_nodes', None)
         self.node_arrived = arr.copy() if arr is not None and arr.shape == (nc,) \
             else np.zeros(nc, dtype=bool)

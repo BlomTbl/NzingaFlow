@@ -2,6 +2,58 @@
 
 ## [Unreleased]
 
+### Sources from the loaded epynet network (replaces `inp_sources.py`)
+
+- **Changed:** reservoir and junction sources, and their patterns and pattern timing, are read from the loaded epynet network (`nzingaflow/network_sources.py`) instead of parsing the `.inp` text. epynet reads the file with the EPANET kernel, so pattern start and timestep follow EPANET's own interpretation.
+- **Removed:** `nzingaflow/inp_sources.py` and `tests/test_inp_sources.py`. Replaced by `tests/test_network_sources.py` (4 tests).
+- Checked on FRL-10: 5 active reservoirs and 2 junction sources, identical to the text parser (strengths, patterns, pattern step 300 s, start 0).
+- Note: the reservoir head is read from its elevation (the fixed head in EPANET). `EN_HEAD` is 0 before a solve.
+
+### pH from alkalinity and carbon (PHREEQC)
+
+- **New:** `geochemistry.ph_from_alk_ct(alk, ct, background=None, temp=15.0)` computes pH per (ALK meq/kgw, CT mmol/kgw) pair with PHREEQC, with optional fixed background ions. Unique pairs are computed once, one PHREEQC run per chunk.
+- Tests: `tests/test_ph_alk_ct.py` (matches direct PHREEQC, NaN for invalid input, duplicate pairs).
+
+### PHREEQC-route: five fixes (verified against direct PHREEQC)
+
+- **Fixed: `C(4)`, `N(5)`, `S(6)` read back as 0.** `total_element()` only accepts the bare element name, so these mappings wiped carbonate/nitrate/sulfate after every step. Read-back now uses the element name (`_readback_name`). Caveat: with several oxidation states of one element in a mapping, only the element total is read back.
+- **Fixed: default background added ions.** `DEFAULT_BACKGROUND` no longer contains Ca, Mg, Na, Cl, SO₄ or Alkalinity. With a carbonate mixing node the old default moved pH by ~0.3 units (9.06 instead of 9.36, the direct PHREEQC value). Ions must be given explicitly in `background_solution`.
+- **Fixed: supersaturated equilibrium phases never precipitated.** `saturate()` only dissolves. `_run_eq_phases` now uses `desaturate()` above the SI target; the `amount` value sets the `in_phase` limit for dissolution. Checked: calcite at SI 0.74 goes to Ca 1.81 mmol/L, pH 7.50, as in direct PHREEQC.
+- **Fixed: kinetics crashed.** PhreeqPython 1.6.2 has no `add_kinetics()` / `add_reaction_raw()`, and `total(…, 'mol/L')` returns `None`. Kinetics now run through `ip.run_string()` (`_run_phreeqc_block`). The `kinetics_script` placeholders are `{dt_s}`, `{dt_d}` and one per element in mol/L. The RATES block must end with a `SAVE rate * TIME` line; without it PHREEQC hangs, so the code raises a `ValueError` first. `chlorine_decay_geochem()` now gives first-order decay that matches exp(−kt).
+- **Fixed: meq/L on non-alkalinity elements.** It was read back with factor 1, which is wrong for divalent ions. `SpeciesMap` now rejects it; use mmol/L or mg/L. `phreeqc_names='Alkalinity'` is also rejected (use `'Alk'`).
+- **Fixed: first solution number was 0.** PhreeqPython starts its counter at −1, and `USE solution 0` hangs PHREEQC. The counter now starts at 0, so the first solution is number 1.
+- **Behaviour change:** `DEFAULT_BACKGROUND` no longer contains ions (see above), and chlorine recipe is now first-order on total Cl (pH dependence is not modelled).
+- Tests: `tests/test_geochem_regressie.py` (10 tests, real PHREEQC).
+
+### EPSRunner: `record_every` and `merge_span`
+
+- **New:** `EPSRunner.run(record_every=n)` stores only every n-th quality step. The result matrix costs `steps × nodes × n_species × 8` bytes; at a small `qual_dt` that was most of the memory (24 h at 10 s on 26,893 nodes: peak 2081 MB, now 334 MB with hourly recording; stored values and run time identical). `time_axis()` follows the last `run()`. Default 1 = unchanged.
+- **New:** `EPSRunner.run(merge_span=...)` is passed to `solver.step` (default 1.0 = unchanged). Before, `merge_span=None` could only be reached by replacing `solver.step`.
+- `merge_rel_tol` and the two new parameters are now in the `run()` signature in the README, with measurements on one network for `qual_dt` against merge settings.
+
+### Verification against EPANET 2.3.3: fixes
+
+- **Fixed: Pattern Start.** Source patterns used `(t - start)`; EPANET uses `((t + start) // step) mod length`. Wrong for any network with a non-zero Pattern Start. Verified against EPANET.
+- **Fixed: reservoir without source.** It kept the held node concentration, which changes when the reservoir itself receives water (flow reversal). EPANET keeps the initial quality. The initial quality is now stored at `set_initial_quality` and also reported for the reservoir node.
+- **Fixed: quality clock.** The clock for automatic source patterns now follows `update_hydraulics(simtime)` instead of counting steps from 0.
+- **Fixed: water drifted on every step through PHREEQC.** Concentrations were written per litre (PHREEQC converts with a density of 1 kg/L minus the dissolved mass) and read back as per kg of water, and alkalinity was summed from a fixed list of free species that missed ion pairs and, with iron and manganese, hydroxo complexes. Measured on six species (Cl2, pH, Alk, Ca, Fe, Mn), average relative change per species after 60 rounds: Alk 73 %, Ca 1.7 %, Fe 2.0 %, Mn 1.7 %, Cl2 1.4 %. Now: 0.00000 % for all of them after 576 rounds (pH 0.0003 %, rounding to four decimals).
+  - All PHREEQC input is per kg of water (`mg/L` via our own molar mass table, the same in both directions; `meq/L` → `meq/kgw`; background `units` normalised to `mol/kgw`). **Behaviour change:** "mg/L" in the species vector now means mg per kg of water (0.03 to 0.3 % different from per litre).
+  - Alkalinity is read from PHREEQC's own `ALK` (`_alk_batch`, one extra run per batch) in the batch, mixing and `get_conc` paths. `_ALK_SPECIES` (coefficients as in phreeqc.dat, including Fe(III) = -2) remains as a fallback.
+  - Also faster: 0.068 s per round of 100 segments against 0.100 s before (one machine, 100 segments).
+  - Checked with `phreeqc.dat` and `vitens.dat` (0.00000 % drift). `wateq4f_PWN.dat` cannot be loaded by phreeqpython at all.
+- Tests: `test_geochem_alk_roundtrip.py` (real PHREEQC), regression tests for reversal, Pattern Start and the clock.
+
+### Junctions with negative demand: automatic CONCEN sources
+
+- **New:** a `CONCEN` source on a junction with negative demand sets the concentration of the inflowing water (strength × pattern), as in EPANET. Applied only in steps with negative demand. Parsing: `read_junction_sources` in `inp_sources.py`.
+- Other source types on junctions give a `UserWarning` and are not applied automatically.
+
+### Reservoirs: automatic sources
+
+- **New:** `auto_reservoir_sources=True` (default). Reservoirs with head > 0 are fed automatically from `[SOURCES]` (CONCEN with pattern) or keep their initial quality. Reservoirs with head 0 are skipped. Parsing lives in `nzingaflow/inp_sources.py` and needs no epynet.
+- **Behaviour change:** before, reservoirs delivered no water to the network. Test networks that fed reservoirs with `inject_schedule` now set `auto_reservoir_sources=False`.
+- `NotImplementedError` for MASS/SETPOINT/FLOWPACED sources on active reservoirs; `UserWarning` when `inject()` targets an automatically fed reservoir.
+
 ### Distribution: private packages, per-platform wheels, release workflow
 
 - **Installation** now describes the private setup: install EPYnetDTD first from its private repository (`git+ssh`), then NzingaFlow from a GitHub release (wheel per platform) or from source. The PyPI instructions are removed.

@@ -77,9 +77,9 @@ try:
 except ImportError as _exc:   # pragma: no cover - afhankelijk van omgeving
     raise ImportError(
         "NzingaFlow vereist EPYnetDTD (epynet >= 2.0, met epynet.solver). "
-        "Dat staat niet op PyPI (daar bestaat alleen epynet <= 1.1); installeer "
-        "het vanuit de broncode, bijvoorbeeld: pip install ./epynet-clone  "
-        "of pip install git+<url van je epynet-repository>. "
+        "Dat staat niet op PyPI (daar bestaat alleen epynet <= 1.1). Installeer het "
+        "eerst uit de privé-repository, bijvoorbeeld: "
+        "pip install \"epynet @ git+ssh://git@github.com/<org>/epynet.git@v2.0.0\". "
         "Zie 'Installatie' in de README."
     ) from _exc
 

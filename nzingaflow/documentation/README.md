@@ -5,8 +5,8 @@
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
-[![License](https://img.shields.io/badge/license-MIT-green)](../LICENSE)
-[![Version](https://img.shields.io/badge/version-1.3.1-informational)](../CHANGELOG.md)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.3.1-informational)](CHANGELOG.md)
 
 NzingaFlow simulates water quality in drinking water distribution networks using the **Lagrangian Transport Approach (LTA)**. Chemical species are transported as discrete segments carried along with the flow — eliminating the numerical diffusion inherent to Eulerian methods. All core calculations are fully vectorized with NumPy and optionally accelerated with Numba JIT compilation.
 
@@ -73,39 +73,41 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 
 ## Installation
 
-### From PyPI
+NzingaFlow and EPYnetDTD are private packages. You need read access to both GitHub repositories, via an SSH key or a token.
+
+**Step 1 — EPYnetDTD (required, install first).** NzingaFlow needs `epynet >= 2.0` (with `epynet.solver`). That version is not on PyPI (PyPI only has `epynet <= 1.1`, which does not work), so install it from its private repository:
 
 ```bash
-# Minimal (NumPy only)
-pip install nzingaflow
-
-# With Numba JIT (~4–5× faster)
-pip install "nzingaflow[numba]"
-
-# With full geochemistry (PhreeqPython/PHREEQC)
-pip install "nzingaflow[geochem]"
-
-# Everything including dev tools
-pip install "nzingaflow[all]"
+pip install "epynet @ git+ssh://git@github.com/<org>/epynet.git@v2.0.0"
+python -c "import epynet.solver"   # must run without error
 ```
+
+Without this step, `import nzingaflow` raises an ImportError with this explanation.
+
+**Step 2 — NzingaFlow.**
+
+### From a GitHub release (recommended)
+
+Each release has a wheel for Linux x86-64 and one for Windows x86-64. Download the wheel with the GitHub CLI and install it:
+
+```bash
+gh release download vX.Y.Z --repo <org>/nzingaflow --pattern "*linux_x86_64.whl"
+pip install ./nzingaflow-*-linux_x86_64.whl
+```
+
+On Windows, use `--pattern "*win_amd64.whl"` and install that file. There is no macOS wheel yet, because the EPANET-MSX libraries for macOS are not included (see `nzingaflow/lib/README.txt`). On macOS, install from source instead; the MSX bridge is then unavailable until you build the library yourself.
 
 ### From source
 
 ```bash
-git clone https://github.com/nzingaflow/nzingaflow.git
+git clone git@github.com:<org>/nzingaflow.git
 cd nzingaflow
 pip install -e ".[dev]"
 ```
 
-> **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
->
-> **Important:** epynet 2.0 is not available on PyPI (PyPI only has epynet ≤ 1.1). Install it from source *before* NzingaFlow. Without epynet ≥ 2.0, `import nzingaflow` raises an `ImportError`.
->
-> ```bash
-> pip install ./epynet                                # local clone of the epynet 2.0 repository
-> # or: pip install git+<url-of-your-epynet-repository>
-> pip install nzingaflow
-> ```
+Optional extras: `[numba]` (JIT compilation), `[geochem]` (PhreeqPython) and `[all]` (everything).
+
+> **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0 (see step 1)
 
 ---
 
@@ -397,10 +399,28 @@ run(
     mass_schedule:    dict  = None,     # {node: [(t_start, t_end, mass_flux_vec), ...]} MASS source [mass/s]
     merge_interval:   int   = 10,
     merge_tol:        float = 1e-6,
+    merge_rel_tol:    float = 0.0,      # relative merge tolerance (0 = off)
     check_cfl:        bool  = True,
     verbose:          bool  = False,
-) -> ndarray  # shape: (n_steps, node_count, n_species)
+    record_every:     int   = 1,        # store every n-th quality step
+    merge_span:       float | None = 1.0,  # None = no span limit
+) -> ndarray  # shape: (n_steps // record_every, node_count, n_species)
 ```
+
+**Memory: `record_every`.** By default `run()` stores the node concentrations after every quality step: `n_steps × node_count × n_species × 8` bytes. With a small `qual_dt` that is most of the memory (24 h at 10 s on a 27,000-node network: 1.9 GB). `record_every=int(3600 / qual_dt)` keeps only hourly values, and `time_axis()` follows. On that network the stored values were identical and the run time unchanged, and peak memory fell from 2081 MB to 334 MB. Steps that do not complete an interval are not stored.
+
+**Quality time step and merging (one network).** On one network (26,893 nodes, 24 h, one CPU), a smaller `qual_dt` improved agreement with EPANET (run with a 60 s step) more than any merge setting. Mean error after 24 h:
+
+| Merge settings | `qual_dt` | Run time | Error (mg/L) |
+|---|---|---|---|
+| defaults | 300 s | 190 s | 2.46 |
+| defaults | 60 s | 274 s | 1.34 |
+| defaults | 30 s | 429 s | 0.71 |
+| `merge_rel_tol=0.005, merge_span=None, merge_interval=5` | 30 s | 187 s | 1.10 |
+| same | 15 s | 271 s | 0.69 |
+| same | 10 s | 313 s | 0.59 |
+
+At the same step the defaults are more accurate and the relative merge is cheaper (about 40 to 55 % less time, 3 to 4 times fewer segments). At the same run time the relative merge with a smaller step was more accurate in the measured range. This is one network and one machine; the defaults are unchanged. See `benchmark_joure/RESULTATEN_EPYNET.md`.
 
 **`inject_schedule` format**
 
@@ -530,7 +550,7 @@ from nzingaflow.lta import (
 
 PhreeqPython integration that replaces first-order bulk decay with full PHREEQC geochemistry.
 
-> Requires: `pip install nzingaflow[geochem]` or `pip install phreeqpython`
+> Requires the `geochem` extra (see Installation), or `pip install phreeqpython`
 
 #### SpeciesMap
 
@@ -555,6 +575,8 @@ smap = SpeciesMap(
 ```
 
 Supported PHREEQC elements: `Cl`, `Ca`, `Mg`, `Na`, `K`, `Fe`, `Mn`, `N(5)` (NO₃), `N(3)` (NO₂), `N(-3)` (NH₄), `Alk`, `C(4)` (TIC/CO₂), `S(6)` (SO₄), `P` (phosphate).
+
+**Units and PHREEQC.** PHREEQC works per kg of water. NzingaFlow therefore writes every concentration to PHREEQC per kg of water (`mg/L` becomes `mmol/kgw` through the molar mass table in `GeochemSolver._MOLAR_MASS`, `meq/L` becomes `meq/kgw`) and reads it back the same way, so a round trip through PHREEQC returns exactly what went in. In practice "mg/L" in the species vector is treated as mg per kg of water (about 0.03 to 0.3 % different from mg per litre of solution). Alkalinity is read back from PHREEQC's own `ALK`, which includes ion pairs and hydroxo complexes (for example with iron and manganese). Earlier versions converted per litre on the way in and per kg on the way out, which made water drift on every step (in one test 73 % alkalinity and 1.7 % calcium after 60 steps); see the changelog.
 
 #### GeochemSolver
 
@@ -661,7 +683,7 @@ print(sol.pH, sol.total_element('Ca'))
 
 MSX-compatible multi-species reaction layer implementing the four EPANET-MSX 2.0 concepts: `RATE`, `EQUIL`, `FORMULA`, and surface species (`WALL`). Pass an `MsxReactionSystem` instance as the `geochem` argument to `NzingaFlowSolver`.
 
-> Requires: `pip install nzingaflow` (no extra dependency; scipy required for `rk45`/`radau` solvers)
+> Requires: no extra dependency (scipy is needed for the `rk45`/`radau` solvers)
 
 ```python
 from nzingaflow.msx import MsxReactionSystem
@@ -869,7 +891,23 @@ Pipes whose flow magnitude is below `reversal_deadband` [m³/s] keep their previ
 
 `merge_span` (argument of `step()`, default `1.0`) limits merging: adjacent segments are only merged when their position spread is at most `merge_span · v · dt`. Pass `None` to disable this check.
 
-`set_source_quality(node_uid, C_vector)` sets the concentration of water entering a node through an external inflow (a junction with negative demand, for example `J7` in `pulse4.inp`). The default is 0. It applies to all steps until the next call. Reservoirs are not affected. This matches EPANET with a source of that concentration.
+`set_source_quality(node_uid, C_vector)` sets the concentration of water entering a node through an external inflow (a junction with negative demand, for example `J7` in `pulse4.inp`). The default is 0. It applies to all steps until the next call. Reservoirs are not affected; see *Automatic reservoir sources* below.
+
+### Automatic reservoir sources
+
+By default (`auto_reservoir_sources=True`) the solver feeds every reservoir with a head above 0 automatically:
+
+- With a `[SOURCES]` entry of type `CONCEN`, the reservoir water has concentration `strength × pattern(t)`.
+- Without a source, the reservoir keeps its initial quality (from `set_initial_quality`), as EPANET does.
+- The volume is the reservoir's outgoing flow × the quality time step. Reservoirs with head 0 are switched off and skipped.
+
+### Junctions with negative demand
+
+A junction with a negative demand is an external inflow. The inflowing water has the concentration of the junction's `[SOURCES]` entry (`CONCEN` × pattern), as in EPANET. A junction without a source delivers water with concentration 0 (or the value set with `set_source_quality`). A `CONCEN` source is applied only in steps where the junction's demand is negative. Other source types on a junction give a warning and are not applied automatically.
+
+Other source types (`MASS`, `SETPOINT`, `FLOWPACED`) on an active reservoir raise a `NotImplementedError`; use `auto_reservoir_sources=False` and feed them with `inject()`.
+
+If you already feed a reservoir with `inject()` (for example through `inject_schedule`), set `auto_reservoir_sources=False`. Otherwise the reservoir water is counted twice; `inject()` warns when it targets an automatically fed reservoir.
 
 `set_mixed_pipes(mask)` treats the pipes in `mask` as fully mixed volumes (like a tank) instead of Lagrangian segments. This is **experimental**: it does not work well for pipes with real through-flow, because it can break the volume balance. Use it only for pipes that mostly contain stagnant water going back and forth.
 
@@ -1144,7 +1182,7 @@ Use `solver.recommended_dt()` to compute the optimal time step and pass it as `q
 
 **Q: How do I get the best performance?**
 
-1. Install Numba: `pip install nzingaflow[numba]`
+1. Install the `numba` extra (see Installation), e.g. `pip install -e ".[numba]"` from source
 2. Call `solver.warmup_numba()` once after creating the solver, before the simulation loop
 3. Use `combined_decay_multi` + `build_combined_exp` instead of separate bulk/wall calls (done automatically by the solver)
 
@@ -1239,7 +1277,7 @@ solver = NzingaFlowSolver("network.inp", include_valves=True)
 - `lta.tank_step_implicit()`: the denominator uses `Q_in` instead of `Q_out`; an empty tank no longer gives `NaN`.
 - `EPSRunner.time_axis()` starts at `qual_dt` instead of 0.
 
-Details: see [CHANGELOG.md](../CHANGELOG.md).
+Details: see [CHANGELOG.md](CHANGELOG.md).
 
 ### 1.3.1
 

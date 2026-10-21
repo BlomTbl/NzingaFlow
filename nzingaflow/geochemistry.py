@@ -162,6 +162,18 @@ class SpeciesMap:
                 f"is_pH heeft {len(self.is_pH)} elementen, "
                 f"verwacht {n} (gelijk aan species_names)"
             )
+        for pname, unit in zip(self.phreeqc_names, self.units):
+            if pname == 'Alkalinity':
+                raise ValueError(
+                    "phreeqc_names: gebruik 'Alk' (niet 'Alkalinity'). 'Alkalinity' is "
+                    "geen element in PHREEQC; de waarde zou stil 0 worden."
+                )
+            if pname not in (None, 'Alk') and unit in ('meq/L', 'meq/l', 'ueq/L'):
+                raise ValueError(
+                    f"units='{unit}' voor '{pname}' is niet ondersteund: meq is alleen "
+                    "zinvol voor de alkaliniteit ('Alk'). Gebruik mmol/L of mg/L voor "
+                    "andere elementen."
+                )
 
     @property
     def n_species(self) -> int:
@@ -189,17 +201,16 @@ class SpeciesMap:
 
 # ── Standaard achtergrondoplossing ─────────────────────────────────────────────
 
+# Alleen temperatuur, pH en redoxpotentiaal. Geen ionen: een ion dat je niet in de
+# SpeciesMap zet, mag niet stilzwijgend in elk segment en elke knoop terechtkomen
+# (de oude standaard voegde Ca, Mg, Na, Cl en SO4 toe en verschoof de pH bij een
+# carbonaatmengsel met ~0,3 eenheden). Zet ionen die je wilt, expliciet in
+# background_solution.
 DEFAULT_BACKGROUND = {
-    'temp':       15.0,    # °C
-    'pH':          7.5,
-    'pe':          4.0,
-    'units':      'mol/L',
-    'Alkalinity':  2.5e-3,  # mol/L als HCO₃⁻
-    'Ca':          1.0e-3,
-    'Mg':          5.0e-4,
-    'Na':          1.0e-3,
-    'Cl':          1.0e-3,
-    'S(6)':        5.0e-4,
+    'temp':   15.0,    # °C
+    'pH':      7.5,
+    'pe':      4.0,
+    'units':  'mol/L',
 }
 
 
@@ -210,24 +221,112 @@ def _phreeqc_key(pname: str) -> str:
     return 'Alkalinity' if pname == 'Alk' else pname
 
 
+# Alkaliniteitsbijdrage (equivalenten per mol) van soorten in PHREEQC-oplossingen.
+# Gebaseerd op de definitie Alk = Σ (equivalenten basen) - [H+]; aangevuld met de
+# carbonaat-ionparen en hydroxocomplexen uit phreeqc.dat / wateq4f / minteq.
+# Ontbrekende soorten in de gekozen database tellen als 0 mee. Deze lijst is alleen de
+# terugvaloptie (coëfficiënten volgens phreeqc.dat); de primaire route is PHREEQC's ALK.
+_ALK_SPECIES: Dict[str, float] = {
+    'HCO3-': 1.0, 'CO3-2': 2.0, 'OH-': 1.0, 'H+': -1.0,
+    'CaHCO3+': 1.0, 'CaCO3': 2.0, 'CaOH+': 1.0,
+    'MgHCO3+': 1.0, 'MgCO3': 2.0, 'MgOH+': 1.0,
+    'NaHCO3': 1.0, 'NaCO3-': 2.0,
+    'FeHCO3+': 1.0, 'FeCO3': 2.0, 'FeOH+': 1.0, 'Fe(OH)2': 2.0,
+    'MnHCO3+': 1.0, 'MnCO3': 2.0, 'MnOH+': 1.0, 'Mn(OH)3-': 3.0, 'Mn2OH+3': 1.0,
+    # Fe(III): in phreeqc.dat heeft Fe+3 een alkaliniteit van -2, dus
+    # FeOH+2 = -2 + 1 = -1, Fe(OH)2+ = 0, Fe(OH)3 = +1, Fe(OH)4- = +2.
+    'Fe+3': -2.0, 'FeOH+2': -1.0, 'Fe(OH)2+': 0.0, 'Fe(OH)3': 1.0, 'Fe(OH)4-': 2.0,
+    'Fe2(OH)2+4': -2.0, 'Fe3(OH)4+5': -2.0, 'Fe(OH)3-': 3.0,
+    'HSO4-': -1.0,
+}
+
+
+# PHREEQC rekent intern per kg water. Per-liter-eenheden zet PHREEQC bij de invoer
+# om met een dichtheid van 1 kg/L min de opgeloste massa, terwijl het terugschrijven
+# mol/kg water gebruikt. Elke ronde door PHREEQC gaf daardoor een kleine drift
+# (circa +0,02 tot +0,04 % per stap, bij honderden stappen tientallen procenten).
+# Daarom gaat alle invoer per kg water; mg/L gaat via onze eigen molmassatabel, in
+# beide richtingen dezelfde, zodat heen en terug exact elkaars inverse zijn.
+_UNIT_TO_KGW: Dict[str, str] = {
+    'mol/L': 'mol/kgw', 'mol/l': 'mol/kgw', 'M': 'mol/kgw',
+    'mmol/L': 'mmol/kgw', 'mmol/l': 'mmol/kgw', 'mM': 'mmol/kgw',
+    'umol/L': 'umol/kgw', 'umol/l': 'umol/kgw',
+    'eq/L': 'eq/kgw', 'meq/L': 'meq/kgw', 'meq/l': 'meq/kgw', 'ueq/L': 'ueq/kgw',
+    'mg/L': 'mg/kgw', 'mg/l': 'mg/kgw', 'ug/L': 'ug/kgw', 'ug/l': 'ug/kgw',
+}
+
+
+def _alk_batch(pp, sol_nums) -> np.ndarray:
+    """Alkaliniteit [meq/kg water] van opgeslagen oplossingen, door PHREEQC zelf berekend.
+
+    Dit is PHREEQC's ALK: de behouden alkaliniteit, onafhankelijk van welke soorten
+    er ontstaan (ionparen, hydroxocomplexen van Fe/Mn, ...). Een som over een vaste
+    soortenlijst (_ALK_SPECIES) mist soorten en liet het water bij elke ronde
+    alkaliniteit verliezen (bij Fe/Mn tot ~0,1 % per stap).
+    Eén run_string voor de hele batch; een lege reactie laat PHREEQC rekenen zonder
+    de opgeslagen oplossing te wijzigen.
+    """
+    nums = [int(n) for n in sol_nums]
+    if not nums:
+        return np.empty(0, dtype=np.float64)
+    ip = pp.ip
+    lines = ["SELECTED_OUTPUT 1", "  -reset false", "  -high_precision true",
+             "  -alkalinity true"]
+    for n in nums:
+        lines += [f"USE solution {n}", "REACTION 1", "  H2O 1", "  0 mol", "END"]
+    ip.run_string("\n".join(lines))
+    rows = ip.get_selected_output_array()
+    if len(rows) != len(nums) + 1:
+        raise RuntimeError(f"ALK: {len(rows) - 1} rijen voor {len(nums)} oplossingen")
+    return np.array([float(r[0]) for r in rows[1:]], dtype=np.float64) * 1000.0
+
+
+def _alk_exact(pp, sol_nums, sols) -> np.ndarray:
+    """Exacte ALK (meq/kgw); bij een fout terug naar de soortensom."""
+    try:
+        return _alk_batch(pp, sol_nums)
+    except Exception:
+        return np.fromiter((_sol_value(s, 'Alk') for s in sols),
+                           dtype=float, count=len(sols))
+
+
 def _sol_value(sol, pname: str) -> float:
     """
     Waarde van een PHREEQC-element/grootheid in mmol/L-equivalent.
 
     'Alk' is geen element in PHREEQC: total_element('Alk') geeft stil 0. De
-    alkaliniteit wordt daarom uit de carbonaat-speciatie afgeleid:
-        Alk = [HCO3-] + 2[CO3-2] + [OH-] - [H+]   (mol/L → mmol/L)
+    alkaliniteit wordt daarom uit de speciatie afgeleid. Naast de vrije soorten
+    (HCO3-, CO3-2, OH-, -H+) telt ook de alkaliniteit mee die in ionparen en
+    hydroxocomplexen zit (_ALK_SPECIES): bij 60 mg/L calcium zit ~2 % van de
+    alkaliniteit in CaHCO3+ en CaCO3. Zonder die termen verliest elke ronde door
+    PHREEQC alkaliniteit en drijft passief water bij elke kwaliteitsstap weg.
     Alle andere namen gaan via total_element() (mmol/L).
     """
     if pname == 'Alk':
-        def _sp(name):
+        try:
+            sp = sol.species
+        except Exception:
+            return 0.0
+        alk_molar = 0.0
+        for name, coeff in _ALK_SPECIES.items():
             try:
-                return float(sol.species.get(name, 0.0))
+                alk_molar += coeff * float(sp.get(name, 0.0))
             except Exception:
-                return 0.0
-        alk_molar = _sp('HCO3-') + 2.0 * _sp('CO3-2') + _sp('OH-') - _sp('H+')
+                pass
         return alk_molar * 1000.0
-    return float(sol.total_element(pname))
+    return float(sol.total_element(_readback_name(pname)))
+
+
+def _readback_name(pname: str) -> str:
+    """
+    Elementnaam voor total_element(): de oxidatietoestand weggelaten.
+
+    PHREEQC accepteert 'C(4)', 'N(5)', 'S(6)' als invoer, maar total_element() geeft
+    voor die namen 0 terug; alleen 'C', 'N', 'S' werkt. Let op: van stikstof of
+    zwavel met meerdere oxidatietoestanden in één mapping is alleen het totaal
+    van het element terug te lezen.
+    """
+    return pname.split('(')[0]
 
 
 class GeochemSolver:
@@ -279,6 +378,9 @@ class GeochemSolver:
     ):
         self.smap               = species_map
         self.background         = {**DEFAULT_BACKGROUND, **(background_solution or {})}
+        # Alles per kg water (zie _UNIT_TO_KGW): ook de achtergrondeenheid.
+        _bg_units = self.background.get('units', 'mol/L')
+        self.background['units'] = _UNIT_TO_KGW.get(_bg_units, _bg_units)
         self.kinetics_script    = kinetics_script
         self.equilibrium_phases = equilibrium_phases or {}
         self.reaction_script    = reaction_script
@@ -295,6 +397,16 @@ class GeochemSolver:
 
     # ── Initialisatie ─────────────────────────────────────────────────────────
 
+    @property
+    def has_reactions(self) -> bool:
+        """True als er een kinetiek-, evenwichts- of reactiescript is gedefinieerd.
+
+        Zonder reacties is ``apply_geochemistry`` een no-op. Let op: de pH in
+        het segment is dan de laatst opgeslagen waarde en wordt niet opnieuw
+        berekend (zie ``apply_mixing`` voor herberekening op knopen).
+        """
+        return bool(self.kinetics_script or self.equilibrium_phases or self.reaction_script)
+
     def _init_pp(self):
         """Initialiseer PhreeqPython en precompileer eenmalige hulpstructuren."""
         if self._pp is not None:
@@ -310,6 +422,11 @@ class GeochemSolver:
             self._pp = PhreeqPython(database=self._db_path)
         else:
             self._pp = PhreeqPython()
+        # PhreeqPython begint bij solution_counter = -1, dus de eerste oplossing kreeg
+        # nummer 0. 'USE solution 0' laat PHREEQC hangen (gevonden bij kinetiek).
+        # Start daarom bij 0, zodat de eerste oplossing nummer 1 krijgt.
+        if self._pp.solution_counter < 0:
+            self._pp.solution_counter = 0
 
         # Eenmalig precompileren — vermijdt branches per element per tijdstap
         self._unit_factors, self._is_ph_mask = self._build_unit_factors()
@@ -337,6 +454,11 @@ class GeochemSolver:
         pipe_diam  : leidingdiameters [m] (optioneel, voor wandreacties via PHREEQC)
         pipe_vel   : stroomsnelheden [m/s] (optioneel)
         """
+        if not self.has_reactions:
+            # Passief transport: geen kinetiek, evenwicht of script → de
+            # samenstelling verandert niet, dus geen PHREEQC-aanroep.
+            return
+
         self._init_pp()
         n = store.n
         if n == 0:
@@ -421,7 +543,7 @@ class GeochemSolver:
             if is_ph:
                 sol_dict['pH'] = val
             else:
-                sol_dict[_phreeqc_key(pname)] = (val, unit)
+                sol_dict[_phreeqc_key(pname)] = self._kgw_input(pname, val, unit)
         return sol_dict
 
     # ── Interne verwerking ────────────────────────────────────────────────────
@@ -452,6 +574,18 @@ class GeochemSolver:
         'Zn':  65.38,    'Cu':  63.55,   'Pb':  207.2,   'As':  74.92,
         'Cr':  52.00,    'Ni':  58.69,   'Cd':  112.41,
     }
+
+    def _kgw_input(self, pname: str, val: float, unit: str) -> Tuple[float, str]:
+        """(waarde, eenheid) voor PHREEQC-invoer, per kg water.
+
+        mg/L wordt met onze molmassatabel naar mmol/kgw omgerekend: het
+        terugschrijven (_build_unit_factors) gebruikt dezelfde tabel, dus heen en
+        terug zijn exact elkaars inverse. Andere eenheden krijgen de kgw-variant.
+        Onbekende eenheden gaan ongewijzigd door.
+        """
+        if unit in ('mg/L', 'mg/l'):
+            return val / self._MOLAR_MASS.get(pname, 1.0), 'mmol/kgw'
+        return val, _UNIT_TO_KGW.get(unit, unit)
 
     def _build_unit_factors(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -490,9 +624,9 @@ class GeochemSolver:
         lines = []
         lines.append(f"  temp {bg.get('temp', bg.get('temperature', 25))}")
         if 'units' in bg:
-            lines.append(f"  units {bg['units']}")
+            lines.append(f"  units {_UNIT_TO_KGW.get(bg['units'], bg['units'])}")
         else:
-            lines.append("  units mol/L")
+            lines.append("  units mol/kgw")
         # pH als aparte regel (PHREEQC-notatie). Staat de pH al als stof in de
         # stofkoppeling, dan komt de pH per segment uit de concentratievector;
         # een achtergrond-pH ervoor wint anders in PHREEQC (eerste pH-regel).
@@ -549,8 +683,8 @@ class GeochemSolver:
                     val = max(1.0, min(14.0, val))
                     lines.append(f"  pH {val:.4f}")
                 else:
-                    unit = units_lst[s_idx]
-                    lines.append(f"  {_phreeqc_key(pname)} {val:.8e} {unit}")
+                    val_k, unit_k = self._kgw_input(pname, val, units_lst[s_idx])
+                    lines.append(f"  {_phreeqc_key(pname)} {val_k:.8e} {unit_k}")
             # pH-stof zonder PHREEQC-naam valt buiten 'act': apart zetten.
             for s_idx in range(len(is_ph)):
                 if is_ph[s_idx] and s_idx not in act:
@@ -641,11 +775,14 @@ class GeochemSolver:
                     (s.pH for s in result_sols), dtype=float, count=batch_size
                 )
             else:
-                vals = np.fromiter(
-                    (_sol_value(s, pname) for s in result_sols),
-                    dtype=float, count=batch_size,
-                )
-                # total_element() geeft mmol/L; converteer naar doel-eenheid
+                if pname == 'Alk':
+                    vals = _alk_exact(self._pp, result_nums, result_sols)
+                else:
+                    vals = np.fromiter(
+                        (_sol_value(s, pname) for s in result_sols),
+                        dtype=float, count=batch_size,
+                    )
+                # total_element() geeft mmol/kgw; converteer naar doel-eenheid
                 vals = vals * fac[s_idx]
             np.clip(vals, 0.0, None, out=vals)
             C[batch_ok, s_idx] = vals
@@ -681,8 +818,8 @@ class GeochemSolver:
             if is_ph[s_idx]:
                 lines.append(f"  pH {max(1.0, min(14.0, val)):.4f}")
             else:
-                unit = units_lst[s_idx]
-                lines.append(f"  {_phreeqc_key(pname)} {val:.8e} {unit}")
+                val_k, unit_k = self._kgw_input(pname, val, units_lst[s_idx])
+                lines.append(f"  {_phreeqc_key(pname)} {val_k:.8e} {unit_k}")
         # pH-stof heeft geen PHREEQC-naam en valt dus buiten 'act': zet hem apart.
         for s_idx in range(len(is_ph)):
             if is_ph[s_idx] and s_idx not in act:
@@ -719,25 +856,52 @@ class GeochemSolver:
             return self._run_eq_phases(sol)
         return sol
 
+    def _run_phreeqc_block(self, sol, definitions: str, kinetics: bool = False):
+        """
+        Voer een PHREEQC-blok uit op oplossing ``sol`` en geef de resulterende oplossing terug.
+
+        PhreeqPython 1.6.2 heeft geen add_kinetics() of add_reaction_raw(); daarom
+        gaat dit via ip.run_string(). Volgorde is belangrijk: eerst de definities
+        (RATES, KINETICS, ... elk afgesloten met END), dan USE solution, en bij
+        kinetiek USE kinetics 1. Staat USE vóór de definities, dan geeft PHREEQC
+        geen oplossing terug.
+        """
+        pp = self._pp
+        pp.solution_counter += 1
+        num = pp.solution_counter
+        lines = [definitions.rstrip(), f"USE solution {sol.number}"]
+        if kinetics:
+            lines.append("USE kinetics 1")
+        lines += [f"SAVE solution {num}", "END"]
+        pp.ip.run_string("\n".join(lines) + "\n")
+        return pp.get_solution(num)
+
     def _run_kinetics(self, sol, dt: float):
-        """Voer kinetische reacties uit via PHREEQC KINETICS-blok."""
-        dt_days = dt / 86400.0   # PHREEQC gebruikt dagen als tijdseenheid
+        """
+        Voer kinetische reacties uit via een PHREEQC RATES + KINETICS-blok.
 
-        # Bouw kinetisch blok op: vervang placeholders
-        kinetics_block = self.kinetics_script.format(
-            **{
-                pname: float(sol.total(pname, 'mol/L'))
-                for pname in self.smap.phreeqc_names
-                if pname is not None
-            }
-        )
-
-        try:
-            result = sol.add_kinetics(
-                kinetics_block,
-                steps=[dt_days],
+        Het blok (kinetics_script) moet zelf RATES en KINETICS 1 bevatten en de
+        looptijd als ``-steps {dt_s} seconds`` opgeven. Beschikbare placeholders:
+        ``{dt_s}`` (seconden), ``{dt_d}`` (dagen) en één placeholder per
+        element in de SpeciesMap met de huidige totaalconcentratie in mol/L.
+        Een literal accolade in het blok moet worden verdubbeld.
+        """
+        values = {
+            pname: _sol_value(sol, pname) * 1e-3     # mmol/L → mol/L
+            for pname in self.smap.phreeqc_names
+            if pname is not None and pname != 'Alk'
+        }
+        values.update(dt_s=float(dt), dt_d=float(dt) / 86400.0)
+        block = self.kinetics_script.format(**values)
+        # Zonder een SAVE-regel in het RATES-blok hangt PHREEQC (gemeten). Fout vóór de
+        # run, niet als stille hang.
+        if 'RATES' in block and 'SAVE' not in block:
+            raise ValueError(
+                "kinetics_script: het RATES-blok moet eindigen met een SAVE-regel, "
+                "bijv. '20 SAVE rate * TIME'. Zonder die regel hangt PHREEQC."
             )
-            return result
+        try:
+            return self._run_phreeqc_block(sol, block, kinetics=True)
         except Exception as e:
             warnings.warn(
                 f"PHREEQC kinetiek mislukt: {e}. Segment ongewijzigd.",
@@ -746,13 +910,23 @@ class GeochemSolver:
             return sol
 
     def _run_eq_phases(self, sol):
-        """Voer EQUILIBRIUM_PHASES berekening uit."""
+        """
+        Breng elke fase naar het SI-doel, in beide richtingen.
+
+        SI < doel: oplossen (saturate); de hoeveelheid is ``amount`` in mmol/kgw
+        (0 = standaard 10). SI > doel: neerslaan (desaturate), zonder limiet.
+        Saturate alleen lost op en desaturate alleen slaat neer; vroeger gebeurde
+        er bij overzadiging niets, waardoor calciet nooit neersloeg.
+        """
         try:
-            # phreeqpython kent geen add_equilibrium_phases: evenwicht per fase
-            # via saturate(phase, to_si=SI-doel). Een fase met SI-doel 0.0 wordt
-            # tot verzadiging gebracht; daar hoort geen aparte hoeveelheid bij.
-            for phase, (si_target, _amount) in self.equilibrium_phases.items():
-                sol.saturate(phase, to_si=float(si_target))
+            for phase, (si_target, amount) in self.equilibrium_phases.items():
+                target = float(si_target)
+                si = sol.si(phase)
+                if si < target - 1e-9:
+                    sol.saturate(phase, to_si=target,
+                                 in_phase=float(amount) if amount else 10)
+                elif si > target + 1e-9:
+                    sol.desaturate(phase, to_si=target)
             return sol
         except Exception as e:
             warnings.warn(
@@ -762,13 +936,16 @@ class GeochemSolver:
             return sol
 
     def _run_raw_script(self, sol, dt: float):
-        """Voer een vrij PHREEQC-script uit (geavanceerd)."""
-        dt_days = dt / 86400.0
+        """
+        Voer een vrij PHREEQC-script uit (geavanceerd).
+
+        Het script bevat PHREEQC-definities (bv. RATES/KINETICS). Placeholders:
+        ``{dt}`` (dagen) en ``{dt_s}`` (seconden). Staat er KINETICS 1 in, dan
+        wordt die na USE solution toegepast.
+        """
         try:
-            result = sol.add_reaction_raw(
-                self.reaction_script.format(dt=dt_days, dt_s=dt)
-            )
-            return result
+            script = self.reaction_script.format(dt=dt / 86400.0, dt_s=dt)
+            return self._run_phreeqc_block(sol, script, kinetics='KINETICS 1' in script)
         except Exception as e:
             warnings.warn(
                 f"PHREEQC script mislukt: {e}. Segment ongewijzigd.",
@@ -793,7 +970,8 @@ class GeochemSolver:
                 if iph[s_idx]:
                     C_out[s_idx] = sol.pH
                 else:
-                    raw = _sol_value(sol, pname)   # mmol/L-equivalent
+                    raw = (_alk_exact(self._pp, [sol.number], [sol])[0] if pname == 'Alk'
+                           else _sol_value(sol, pname))   # mmol/kgw-equivalent
                     C_out[s_idx] = max(0.0, raw * fac[s_idx])
             except Exception:
                 # oorspronkelijke waarde blijft; wel geteld en (eenmalig) gemeld
@@ -1259,10 +1437,13 @@ class PhreeqSolutionMode:
         else:
             fac = 1.0         # al mmol/L
 
-        raw = np.fromiter(
-            (_sol_value(s, element) for s in sols),
-            dtype=float, count=n,
-        )
+        if element == 'Alk':
+            raw = _alk_exact(pp, [int(x) for x in ids], sols)
+        else:
+            raw = np.fromiter(
+                (_sol_value(s, element) for s in sols),
+                dtype=float, count=n,
+            )
         return np.clip(raw * fac, 0.0, None)
 
     def get_ph(self, store) -> np.ndarray:
@@ -1383,6 +1564,10 @@ def chlorine_decay_geochem(
     -------
     GeochemSolver geconfigureerd voor chloor + pH
 
+    Model: eerste-orde verval van het totale chloor, dC/dt = -k·C, met k uit
+    k_bulk_per_day. De pH-afhankelijkheid van HOCl/OCl⁻ wordt hier niet
+    gemodelleerd; de pH-stof wordt alleen meegelopen.
+
     Voorbeeld
     ---------
         geo = chlorine_decay_geochem(k_bulk_per_day=0.5)
@@ -1396,15 +1581,22 @@ def chlorine_decay_geochem(
         is_pH        =[False,       True],
     )
 
-    # Eenvoudige kinetische beschrijving van chloor-verval
-    # PHREEQC RATE voor chloor: dC/dt = -k * C
-    kinetics = f"""
+    # RATE in mol/s per kg water: k [1/s] · C [mol/kgw]. Het kinetische reactant
+    # Cl (formule Cl -1, teken negatief) verbruikt chloor uit de oplossing.
+    k_per_s = k_bulk_per_day / 86400.0
+    kinetics = f"""RATES
+Chlorine_decay
+-start
+10 rate = PARM(1) * TOT("Cl")
+20 SAVE rate * TIME
+-end
 KINETICS 1
-    Chlorine_decay
-    -formula  Cl -1
-    -m        {{Cl}}
-    -parms    {k_bulk_per_day}
-    -steps    1 in 1  # tijdstap wordt dynamisch ingesteld
+Chlorine_decay
+-formula  Cl -1
+-m        1.0
+-parms    {k_per_s!r}
+-steps    {{dt_s}} seconds
+-step_divide 10
 END
 """
     return GeochemSolver(
@@ -1458,3 +1650,92 @@ def full_water_chemistry(
         background_solution=background,
         equilibrium_phases=eq_phases,
     )
+
+
+# ── pH uit alkaliniteit en koolstof (PHREEQC, één run per batch) ─────────────
+
+_PH_PP = None   # gedeelde PhreeqPython-instantie voor ph_from_alk_ct()
+
+
+def _ph_pp():
+    """Lazy PhreeqPython-instantie; start de oplossingsteller bij 0 (zie _init_pp)."""
+    global _PH_PP
+    if _PH_PP is None:
+        from phreeqpython import PhreeqPython
+        _PH_PP = PhreeqPython()
+        if _PH_PP.solution_counter < 0:
+            _PH_PP.solution_counter = 0
+    return _PH_PP
+
+
+def _ph_batch(pp, pairs, temp: float, bg_lines: str) -> np.ndarray:
+    """pH voor (ALK meq/kgw, CT mmol/kgw)-paren in één PHREEQC-run."""
+    n = len(pairs)
+    base = pp.solution_counter + 1
+    pp.solution_counter += n
+    nums = list(range(base, base + n))
+    text = []
+    for num, (alk, ct) in zip(nums, pairs):
+        text.append(
+            f"SOLUTION {num}\n temp {temp}\n pe 4\n units mmol/kgw\n"
+            f" Alkalinity {alk} meq/kgw\n C(4) {ct} mmol/kgw\n{bg_lines}\n"
+            f"SAVE SOLUTION {num}\nEND\n"
+        )
+    pp.ip.run_string("".join(text))
+    ph = np.array([pp.get_solution(num).pH for num in nums], dtype=float)
+    pp.remove_solutions(nums)
+    return ph
+
+
+def ph_from_alk_ct(
+    alk,
+    ct,
+    background: dict | None = None,
+    temp: float = 15.0,
+    chunk: int = 500,
+) -> np.ndarray:
+    """
+    pH per (alkaliniteit, totaal koolstof)-paar, berekend met PHREEQC.
+
+    Vervangt een gesloten vorm van het carbonaatevenwicht. Die negeert
+    activiteiten en ionparen en wijkt bij een echt water met calcium en
+    magnesium tot ~0,1 pH-eenheid af van PHREEQC.
+
+    Parameters
+    ----------
+    alk : alkaliniteit in meq/kgw (scalar of array)
+    ct  : totaal anorganisch koolstof C(4) in mmol/kgw (zelfde vorm als alk)
+    background : vaste ionen in mmol/kgw, bijv.
+                 {"Na": 1.74, "Ca": 1.01, "Mg": 0.20, "Cl": 0.98,
+                  "S(6)": 0.11, "N(5)": 0.111}. Alleen ALK en CT variëren.
+                 None = geen extra ionen.
+    temp : temperatuur in °C (constanten van PHREEQC bij deze temperatuur)
+    chunk : aantal unieke paren per PHREEQC-run
+
+    Returns
+    -------
+    np.ndarray met dezelfde vorm als de invoer; NaN waar ALK of CT niet positief is.
+    Unieke paren (afgerond op 4 decimalen) worden één keer berekend.
+
+    Voorbeeld
+    ---------
+        ph = ph_from_alk_ct(ALK, CT, background={"Na": 1.74, "Ca": 1.01})
+    """
+    pp = _ph_pp()
+    bg_lines = "\n".join(f" {k} {v} mmol/kgw" for k, v in (background or {}).items())
+
+    alk_a = np.atleast_1d(np.asarray(alk, dtype=float))
+    ct_a = np.atleast_1d(np.asarray(ct, dtype=float))
+    alk_a, ct_a = np.broadcast_arrays(alk_a, ct_a)
+    out = np.full(alk_a.shape, np.nan)
+    ok = (alk_a > 0) & (ct_a > 0) & np.isfinite(alk_a) & np.isfinite(ct_a)
+    if not ok.any():
+        return out.reshape(np.shape(alk)) if np.ndim(alk) else out.reshape(())
+
+    keys = np.round(np.column_stack([alk_a[ok], ct_a[ok]]), 4)
+    uniq, inv = np.unique(keys, axis=0, return_inverse=True)
+    ph_u = np.empty(len(uniq))
+    for s in range(0, len(uniq), chunk):
+        ph_u[s:s + chunk] = _ph_batch(pp, uniq[s:s + chunk], temp, bg_lines)
+    out[ok] = ph_u[np.asarray(inv).ravel()]
+    return out.reshape(np.shape(alk)) if np.ndim(alk) else out.reshape(())

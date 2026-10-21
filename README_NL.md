@@ -398,10 +398,28 @@ run(
     mass_schedule:    dict  = None,     # {knoop: [(t_start, t_end, massaflux_vec), ...]} MASS-bron [massa/s]
     merge_interval:   int   = 10,
     merge_tol:        float = 1e-6,
+    merge_rel_tol:    float = 0.0,      # relatieve merge-tolerantie (0 = uit)
     check_cfl:        bool  = True,
     verbose:          bool  = False,
-) -> ndarray  # shape: (n_stappen, node_count, n_species)
+    record_every:     int   = 1,        # bewaar elke n-de kwaliteitsstap
+    merge_span:       float | None = 1.0,  # None = geen spanbeperking
+) -> ndarray  # shape: (n_stappen // record_every, node_count, n_species)
 ```
+
+**Geheugen: `record_every`.** Standaard bewaart `run()` de knoopconcentraties na elke kwaliteitsstap: `n_stappen × node_count × n_species × 8` byte. Bij een kleine `qual_dt` is dat het grootste deel van het geheugen (24 uur bij 10 s op een netwerk van 27.000 knopen: 1,9 GB). `record_every=int(3600 / qual_dt)` bewaart alleen uurwaarden, en `time_axis()` volgt. Op dat netwerk waren de bewaarde waarden identiek, de rekentijd gelijk, en daalde het piekgeheugen van 2081 naar 334 MB. Stappen die geen volledig interval vormen worden niet bewaard.
+
+**Kwaliteitsstap en merging (één netwerk).** Op één netwerk (26.893 knopen, 24 uur, één CPU) verbeterde een kleinere `qual_dt` de overeenstemming met EPANET (gedraaid met een stap van 60 s) meer dan welke merge-instelling ook. Gemiddelde fout na 24 uur:
+
+| Merge-instellingen | `qual_dt` | Rekentijd | Fout (mg/L) |
+|---|---|---|---|
+| standaard | 300 s | 190 s | 2,46 |
+| standaard | 60 s | 274 s | 1,34 |
+| standaard | 30 s | 429 s | 0,71 |
+| `merge_rel_tol=0.005, merge_span=None, merge_interval=5` | 30 s | 187 s | 1,10 |
+| idem | 15 s | 271 s | 0,69 |
+| idem | 10 s | 313 s | 0,59 |
+
+Bij dezelfde stap is de standaard nauwkeuriger en de relatieve merge goedkoper (ongeveer 40 tot 55 % minder tijd, 3 tot 4 keer minder segmenten). Bij gelijke rekentijd was de relatieve merge met een kleinere stap in het gemeten bereik nauwkeuriger. Dit is één netwerk en één machine; de standaardwaarden zijn niet gewijzigd. Zie `benchmark_joure/RESULTATEN_EPYNET.md`.
 
 **`inject_schedule` formaat**
 
@@ -554,6 +572,8 @@ smap = SpeciesMap(
     is_pH        =[False,  True,  False],
 )
 ```
+
+**Eenheden en PHREEQC.** PHREEQC rekent per kg water. NzingaFlow schrijft daarom elke concentratie per kg water naar PHREEQC (`mg/L` wordt `mmol/kgw` via de molmassatabel in `GeochemSolver._MOLAR_MASS`, `meq/L` wordt `meq/kgw`) en leest hem op dezelfde manier terug, zodat een ronde door PHREEQC precies teruggeeft wat erin ging. In de praktijk wordt "mg/L" in de soortenvector behandeld als mg per kg water (circa 0,03 tot 0,3 % anders dan mg per liter oplossing). Alkaliniteit wordt teruggelezen uit PHREEQC's eigen `ALK`, die ionparen en hydroxocomplexen meeneemt (bijvoorbeeld bij ijzer en mangaan). Eerdere versies rekenden bij het invoeren per liter om en bij het terugschrijven per kg, waardoor het water bij elke stap wegdreef (in één test 73 % alkaliniteit en 1,7 % calcium na 60 stappen); zie de changelog.
 
 Ondersteunde PHREEQC-elementen: `Cl`, `Ca`, `Mg`, `Na`, `K`, `Fe`, `Mn`, `N(5)` (NO₃), `N(3)` (NO₂), `N(-3)` (NH₄), `Alk`, `C(4)` (TIC/CO₂), `S(6)` (SO₄), `P` (fosfaat).
 
@@ -870,7 +890,23 @@ Leidingen waarvan de stroming kleiner is dan `reversal_deadband` [m³/s] behoude
 
 `merge_span` (argument van `step()`, standaard `1.0`) beperkt het samenvoegen: aangrenzende segmenten worden alleen samengevoegd als hun positiespreiding hooguit `merge_span · v · dt` is. Met `None` wordt die controle uitgeschakeld.
 
-`set_source_quality(node_uid, C_vector)` stelt de concentratie in van water dat via een externe instroom een knoop binnenkomt (een junction met een negatieve vraag, bijvoorbeeld `J7` in `pulse4.inp`). De standaard is 0. De instelling geldt tot de volgende aanroep. Reservoirs worden niet beïnvloed. Dit komt overeen met EPANET met een bron van die concentratie.
+`set_source_quality(node_uid, C_vector)` stelt de concentratie in van water dat via een externe instroom een knoop binnenkomt (een junction met een negatieve vraag, bijvoorbeeld `J7` in `pulse4.inp`). De standaard is 0. De instelling geldt tot de volgende aanroep. Reservoirs worden niet beïnvloed; zie *Automatische reservoirbronnen* hieronder.
+
+### Automatische reservoirbronnen
+
+Standaard (`auto_reservoir_sources=True`) voedt de solver elk reservoir met een head boven 0 automatisch:
+
+- Met een `[SOURCES]`-regel van het type `CONCEN` heeft het reservoirwater concentratie `sterkte × patroon(t)`.
+- Zonder bron houdt het reservoir zijn beginkwaliteit (uit `set_initial_quality`), zoals EPANET.
+- Het volume is het uitgaande debiet van het reservoir × de kwaliteitstijdstap. Reservoirs met head 0 zijn uitgeschakeld en worden overgeslagen.
+
+### Junctions met negatieve vraag
+
+Een junction met een negatieve vraag is een externe instroom. Het instromende water heeft de concentratie van de `[SOURCES]`-regel van de junction (`CONCEN` × patroon), net als in EPANET. Een junction zonder bron levert water met concentratie 0 (of de waarde die je met `set_source_quality` instelt). Een `CONCEN`-bron wordt alleen toegepast op stappen waarin de vraag van de junction negatief is. Andere bronsoorten op een junction geven een waarschuwing en worden niet automatisch toegepast.
+
+Andere bronsoorten (`MASS`, `SETPOINT`, `FLOWPACED`) op een actief reservoir geven een `NotImplementedError`; zet dan `auto_reservoir_sources=False` en voed het reservoir met `inject()`.
+
+Als je een reservoir al met `inject()` voedt (bijvoorbeeld via `inject_schedule`), zet dan `auto_reservoir_sources=False`. Anders telt het reservoirwater dubbel; `inject()` geeft een waarschuwing als je een automatisch gevoed reservoir kiest.
 
 `set_mixed_pipes(mask)` behandelt de leidingen in `mask` als volledig gemengde volumes (zoals een tank) in plaats van als Lagrangiaanse segmenten. Dit is **experimenteel**: het werkt niet goed voor leidingen met echte doorstroming, omdat het de volumebalans kan verstoren. Gebruik het alleen voor leidingen met vooral stilstaand water dat heen-en-weer beweegt.
 

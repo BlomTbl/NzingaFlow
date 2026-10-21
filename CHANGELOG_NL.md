@@ -2,6 +2,58 @@
 
 ## [Unreleased]
 
+### Bronnen uit het geladen epynet-netwerk (vervangt `inp_sources.py`)
+
+- **Gewijzigd:** reservoir- en junctionbronnen, hun patronen en de patroontiming worden uit het geladen epynet-netwerk gelezen (`nzingaflow/network_sources.py`), niet meer uit de `.inp`-tekst. epynet leest het bestand met de EPANET-kern, dus patroonstart en -stap volgen de betekenis van EPANET.
+- **Verwijderd:** `nzingaflow/inp_sources.py` en `tests/test_inp_sources.py`. Vervangen door `tests/test_network_sources.py` (4 tests).
+- Gecontroleerd op FRL-10: 5 actieve reservoirs en 2 junctionbronnen, gelijk aan de tekstparser (sterkten, patronen, patroonstap 300 s, start 0).
+- Let op: de opvoerhoogte van een reservoir wordt uit de elevation gelezen (de vaste head in EPANET). `EN_HEAD` is vóór een solve 0.
+
+### pH uit alkaliniteit en koolstof (PHREEQC)
+
+- **Nieuw:** `geochemistry.ph_from_alk_ct(alk, ct, background=None, temp=15.0)` berekent per paar (ALK meq/kgw, CT mmol/kgw) de pH met PHREEQC, met optionele vaste achtergrondionen. Unieke paren worden één keer berekend, één PHREEQC-run per blok.
+- Tests: `tests/test_ph_alk_ct.py` (gelijk aan directe PHREEQC, NaN bij ongeldige invoer, dubbele paren).
+
+### PHREEQC-route: vijf fouten hersteld (gecontroleerd tegen directe PHREEQC)
+
+- **Gerepareerd: `C(4)`, `N(5)`, `S(6)` gaven 0 terug.** `total_element()` kent alleen de elementnaam; hierdoor verdween carbonaat/nitraat/sulfaat na elke stap. Terugschrijven gebruikt nu de elementnaam (`_readback_name`). Let op: bij meerdere oxidatietoestanden van één element in één mapping is alleen het elementtotaal terug te lezen.
+- **Gerepareerd: standaardachtergrond voegde ionen toe.** `DEFAULT_BACKGROUND` bevat geen Ca, Mg, Na, Cl, SO₄ of Alkalinity meer. Bij een carbonaatmenging verschoof de pH daardoor ~0,3 eenheden (9,06 i.p.v. 9,36, de directe PHREEQC-waarde). Ionen moet je expliciet in `background_solution` zetten.
+- **Gerepareerd: overzadigde evenwichtsfasen sloegen nooit neer.** `saturate()` lost alleen op. `_run_eq_phases` gebruikt nu `desaturate()` boven het SI-doel; `amount` bepaalt de `in_phase`-limiet bij oplossen. Gecontroleerd: calciet bij SI 0,74 gaat naar Ca 1,81 mmol/L en pH 7,50, zoals directe PHREEQC.
+- **Gerepareerd: kinetiek crashte.** PhreeqPython 1.6.2 heeft geen `add_kinetics()` / `add_reaction_raw()`, en `total(…, 'mol/L')` geeft `None`. Kinetiek loopt nu via `ip.run_string()` (`_run_phreeqc_block`). Placeholders in `kinetics_script`: `{dt_s}`, `{dt_d}` en één per element in mol/L. Het RATES-blok moet eindigen met `SAVE rate * TIME`; zonder die regel hangt PHREEQC, daarom krijg je eerst een `ValueError`. `chlorine_decay_geochem()` geeft nu eerste-orde verval dat exp(−kt) volgt.
+- **Gerepareerd: meq/L bij andere elementen dan alkaliniteit.** Dat werd met factor 1 teruggelezen, wat voor tweewaardige ionen fout is. `SpeciesMap` weigert dit nu; gebruik mmol/L of mg/L. `phreeqc_names='Alkalinity'` wordt ook geweigerd (gebruik `'Alk'`).
+- **Gerepareerd: eerste oplossingsnummer was 0.** PhreeqPython begint met teller −1, en `USE solution 0` laat PHREEQC hangen. De teller start nu bij 0, zodat de eerste oplossing nummer 1 krijgt.
+- **Gedrag gewijzigd:** `DEFAULT_BACKGROUND` bevat geen ionen meer, en het chloorrecept is nu eerste-orde in totaal chloor (pH-afhankelijkheid wordt niet gemodelleerd).
+- Tests: `tests/test_geochem_regressie.py` (10 tests, echte PHREEQC).
+
+### EPSRunner: `record_every` en `merge_span`
+
+- **Nieuw:** `EPSRunner.run(record_every=n)` bewaart alleen elke n-de kwaliteitsstap. De resultaatmatrix kost `stappen × knopen × n_species × 8` byte; bij een kleine `qual_dt` was dat het grootste deel van het geheugen (24 uur bij 10 s op 26.893 knopen: piek 2081 MB, nu 334 MB met uurlijkse opslag; bewaarde waarden en rekentijd identiek). `time_axis()` volgt de laatste `run()`. Standaard 1 = ongewijzigd.
+- **Nieuw:** `EPSRunner.run(merge_span=...)` wordt doorgegeven aan `solver.step` (standaard 1,0 = ongewijzigd). Eerder was `merge_span=None` alleen te bereiken door `solver.step` te vervangen.
+- `merge_rel_tol` en de twee nieuwe parameters staan nu in de `run()`-signatuur in de README, met metingen op één netwerk van `qual_dt` tegenover merge-instellingen.
+
+### Verificatie tegen EPANET 2.3.3: reparaties
+
+- **Hersteld: Pattern Start.** Bronpatronen gebruikten `(t - start)`; EPANET gebruikt `((t + start) // stap) mod lengte`. Fout voor elk netwerk met een Pattern Start ≠ 0. Geverifieerd tegen EPANET.
+- **Hersteld: reservoir zonder bron.** Het hield de vastgehouden knoopconcentratie, die verandert als het reservoir zelf water ontvangt (stroomomkering). EPANET houdt de beginkwaliteit. De beginkwaliteit wordt nu bij `set_initial_quality` bewaard en ook voor de reservoirknoop gerapporteerd.
+- **Hersteld: kwaliteitsklok.** De klok voor automatische bronpatronen volgt nu `update_hydraulics(simtime)` in plaats van stappen vanaf 0 te tellen.
+- **Hersteld: water dreef bij elke stap door PHREEQC weg.** Concentraties gingen per liter naar PHREEQC (dat rekent om met een dichtheid van 1 kg/L min de opgeloste massa) en werden als per kg water teruggelezen, en de alkaliniteit werd opgeteld uit een vaste lijst vrije soorten die ionparen en, bij ijzer en mangaan, hydroxocomplexen miste. Gemeten op zes soorten (Cl2, pH, Alk, Ca, Fe, Mn), gemiddelde relatieve verandering per soort na 60 rondes: Alk 73 %, Ca 1,7 %, Fe 2,0 %, Mn 1,7 %, Cl2 1,4 %. Nu: 0,00000 % voor al deze soorten na 576 rondes (pH 0,0003 %, afronding op vier decimalen).
+  - Alle PHREEQC-invoer is per kg water (`mg/L` via onze eigen molmassatabel, in beide richtingen dezelfde; `meq/L` → `meq/kgw`; achtergrond-`units` genormaliseerd naar `mol/kgw`). **Gedragswijziging:** "mg/L" in de soortenvector betekent nu mg per kg water (0,03 tot 0,3 % anders dan per liter).
+  - Alkaliniteit komt uit PHREEQC's eigen `ALK` (`_alk_batch`, één extra run per batch) in het batch-, meng- en `get_conc`-pad. `_ALK_SPECIES` (coëfficiënten als in phreeqc.dat, inclusief Fe(III) = -2) blijft als terugvaloptie.
+  - Ook sneller: 0,068 s per ronde van 100 segmenten tegen 0,100 s eerder (één machine, 100 segmenten).
+  - Gecontroleerd met `phreeqc.dat` en `vitens.dat` (0,00000 % drift). `wateq4f_PWN.dat` kan phreeqpython helemaal niet laden.
+- Tests: `test_geochem_alk_roundtrip.py` (echte PHREEQC), regressietests voor omkering, Pattern Start en de klok.
+
+### Junctions met negatieve vraag: automatische CONCEN-bronnen
+
+- **Nieuw:** een `CONCEN`-bron op een junction met negatieve vraag bepaalt de concentratie van het instromende water (sterkte × patroon), zoals in EPANET. Alleen toegepast in stappen met negatieve vraag. Parsing: `read_junction_sources` in `inp_sources.py`.
+- Andere bronsoorten op junctions geven een `UserWarning` en worden niet automatisch toegepast.
+
+### Reservoirs: automatische bronnen
+
+- **Nieuw:** `auto_reservoir_sources=True` (standaard). Reservoirs met head > 0 worden automatisch gevoed vanuit `[SOURCES]` (CONCEN met patroon) of houden hun beginkwaliteit. Reservoirs met head 0 worden overgeslagen. De parsing staat in `nzingaflow/inp_sources.py` en vereist geen epynet.
+- **Gedragswijziging:** voorheen leverden reservoirs geen water aan het netwerk. Testnetwerken die reservoirs met `inject_schedule` voedden, zetten nu `auto_reservoir_sources=False`.
+- `NotImplementedError` voor MASS/SETPOINT/FLOWPACED-bronnen op actieve reservoirs; `UserWarning` als `inject()` een automatisch gevoed reservoir als doel heeft.
+
 ### Distributie: privé-pakketten, wheels per platform, release-workflow
 
 - **Installatie** beschrijft nu de privé-opzet: EPYnetDTD eerst uit de privé-repository (`git+ssh`), daarna NzingaFlow uit een GitHub-release (wheel per platform) of uit de broncode. De PyPI-instructies zijn verwijderd.

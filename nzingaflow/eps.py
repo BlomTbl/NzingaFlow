@@ -39,6 +39,7 @@ class EPSRunner:
         self.qual_dt  = float(qual_dt)
         self.hyd_dt   = float(hyd_dt)
         self.duration = float(duration)
+        self._record_every = 1          # wordt door run() gezet; time_axis() gebruikt hem
 
     def run(
         self,
@@ -49,8 +50,11 @@ class EPSRunner:
         mass_schedule:    dict | None = None,
         merge_interval:   int   = 10,
         merge_tol:        float = 1e-6,
+        merge_rel_tol:    float = 0.0,
         check_cfl:        bool  = True,
         verbose:          bool  = False,
+        record_every:     int   = 1,
+        merge_span:       float | None = 1.0,
     ) -> np.ndarray:
         """
         LET OP — beginwater: zonder aanroep van ``solver.set_initial_quality()``
@@ -80,20 +84,36 @@ class EPSRunner:
                            Bij Q_out = 0 wordt de injectie overgeslagen.
         merge_interval   : segmentmerging elke N stappen
         merge_tol        : concentratietolerantie voor merging [mg/L]
+        merge_rel_tol    : relatieve concentratietolerantie voor merging (0 = uit)
         check_cfl        : CFL-check op eerste tijdstap
         verbose          : print voortgang + massabalans elke 10%
+        merge_span       : maximale positiespreiding van een samen te voegen paar, in
+                           veelvouden van v·dt (standaard 1,0). ``None`` = geen
+                           beperking: veel minder segmenten, maar een grotere
+                           aankomsttijdfout (zie README).
+        record_every     : bewaar alleen de toestand na elke n-de kwaliteitsstap
+                           (standaard 1 = elke stap). De resultaatmatrix kost
+                           stappen × knopen × n_species × 8 byte; bij een kleine
+                           kwaliteitsstap is dat het grootste deel van het geheugen
+                           (24 h bij 15 s op 27.000 knopen: 1,2 GB). Voor uurwaarden:
+                           ``record_every=int(3600 / qual_dt)``. Stappen die geen
+                           volledig interval vormen worden niet bewaard.
 
         Returns
         -------
-        results : (n_stappen, node_count, n_species)
+        results : (n_stappen // record_every, node_count, n_species)
         """
+        if int(record_every) != record_every or record_every < 1:
+            raise ValueError(f"record_every moet een geheel getal >= 1 zijn, kreeg {record_every!r}")
+        record_every = int(record_every)
+        self._record_every = record_every
         decay_k          = np.asarray(decay_k, dtype=np.float64)
         inject_schedule  = inject_schedule  or {}
         booster_schedule = booster_schedule or {}
         mass_schedule    = mass_schedule    or {}
         n_steps = self._n_steps()
         results = np.zeros(
-            (n_steps, self.solver.node_count, self.solver.n_species),
+            (n_steps // record_every, self.solver.node_count, self.solver.n_species),
             dtype=np.float64,
         )
 
@@ -128,9 +148,12 @@ class EPSRunner:
                 decay_k=decay_k,
                 merge_interval=merge_interval,
                 merge_tol=merge_tol,
+                merge_rel_tol=merge_rel_tol,
+                merge_span=merge_span,
                 check_cfl=(check_cfl and step == 0),
             )
-            results[step] = node_C
+            if (step + 1) % record_every == 0:
+                results[(step + 1) // record_every - 1] = node_C
             t += self.qual_dt
 
             # Voortgang
@@ -258,9 +281,11 @@ class EPSRunner:
         Tijdas van simulatieresultaten. unit: 's', 'min' of 'h'.
 
         results[i] is de toestand ná kwaliteitstijdstap i, dus op
-        t = (i + 1)·qual_dt (niet i·qual_dt).
+        t = (i + 1)·qual_dt (niet i·qual_dt). Met ``record_every=n`` in run() is
+        results[i] de toestand op t = (i + 1)·n·qual_dt; de as volgt de laatste run().
         """
-        t = (np.arange(self._n_steps()) + 1) * self.qual_dt
+        n = self._record_every
+        t = (np.arange(self._n_steps() // n) + 1) * (self.qual_dt * n)
         return t / {'s': 1, 'min': 60, 'h': 3600}.get(unit, 1)
 
     def __repr__(self) -> str:
