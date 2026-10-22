@@ -29,6 +29,19 @@ import numpy as np
 
 # ── Tijdstapcontrole ──────────────────────────────────────────────────────────
 
+def _cfl_times(pipe_length: np.ndarray, velocity: np.ndarray) -> np.ndarray:
+    """
+    Verblijftijd L/v per leiding voor de CFL-controle.
+
+    Elementen met lengte 0 (afsluiters bij include_valves=True, pompen) worden
+    genegeerd (inf): een segment kan die niet "overspringen" en ze zouden
+    anders dt_CFL = 0 geven, waardoor elke dt als CFL-schending gold.
+    """
+    v = np.maximum(velocity, 1e-10)
+    t = pipe_length / v
+    return np.where(pipe_length > 0.0, t, np.inf)
+
+
 def recommended_dt(
     pipe_length:  np.ndarray,   # (n_pipes,) [m]
     velocity:     np.ndarray,   # (n_pipes,) [m/s]
@@ -58,8 +71,7 @@ def recommended_dt(
     limits = {}
 
     # CFL: geen segment mag zijn leiding overspringen
-    v_max = np.maximum(velocity, 1e-10)
-    dt_cfl = np.min(pipe_length / v_max)
+    dt_cfl = np.min(_cfl_times(pipe_length, velocity))
     limits['CFL']  = dt_cfl
 
     # Reactiestabiliteit: 10% verandering per stap als grens
@@ -110,7 +122,8 @@ def check_dt(
                             safety=1.0, min_dt=0.0, max_dt=1e9)
 
     v_max   = np.maximum(velocity, 1e-10)
-    dt_cfl  = np.min(pipe_length / v_max)
+    cfl_t   = _cfl_times(pipe_length, velocity)
+    dt_cfl  = np.min(cfl_t)
     cfl_ok  = dt <= dt_cfl
 
     k_total = np.asarray(k_bulk, dtype=float)
@@ -122,7 +135,7 @@ def check_dt(
 
     violations = []
     if not cfl_ok:
-        worst_pipe = int(np.argmin(pipe_length / v_max))
+        worst_pipe = int(np.argmin(cfl_t))
         violations.append(
             f"CFL: dt={dt:.1f}s > dt_CFL={dt_cfl:.1f}s "
             f"(worst pipe {worst_pipe}: L={pipe_length[worst_pipe]:.1f}m, "
@@ -160,14 +173,20 @@ class MassBalanceTracker:
     - Gecumuleerde verdwenen massa via bulkverval
     - Gecumuleerde verdwenen massa via wandreacties
     - Massa bij eindknopen (uit het systeem gevloeid)
+    - Massa die via lekkage verdween (record_leakage)
+    - Massa in tanks (tank_mass bij report(); tankverval telt als bulkverval)
+    - Massawijzigingen door ingrijpen, zoals boosters die bestaande segmenten
+      overschrijven (record_injection_mass)
 
     Gebruik
     -------
         tracker = MassBalanceTracker(n_species=2)
         tracker.record_injection(C_vector, volume)   # bij elke injectie
-        tracker.record_step(store, node_C, flow,
-                            decay_k, k_wall_vol, dt)  # na elke tijdstap
-        report = tracker.report()
+        tracker.record_step(store, decay_k, dt,
+                            k_wall_vol=k_wall_vol,
+                            exited_C=exited_C, exited_V=exited_V,
+                            decay_loss=(bulk, wall))  # na elke tijdstap
+        report = tracker.report(store, tank_mass=tank_mass)
     """
 
     def __init__(self, n_species: int):
@@ -176,12 +195,26 @@ class MassBalanceTracker:
         self.bulk_decay   = np.zeros(n_species)
         self.wall_decay   = np.zeros(n_species)
         self.outflow      = np.zeros(n_species)
+        self.leakage      = np.zeros(n_species)
         self._prev_mass   = np.zeros(n_species)
         self._step        = 0
 
     def record_injection(self, C_vector, volume: float) -> None:
         """Registreer een injectie-segment."""
         self.injected += np.asarray(C_vector) * volume
+
+    def record_injection_mass(self, mass) -> None:
+        """Registreer een massa-wijziging door ingrijpen (bijv. booster die C
+        van bestaande segmenten overschrijft). Mag negatief zijn."""
+        self.injected += np.asarray(mass, dtype=np.float64)
+
+    def record_tank_decay(self, mass) -> None:
+        """Registreer verval in tanks (bulk)."""
+        self.bulk_decay += np.asarray(mass, dtype=np.float64)
+
+    def record_leakage(self, mass) -> None:
+        """Registreer massa die via lekkage het systeem verlaat."""
+        self.leakage += np.asarray(mass, dtype=np.float64)
 
     def record_step(
         self,
@@ -191,6 +224,7 @@ class MassBalanceTracker:
         k_wall_vol:  np.ndarray | None = None,  # (n_pipes, n_species) [1/s]
         exited_C:    np.ndarray | None = None,  # (n_exit, n_species)
         exited_V:    np.ndarray | None = None,  # (n_exit,)
+        decay_loss:  tuple | None = None,       # (bulk, wall) exact, (n_species,)
     ) -> None:
         """
         Registreer één tijdstap voor de massabalans.
@@ -203,6 +237,11 @@ class MassBalanceTracker:
         k_wall_vol   : wandvervalconstanten [1/s] (optioneel)
         exited_C     : concentraties van segmenten die het systeem verlieten
         exited_V     : volumes van die segmenten
+        decay_loss   : exact gemeten (bulk, wall) verval deze stap. Als opgegeven
+                       worden de schattingen hieronder overgeslagen: die rekenen
+                       op de massa van de vorige stap en missen daardoor verval
+                       van tussentijds geïnjecteerde massa (en tellen bulk en
+                       wand beide over de volle massa, i.p.v. gecombineerd).
         """
         n = store.n
         if n > 0:
@@ -210,14 +249,18 @@ class MassBalanceTracker:
         else:
             curr_mass = np.zeros(self.n_species)
 
-        if self._step == 0:
-            self._prev_mass = curr_mass.copy()
+        if decay_loss is not None:
+            self.bulk_decay += np.asarray(decay_loss[0], dtype=np.float64)
+            self.wall_decay += np.asarray(decay_loss[1], dtype=np.float64)
+        else:
+            if self._step == 0:
+                self._prev_mass = curr_mass.copy()
 
-        # Schat vervalverliezen via analytische verval
-        mass_bulk = self._prev_mass * (1 - np.exp(-decay_k * dt))
-        self.bulk_decay += mass_bulk
+            # Schat vervalverliezen via analytische verval
+            mass_bulk = self._prev_mass * (1 - np.exp(-decay_k * dt))
+            self.bulk_decay += mass_bulk
 
-        if k_wall_vol is not None and n > 0:
+        if decay_loss is None and k_wall_vol is not None and n > 0:
             # Gebruik _prev_mass als basis voor de schatting (massa vóór de stap),
             # consistent met de bulk-schatting hierboven. De wandreactiesnelheid
             # varieert per leiding, dus we berekenen een gewogen gemiddelde k_wall
@@ -243,24 +286,36 @@ class MassBalanceTracker:
             return np.zeros(self.n_species)
         return (store.C[:n] * store.volume[:n, np.newaxis]).sum(axis=0)
 
-    def report(self, store=None) -> dict:
+    def report(self, store=None, tank_mass=None) -> dict:
         """
         Geeft een massabalansrapport terug.
+
+        Parameters
+        ----------
+        store     : SegmentStore voor de massa in segmenten (optioneel)
+        tank_mass : (n_species,) massa die nu in tanks zit (optioneel)
 
         Returns
         -------
         dict met:
-            injected      : massa ingespoten per stof
+            injected      : massa ingespoten per stof (incl. beginmassa en
+                            massawijzigingen door boosters)
             in_system     : massa nog in segmenten (als store opgegeven)
-            bulk_decay    : gecumuleerd bulkverlies
+            in_tanks      : massa in tanks (als tank_mass opgegeven, anders 0)
+            bulk_decay    : gecumuleerd bulkverlies (incl. tankverval)
             wall_decay    : gecumuleerd wandverlies
             outflow       : massa via eindknopen verlaten
-            balance_error : relatieve massabalansfout
-            ok            : True als error < 1%
+            leakage       : massa verloren via lekkage
+            accounted     : in_system + in_tanks + verval + outflow + leakage
+            balance_error : |injected − accounted| / injected per stof
+            ok            : True als error < 1% voor alle stoffen
         """
         in_sys = self.current_mass(store) if store is not None else np.zeros(self.n_species)
 
-        accounted = in_sys + self.bulk_decay + self.wall_decay + self.outflow
+        in_tanks = (np.zeros(self.n_species) if tank_mass is None
+                    else np.asarray(tank_mass, dtype=np.float64))
+        accounted = (in_sys + in_tanks + self.bulk_decay + self.wall_decay
+                     + self.outflow + self.leakage)
         total_in  = self.injected
 
         # Relatieve fout per stof
@@ -274,9 +329,11 @@ class MassBalanceTracker:
         return {
             'injected':     self.injected.copy(),
             'in_system':    in_sys,
+            'in_tanks':     in_tanks,
             'bulk_decay':   self.bulk_decay.copy(),
             'wall_decay':   self.wall_decay.copy(),
             'outflow':      self.outflow.copy(),
+            'leakage':      self.leakage.copy(),
             'accounted':    accounted,
             'balance_error': rel_err,
             'ok':           bool((rel_err < 0.01).all()),
@@ -288,5 +345,6 @@ class MassBalanceTracker:
         self.bulk_decay[:] = 0.0
         self.wall_decay[:] = 0.0
         self.outflow[:]    = 0.0
+        self.leakage[:]    = 0.0
         self._prev_mass[:] = 0.0
         self._step         = 0

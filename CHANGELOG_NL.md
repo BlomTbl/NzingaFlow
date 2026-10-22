@@ -1,5 +1,179 @@
 # Changelog
 
+## [Unreleased]
+
+### Bronnen uit het geladen epynet-netwerk (vervangt `inp_sources.py`)
+
+- **Gewijzigd:** reservoir- en junctionbronnen, hun patronen en de patroontiming worden uit het geladen epynet-netwerk gelezen (`nzingaflow/network_sources.py`), niet meer uit de `.inp`-tekst. epynet leest het bestand met de EPANET-kern, dus patroonstart en -stap volgen de betekenis van EPANET.
+- **Verwijderd:** `nzingaflow/inp_sources.py` en `tests/test_inp_sources.py`. Vervangen door `tests/test_network_sources.py` (4 tests).
+- Gecontroleerd op FRL-10: 5 actieve reservoirs en 2 junctionbronnen, gelijk aan de tekstparser (sterkten, patronen, patroonstap 300 s, start 0).
+- Let op: de opvoerhoogte van een reservoir wordt uit de elevation gelezen (de vaste head in EPANET). `EN_HEAD` is vóór een solve 0.
+
+### pH uit alkaliniteit en koolstof (PHREEQC)
+
+- **Nieuw:** `geochemistry.ph_from_alk_ct(alk, ct, background=None, temp=15.0)` berekent per paar (ALK meq/kgw, CT mmol/kgw) de pH met PHREEQC, met optionele vaste achtergrondionen. Unieke paren worden één keer berekend, één PHREEQC-run per blok.
+- Tests: `tests/test_ph_alk_ct.py` (gelijk aan directe PHREEQC, NaN bij ongeldige invoer, dubbele paren).
+
+### PHREEQC-route: vijf fouten hersteld (gecontroleerd tegen directe PHREEQC)
+
+- **Gerepareerd: `C(4)`, `N(5)`, `S(6)` gaven 0 terug.** `total_element()` kent alleen de elementnaam; hierdoor verdween carbonaat/nitraat/sulfaat na elke stap. Terugschrijven gebruikt nu de elementnaam (`_readback_name`). Let op: bij meerdere oxidatietoestanden van één element in één mapping is alleen het elementtotaal terug te lezen.
+- **Gerepareerd: standaardachtergrond voegde ionen toe.** `DEFAULT_BACKGROUND` bevat geen Ca, Mg, Na, Cl, SO₄ of Alkalinity meer. Bij een carbonaatmenging verschoof de pH daardoor ~0,3 eenheden (9,06 i.p.v. 9,36, de directe PHREEQC-waarde). Ionen moet je expliciet in `background_solution` zetten.
+- **Gerepareerd: overzadigde evenwichtsfasen sloegen nooit neer.** `saturate()` lost alleen op. `_run_eq_phases` gebruikt nu `desaturate()` boven het SI-doel; `amount` bepaalt de `in_phase`-limiet bij oplossen. Gecontroleerd: calciet bij SI 0,74 gaat naar Ca 1,81 mmol/L en pH 7,50, zoals directe PHREEQC.
+- **Gerepareerd: kinetiek crashte.** PhreeqPython 1.6.2 heeft geen `add_kinetics()` / `add_reaction_raw()`, en `total(…, 'mol/L')` geeft `None`. Kinetiek loopt nu via `ip.run_string()` (`_run_phreeqc_block`). Placeholders in `kinetics_script`: `{dt_s}`, `{dt_d}` en één per element in mol/L. Het RATES-blok moet eindigen met `SAVE rate * TIME`; zonder die regel hangt PHREEQC, daarom krijg je eerst een `ValueError`. `chlorine_decay_geochem()` geeft nu eerste-orde verval dat exp(−kt) volgt.
+- **Gerepareerd: meq/L bij andere elementen dan alkaliniteit.** Dat werd met factor 1 teruggelezen, wat voor tweewaardige ionen fout is. `SpeciesMap` weigert dit nu; gebruik mmol/L of mg/L. `phreeqc_names='Alkalinity'` wordt ook geweigerd (gebruik `'Alk'`).
+- **Gerepareerd: eerste oplossingsnummer was 0.** PhreeqPython begint met teller −1, en `USE solution 0` laat PHREEQC hangen. De teller start nu bij 0, zodat de eerste oplossing nummer 1 krijgt.
+- **Gedrag gewijzigd:** `DEFAULT_BACKGROUND` bevat geen ionen meer, en het chloorrecept is nu eerste-orde in totaal chloor (pH-afhankelijkheid wordt niet gemodelleerd).
+- Tests: `tests/test_geochem_regressie.py` (10 tests, echte PHREEQC).
+
+### EPSRunner: `record_every` en `merge_span`
+
+- **Nieuw:** `EPSRunner.run(record_every=n)` bewaart alleen elke n-de kwaliteitsstap. De resultaatmatrix kost `stappen × knopen × n_species × 8` byte; bij een kleine `qual_dt` was dat het grootste deel van het geheugen (24 uur bij 10 s op 26.893 knopen: piek 2081 MB, nu 334 MB met uurlijkse opslag; bewaarde waarden en rekentijd identiek). `time_axis()` volgt de laatste `run()`. Standaard 1 = ongewijzigd.
+- **Nieuw:** `EPSRunner.run(merge_span=...)` wordt doorgegeven aan `solver.step` (standaard 1,0 = ongewijzigd). Eerder was `merge_span=None` alleen te bereiken door `solver.step` te vervangen.
+- `merge_rel_tol` en de twee nieuwe parameters staan nu in de `run()`-signatuur in de README, met metingen op één netwerk van `qual_dt` tegenover merge-instellingen.
+
+### Verificatie tegen EPANET 2.3.3: reparaties
+
+- **Hersteld: Pattern Start.** Bronpatronen gebruikten `(t - start)`; EPANET gebruikt `((t + start) // stap) mod lengte`. Fout voor elk netwerk met een Pattern Start ≠ 0. Geverifieerd tegen EPANET.
+- **Hersteld: reservoir zonder bron.** Het hield de vastgehouden knoopconcentratie, die verandert als het reservoir zelf water ontvangt (stroomomkering). EPANET houdt de beginkwaliteit. De beginkwaliteit wordt nu bij `set_initial_quality` bewaard en ook voor de reservoirknoop gerapporteerd.
+- **Hersteld: kwaliteitsklok.** De klok voor automatische bronpatronen volgt nu `update_hydraulics(simtime)` in plaats van stappen vanaf 0 te tellen.
+- **Hersteld: water dreef bij elke stap door PHREEQC weg.** Concentraties gingen per liter naar PHREEQC (dat rekent om met een dichtheid van 1 kg/L min de opgeloste massa) en werden als per kg water teruggelezen, en de alkaliniteit werd opgeteld uit een vaste lijst vrije soorten die ionparen en, bij ijzer en mangaan, hydroxocomplexen miste. Gemeten op zes soorten (Cl2, pH, Alk, Ca, Fe, Mn), gemiddelde relatieve verandering per soort na 60 rondes: Alk 73 %, Ca 1,7 %, Fe 2,0 %, Mn 1,7 %, Cl2 1,4 %. Nu: 0,00000 % voor al deze soorten na 576 rondes (pH 0,0003 %, afronding op vier decimalen).
+  - Alle PHREEQC-invoer is per kg water (`mg/L` via onze eigen molmassatabel, in beide richtingen dezelfde; `meq/L` → `meq/kgw`; achtergrond-`units` genormaliseerd naar `mol/kgw`). **Gedragswijziging:** "mg/L" in de soortenvector betekent nu mg per kg water (0,03 tot 0,3 % anders dan per liter).
+  - Alkaliniteit komt uit PHREEQC's eigen `ALK` (`_alk_batch`, één extra run per batch) in het batch-, meng- en `get_conc`-pad. `_ALK_SPECIES` (coëfficiënten als in phreeqc.dat, inclusief Fe(III) = -2) blijft als terugvaloptie.
+  - Ook sneller: 0,068 s per ronde van 100 segmenten tegen 0,100 s eerder (één machine, 100 segmenten).
+  - Gecontroleerd met `phreeqc.dat` en `vitens.dat` (0,00000 % drift). `wateq4f_PWN.dat` kan phreeqpython helemaal niet laden.
+- Tests: `test_geochem_alk_roundtrip.py` (echte PHREEQC), regressietests voor omkering, Pattern Start en de klok.
+
+### Junctions met negatieve vraag: automatische CONCEN-bronnen
+
+- **Nieuw:** een `CONCEN`-bron op een junction met negatieve vraag bepaalt de concentratie van het instromende water (sterkte × patroon), zoals in EPANET. Alleen toegepast in stappen met negatieve vraag. Parsing: `read_junction_sources` in `inp_sources.py`.
+- Andere bronsoorten op junctions geven een `UserWarning` en worden niet automatisch toegepast.
+
+### Reservoirs: automatische bronnen
+
+- **Nieuw:** `auto_reservoir_sources=True` (standaard). Reservoirs met head > 0 worden automatisch gevoed vanuit `[SOURCES]` (CONCEN met patroon) of houden hun beginkwaliteit. Reservoirs met head 0 worden overgeslagen. De parsing staat in `nzingaflow/inp_sources.py` en vereist geen epynet.
+- **Gedragswijziging:** voorheen leverden reservoirs geen water aan het netwerk. Testnetwerken die reservoirs met `inject_schedule` voedden, zetten nu `auto_reservoir_sources=False`.
+- `NotImplementedError` voor MASS/SETPOINT/FLOWPACED-bronnen op actieve reservoirs; `UserWarning` als `inject()` een automatisch gevoed reservoir als doel heeft.
+
+### Distributie: privé-pakketten, wheels per platform, release-workflow
+
+- **Installatie** beschrijft nu de privé-opzet: EPYnetDTD eerst uit de privé-repository (`git+ssh`), daarna NzingaFlow uit een GitHub-release (wheel per platform) of uit de broncode. De PyPI-instructies zijn verwijderd.
+- **Wheel-tags:** wheels krijgen de tag `py3-none-<platform>` in plaats van `py3-none-any`, omdat ze de MSX-binaries bevatten (`setup.py`, `PlatformBdistWheel`). Daarvoor vereist `build-system` nu `setuptools>=70.1`.
+- **Release-workflow** `.github/workflows/release.yml`: draait de tests en bouwt bij elke `v*`-tag een wheel op Linux en Windows, plus één keer een sdist, en maakt een concept-GitHub-release. Vereist het secret `EPYNET_DEPLOY_KEY`.
+- De `ImportError`-melding in `hydraulics.py` verwijst naar de privé-installatie.
+
+### Foutafhandeling: geen stille terugvalwaarden, installatiedocumentatie gecorrigeerd
+
+- **`solver._get_tank_volumes()`** geeft een `RuntimeError` (met tanknaam) i.p.v. stil 1000 m³.
+- **`hydraulics.get_closed_mask()`** geeft een `RuntimeError` als de afsluiterstatus niet te
+  lezen is, i.p.v. de afsluiter als open te behandelen.
+- **`parse_inp.load_from_epynet()`** geeft een `RuntimeWarning` (met link-/reservoir-/patroon-id)
+  bij elke noodwaarde (bronkwaliteit 1.0, patroon 1.0, diameter/lengte, debiet, mislukte solve).
+- **Importcontrole:** ontbrekende EPYnetDTD geeft nu een ImportError met uitleg dat
+  `epynet>=2.0` niet op PyPI staat en hoe je het installeert.
+- **Docs:** installatiesectie van README/README_NL belooft geen NumPy-only installatie meer.
+- **Packaging:** de dubbele `nzingaflow/pyproject.toml` is verwijderd.
+- `geochemistry._read_back()`: een mislukte PHREEQC-terugleesactie wordt nu geteld en gemeld via `_record_failure` i.p.v. stil genegeerd.
+- Nieuw `tests/test_validatie_numeriek.py`: aankomsttijd, massabalans (enkele leiding, serie), stationaire menging (analytisch), gesloten/open afsluiter, stroomomkering en vergelijking met een EPANET-kwaliteitsberekening. Bevinding: met lege leidingen (zonder `set_initial_quality()`) verdunnen mengknopen met ≥2 inkomende leidingen met water zonder segmenten, waardoor een vaste hoeveelheid massa verloren gaat (~0,07 m³·C in het testnetwerk, onafhankelijk van dt). Met gevulde leidingen blijft massa behouden (<0,1 %). Vastgelegd in `EPSRunner.run` en getest.
+- Tests: `tests/test_foutafhandeling.py`; verouderde verwachting in `test_mass_balance_tank`
+  gelijkgetrokken met de (correcte) `Q_in`-formule.
+
+### Transport: een segment kan in één tijdstap over meerdere korte doorgaande leidingen gaan
+
+- **`solver._handle_exits()` / nieuw `_cascade_thru()`.** De reistijd die na het verlaten van een leiding over is, wordt nu binnen dezelfde tijdstap doorgegeven over opeenvolgende doorgaande knopen. Eerder stopte een segment na één leiding per stap, wat ongeveer één tijdstap vertraging per korte leiding gaf. Op FRL-10 gaf dat een vertraging van 2 u bij de piek van EC op knoop 164593422; na de wijziging ongeveer 0,6 u (passagetijden 15–20 min achter EPANET). Splitsingen, eindknopen en leidingen die niet volledig worden doorlopen, stoppen zoals voorheen.
+- De uitlaatconcentratie (`_pipe_out_C`) van elke volledig doorlopen leiding wordt gelijk gesteld aan de concentratie van het segment, zodat tussenliggende knopen de aankomst zien.
+- Testen aangepast aan het fysische gedrag: `test_short_pipe_is_crossed_within_one_step` (vervangt de regel "max één leiding per stap") en `test_zero_length_valve_costs_no_extra_step` (vervangt `test_without_skip_valve_costs_a_step`). Geen segment verlaat een leiding twee keer in dezelfde stap.
+
+### PHREEQC-route: chemie van doorstromende segmenten bijhouden
+
+- **`solver._record_pipe_out_chem()` (nieuw).** Per leiding worden pH, alkaliniteit en koolstof bewaard van het laatste segment dat de leiding volledig heeft doorlopen of aan het eind tot stilstand is gekomen. Dit is de PHREEQC-tegenhanger van `_pipe_out_C`. Aangeroepen in `_cascade_thru` (doorgang en eindplaatsing) en in de splitsingstak.
+- Reden: bij een doorgaande knoop (bijvoorbeeld een doelknoop met een uitgaande leiding in een deelnetwerk) gaan segmenten door de knoop heen, en komen ze niet op de inkomende leiding te staan. De pH was dan uit de uitgangen van de leiding niet te lezen.
+- Gecontroleerd: FRL-10, doelknoop 164593422, 48 u: deelnetwerk en volledig netwerk geven per uur exact dezelfde pH (verschil 0,0).
+
+### Waterkwaliteit-fixes uit de vergelijking met pulse4.inp (EPANET)
+
+- **Externe instroom bij junctions met negatieve vraag.** Zulke knopen krijgen water met concentratie 0 (of `set_source_quality(node, C)`), gemengd met het aankomende water en afgegeven aan de uitgaande leidingen. Reservoirs zijn uitgesloten.
+- **Knoopmenging is continu over de leidingstroom.** Elke inkomende leiding draagt Q·dt bij met de uitlaatconcentratie (laatste aankomst). Dat vervangt het mengen van segmenten die in één stap aankomen, wat in stappen zonder aankomst onechte nullen gaf.
+- **Persistente knoopconcentratie.** `step()` geeft de laatste bekende knoopwaarde terug in plaats van 0; `node_arrived` markeert aankomsten in de huidige stap.
+- **Beginconditie.** Leidingen worden geïnitialiseerd met segmenten van ongeveer v·dt (maximaal 50 per leiding), met de stroomafwaartse knoop als beginconcentratie.
+
+### Kleppen: korte open afsluiters overslaan, gesloten blokkeren
+
+- **`skip_short_valves=True` (nieuw, alleen met `include_valves=True`).** Een open klep met `L < v·dt` wordt overgeslagen: een segment passeert hem in dezelfde stap, in plaats van een hele tijdstap in een element van lengte nul door te brengen. Ketens van kleppen worden opgelost; de tijd in overgeslagen kleppen (`L/v`) wordt van de meegenomen overshoot afgetrokken. Overslaan gebeurt alleen over doorgaande knopen; kleppen vóór een splitsing, eindknoop of tank blijven normale elementen. `solver.skip_info()` geeft het aantal kleppen, gesloten kleppen en overgeslagen kleppen.
+- **`cache_links=True` (nieuwe optie, standaard uit).** `HydraulicModel`/`NzingaFlowSolver` bouwen de lijst met linkobjecten niet meer na elke `solve()`, met identieke resultaten.
+
+### Documentatie
+
+- README's (NL en EN, in de root en in `nzingaflow/documentation/`) bijgewerkt: stap 6 van de rekenstappen beschrijft de reistijd over opeenvolgende doorgaande knopen; signaturen van `NzingaFlowSolver` en `HydraulicModel` compleet (`skip_short_valves`, `cache_links`, `reversal_deadband`); nieuwe sectie over de stroomrichting-deadband, `merge_span`, `set_source_quality()` en het experimentele `set_mixed_pipes()`.
+
+
+### Bugfix (batch 2) — overshoot bij leidingovergang, tankinstroom, CFL, massabalans, EPS-stappen
+
+- **`solver._handle_exits()` — overshoot weggegooid.** Een segment dat een
+  leiding verliet kwam in de volgende leiding op `x = 0`, waardoor de al
+  afgelegde afstand voorbij het leidingeinde (`x − L`) verloren ging. Elke
+  leidingpassage werd zo naar boven afgerond op een geheel aantal tijdstappen
+  (gemiddeld ≈ dt/2 te lang per leiding). De overshoot wordt nu als *tijd*
+  meegenomen (`(x − L)/v_oud`) en met de snelheid van de nieuwe leiding
+  omgerekend, voor doorgaande knopen en splitsingen. Begrensd net onder de
+  lengte van de nieuwe leiding, zodat een segment nooit twee keer in één stap exit.
+- **`solver._update_tanks()` — verdunning uit het niets.** `Q_in` kwam uit het
+  hydraulische debiet, maar `node_C[tank]` was 0 op elke stap zonder aankomend
+  segment: de tank werd verdund met C = 0 terwijl er geen massa binnenkwam. De
+  instroom komt nu uit de segmenten die de tank deze stap werkelijk bereiken
+  (`Q_in = ΣV/dt`, volumegewogen `C_in`).
+- **`stability.recommended_dt()` / `check_dt()` — lengte-0 elementen.**
+  Afsluiters (`include_valves=True`) hebben lengte 0 en gaven `dt_CFL = 0`,
+  waardoor elke dt als CFL-schending gold. Lengte-0 elementen worden genegeerd.
+- **`MassBalanceTracker`** — (a) lekmassa werd nooit geboekt (nieuwe
+  teller `leakage` en `record_leakage()`); (b) `booster_inject()` die bestaande
+  segmenten overschrijft veranderde de massa zonder boeking (nieuw
+  `record_injection_mass()`); (c) verval werd geschat op de massa van de vorige
+  stap, miste verval van tussentijds geïnjecteerde massa en telde bulk- en
+  wandverlies over de volle massa. De solver meet verval nu exact rond de
+  vervalstap en splitst per segment (`k_bulk/(k_bulk+k_wall)`);
+  `record_step(..., decay_loss=...)` accepteert dat, de oude schatting blijft
+  standaard voor directe aanroepers.
+- **`set_initial_quality()`** boekte de beginmassa niet in de tracker: `injected` bleef 0 en `balance_error` meldde 0 (`ok=True`) ongeacht de werkelijke fout. Wordt nu als injectie geboekt (gecontroleerd op EPANET `net1.inp`: fout 1e-16).
+- **`EPSRunner`** — `int(duration/qual_dt)` kapte af op float-ruis
+  (`0.3/0.1 → 2` stappen). Nieuw `_n_steps()`, ook gebruikt door `time_axis()`.
+- **Tankbron (nieuw).** Tankknopen absorberen nu aankomende segmenten
+  (routingtype 0, ook met uitgaande leidingen) en geven water af aan hun
+  uitgaande leidingen als nieuwe segmenten op `x = 0` (`volume = Q·dt`,
+  `C = C_tank`), waardoor `_tank_C` eindelijk het transport aanstuurt. De CSTR
+  is massabehoudend met tankmassa als toestand: `V_na = V + V_in − Q_uit·dt`,
+  `M_nieuw = (M_oud + V_in·C_in)/(1 + Q_uit·dt/V_na + k·dt)`.
+  `set_initial_quality()` initialiseert tanks met de knoopconcentratie;
+  `mass_balance()` rapporteert `in_tanks`, tankverval wordt als bulkverval
+  geboekt en de EPANET-volumereset bij `update_hydraulics()` als injectie.
+  `step()` keert niet meer vroeg terug bij 0 segmenten als er tanks zijn.
+  `PhreeqSolutionMode`: afgegeven tankwater krijgt de achtergrondoplossing.
+- **`solver._get_tank_volumes()` — eenheden.** EPANET geeft tankvolume in ft³
+  bij US-flow-eenheden; dat werd als m³ gebruikt (6980 m³ werd 246 500 op
+  `net1.inp`). Nieuw: `units.volume_to_m3()`.
+- Tests: `tests/test_regressions_batch2.py` (de meeste falen op de batch-1-code).
+
+### Bugfix — decay cache, leidinglengte (US-eenheden), tank-CSTR, time_axis
+
+- **`solver.step()` — stale decay-cache.** Herbouw-controle gebruikte
+  `np.allclose(..., atol=1e-8)`; in 1/s is dat ≈ 0,001/dag, dus een wijziging
+  van bijv. `decay_k` `[0.0]` → `[5e-9]` werd stilzwijgend genegeerd. Nu exacte
+  vergelijking (`np.array_equal` + shape-check) via `_combined_exp_needs_rebuild()`.
+- **`hydraulics.get_topology()` / `parse_inp()` — leidinglengte.** EPANET geeft
+  lengte in ft bij US-flow-eenheden (GPM, CFS, MGD, IMGD, AFD); die werd niet
+  omgerekend (reistijden 3,28× te lang). Nieuw: `units.length_to_m()`.
+- **`lta.tank_step_implicit()` — CSTR-formule.** Noemer bevatte `Q_out` i.p.v.
+  `Q_in`; fout zodra Q_in ≠ Q_out (leegstromende tank verdunde, vullende tank
+  verdunde niet, C kon boven C_in uitkomen). Correct: `V·dC/dt = Q_in·(C_in−C) − k·V·C`.
+  Voor Q_in = Q_out ongewijzigd. Lege tank (V = 0) gaf `NaN`; V wordt nu begrensd.
+- **`EPSRunner.time_axis()`** begon bij 0; `results[i]` hoort bij `(i+1)·qual_dt`.
+- Tests: `tests/test_regressions_batch1.py`; `test_mass_balance_tank` (in
+  `test_inzingaflow.py` en `test_validation.py`) legde de oude formule vast en is aangepast.
+
+### Documentatie
+
+- `README.md`, `README_NL.md` en `nzingaflow/documentation/README*.md` in lijn gebracht met de code: versiebadge (1.3.1); de root-README's bevatten nu de sectie `PhreeqSolutionMode` (stond alleen in `documentation/`); tankmodel, fasenlijst van de LTA (incl. tankafgifte en overshoot-doorgifte), `set_initial_quality()`, de betekenis van `EPSRunner.time_axis()`, `recommended_dt()` met lengte-0-elementen, de rapportsleutels van `MassBalanceTracker` (`in_tanks`, `leakage`, `accounted`) en de FAQ over massabalansfouten; de versiehistorie in de README noemt nu 1.3.1, 1.3.0 en de fixes van batch 1/2 (de 1.3.0-punten stonden nog als "Unreleased"); versieverwijzingen voor de MSX-brug consistent gemaakt (geïntroduceerd in 1.2.0, meegeleverde binaries sinds 1.2.2); ontbrekende kop `### Stabiliteitsfuncties` in de NL-README hersteld (kapotte ToC-anker); relatieve links in `documentation/` gerepareerd (`../LICENSE`, `../CHANGELOG*.md`); beschrijving in `PKG-INFO` opnieuw gegenereerd uit de root-README.
+- Docstrings bijgewerkt: `MassBalanceTracker` (gebruiksvoorbeeld had een verouderde `record_step`-signatuur; `report()`-sleutels), `NzingaFlowSolver`-klasse en `step()` (tankbron, overshoot, fase 7b), `units.py` (`length_to_m`, `volume_to_m3`).
+
 ## [1.3.1] — 2026-09-17
 
 ### Bugfix — `PhreeqSolutionMode` was nooit daadwerkelijk aangesloten op de simulatielus

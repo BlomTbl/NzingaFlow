@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![NumPy](https://img.shields.io/badge/numpy-%E2%89%A51.24-orange)](https://numpy.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.2-informational)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.3.1-informational)](CHANGELOG.md)
 
 NzingaFlow simulates water quality in drinking water distribution networks using the **Lagrangian Transport Approach (LTA)**. Chemical species are transported as discrete segments carried along with the flow — eliminating the numerical diffusion inherent to Eulerian methods. All core calculations are fully vectorized with NumPy and optionally accelerated with Numba JIT compilation.
 
@@ -25,9 +25,11 @@ NzingaFlow simulates water quality in drinking water distribution networks using
   - [SegmentStore](#segmentstore)
   - [LTA Core Functions](#lta-core-functions)
   - [GeochemSolver & SpeciesMap](#geochemsolver--speciesmap)
+    - [PhreeqSolutionMode](#phreeqsolutionmode-solution-number-mode)
   - [MsxReactionSystem](#msxreactionsystem)
   - [MsxSimulation & MsxNativeLib](#msxsimulation--msxnativelib)
   - [Stability Functions](#stability-functions)
+  - [Flow reversal dead band and external inflow](#flow-reversal-dead-band-and-external-inflow)
   - [merge\_segments](#merge_segments)
 - [Advanced Usage](#advanced-usage)
 - [Wall Reactions](#wall-reactions)
@@ -46,9 +48,9 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 - **Temperature correction** — Arrhenius/Hayduk-Laudie correction on D_mol and k_wall (v1.1.0)
 - **Leakage modelling** — proportional volume loss per segment without contaminant ingress (v1.1.0)
 - **MSX reaction system** — EPANET-MSX 2.0 compatible multi-species reaction layer (v1.1.0)
-- **MSX native library bridge** — direct ctypes binding to `libepanetmsx` (EPANET-MSX 2.0); runs an existing `.msx` file unchanged through the official C solver; native libraries bundled for Linux/Windows (v1.2.2)
-- **Valve topology support** — PRV, PSV, TCV, FCV, GPV and PCV included in transport via `include_valves=True` (v1.2.1)
-- **Tanks** — CSTR model with implicit Euler integration (unconditionally stable)
+- **MSX native library bridge** — direct ctypes binding to `libepanetmsx` (EPANET-MSX 2.0); runs an existing `.msx` file unchanged through the official C solver; native libraries bundled for Linux/Windows (introduced in v1.2.0; functional with bundled binaries since v1.2.2)
+- **Valve topology support** — PRV, PSV, PBV, TCV, FCV, GPV and PCV included in transport via `include_valves=True` (v1.2.1)
+- **Tanks** — mass-conserving CSTR model with implicit Euler integration (unconditionally stable); tanks absorb arriving segments and release water to their outflow pipes as new segments
 - **Extended Period Simulation (EPS)** — automatic hydraulic updates every `hyd_dt` seconds
 - **Full geochemistry** — optional PhreeqPython/PHREEQC integration
 - **CFL stability check** — automatic warning and `recommended_dt()`
@@ -71,31 +73,41 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 
 ## Installation
 
-### From PyPI
+NzingaFlow and EPYnetDTD are private packages. You need read access to both GitHub repositories, via an SSH key or a token.
+
+**Step 1 — EPYnetDTD (required, install first).** NzingaFlow needs `epynet >= 2.0` (with `epynet.solver`). That version is not on PyPI (PyPI only has `epynet <= 1.1`, which does not work), so install it from its private repository:
 
 ```bash
-# Minimal (NumPy only)
-pip install nzingaflow
-
-# With Numba JIT (~4–5× faster)
-pip install "nzingaflow[numba]"
-
-# With full geochemistry (PhreeqPython/PHREEQC)
-pip install "nzingaflow[geochem]"
-
-# Everything including dev tools
-pip install "nzingaflow[all]"
+pip install "epynet @ git+ssh://git@github.com/<org>/epynet.git@v2.0.0"
+python -c "import epynet.solver"   # must run without error
 ```
+
+Without this step, `import nzingaflow` raises an ImportError with this explanation.
+
+**Step 2 — NzingaFlow.**
+
+### From a GitHub release (recommended)
+
+Each release has a wheel for Linux x86-64 and one for Windows x86-64. Download the wheel with the GitHub CLI and install it:
+
+```bash
+gh release download vX.Y.Z --repo <org>/nzingaflow --pattern "*linux_x86_64.whl"
+pip install ./nzingaflow-*-linux_x86_64.whl
+```
+
+On Windows, use `--pattern "*win_amd64.whl"` and install that file. There is no macOS wheel yet, because the EPANET-MSX libraries for macOS are not included (see `nzingaflow/lib/README.txt`). On macOS, install from source instead; the MSX bridge is then unavailable until you build the library yourself.
 
 ### From source
 
 ```bash
-git clone https://github.com/nzingaflow/nzingaflow.git
+git clone git@github.com:<org>/nzingaflow.git
 cd nzingaflow
 pip install -e ".[dev]"
 ```
 
-> **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0
+Optional extras: `[numba]` (JIT compilation), `[geochem]` (PhreeqPython) and `[all]` (everything).
+
+> **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0 (see step 1)
 
 ---
 
@@ -186,7 +198,7 @@ runner = EPSRunner(solver, qual_dt=5.0, hyd_dt=300.0, duration=86400.0)
 results = runner.run(decay_k=np.zeros(3))
 ```
 
-### With the EPANET-MSX native library bridge (new in v1.2.2)
+### With the EPANET-MSX native library bridge (new in v1.2.0; bundled binaries since v1.2.2)
 
 Use this to run an existing `.msx` file unchanged through the official MSX C solver,
 without rewriting reaction expressions in Python.
@@ -249,8 +261,11 @@ Each time step `dt`, the solver executes the following phases:
 2. Advection       x += v[pipe] * dt
 3. Exit detection  x >= L[pipe]  →  segment leaves pipe
 4. Node mixing     flow-weighted  →  node_C (n_nodes × n_species)
-5. Tank model      CSTR implicit Euler  →  node_C updated
-6. Pipe routing    vectorized: through-nodes updated in one pass; splits in small loop
+5. Tank model      mass-conserving CSTR (implicit Euler): arriving segments are absorbed, tank state (V, M) updated  →  node_C updated
+6. Pipe routing    vectorized: through-nodes updated in one pass; splits in small loop;
+                   distance travelled beyond the pipe end (overshoot) is carried as time across consecutive
+                   through-nodes within the same step (a segment may cross several short pipes per step)
+6b. Tank release   tank water enters the outflow pipes as new segments at x = 0  (volume = Q·dt, C = C_tank)
 7. Merging         adjacent segs with |ΔC| < tol  →  merged (every merge_interval steps)
 ```
 
@@ -270,7 +285,7 @@ Steps 1–4 are executed by Numba JIT kernels when Numba is installed, with no i
 | `geochemistry.py` | `GeochemSolver`, `SpeciesMap` | PhreeqPython integration |
 | `msx.py` | `MsxReactionSystem` | Pure-Python MSX reaction layer: ODE solvers + expression parser (v1.1.0) |
 | `msxlibrary.py` | `MsxSimulation`, `MsxNativeLib` | Direct ctypes bridge to `libepanetmsx` (EPANET-MSX 2.0); loads `.msx` files unchanged; native libs bundled (v1.2.2) |
-| `units.py` | — | EPANET unit-system conversions and enums shared by `hydraulics.py` and `parse_inp.py` |
+| `units.py` | `length_to_m`, `volume_to_m3`, … | EPANET unit-system conversions (flow, diameter, velocity, pipe length, tank volume) and enums shared by `hydraulics.py`, `parse_inp.py` and `solver.py` |
 
 ### SegmentStore (Structure-of-Arrays)
 
@@ -304,6 +319,9 @@ NzingaFlowSolver(
     leakage_fraction: float = 0.0,             # fractional pipe flow loss (v1.1.0)
     wall_mode:        str   = 'two_film',      # 'two_film' or 'direct' (v1.1.0)
     include_valves:   bool  = False,           # include valves in transport topology (v1.2.1)
+    skip_short_valves: bool = True,            # open short valves are skipped (include_valves=True)
+    cache_links:      bool  = False,           # cache link data in the hydraulic model
+    reversal_deadband: float = 1e-5,           # flow-reversal dead band [m³/s], see below
 )
 ```
 
@@ -323,20 +341,24 @@ NzingaFlowSolver(
 | `leakage_fraction` | `float` | Fraction of pipe flow lost as leakage (0.0–1.0). Each segment loses proportional volume per timestep; concentration remains constant. Typically 0.05–0.20 for distribution networks. *(v1.1.0)* |
 | `wall_mode` | `str` | `'two_film'` (default): EPANET-compatible series resistance `k_eff = k_f·k_w/(k_f+k_w)`. `'direct'`: k_wall is already k_eff — use when k_wall comes from direct calibration rather than EPANET. *(v1.1.0)* |
 | `include_valves` | `bool` | When `True`, valves (PRV, PSV, PBV, FCV, TCV, GPV, PCV) are included in the transport topology. EPANET always solves hydraulics for valves correctly; this option ensures NzingaFlow also computes residence time and species transport across them. Default `False` for backward compatibility. *(v1.2.1)* |
+| `skip_short_valves` | `bool` | When `include_valves=True`, open short valves are skipped in the transport topology. *(v1.2.1)* |
+| `cache_links` | `bool` | Cache link data in the hydraulic model (see `HydraulicModel`). Default `False`. |
+| `reversal_deadband` | `float` | Flow-reversal dead band [m³/s]: pipes with a flow magnitude below this value keep their previous direction. Default `1e-5`; `0` disables it. See [Flow reversal dead band](#flow-reversal-dead-band-and-external-inflow). |
 
 **Methods**
 
 | Method | Return type | Description |
 |---|---|---|
-| `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False)` | `ndarray (node_count, n_species)` | Execute one water quality time step |
+| `step(dt, decay_k, merge_interval=10, merge_tol=1e-6, check_cfl=False, merge_span=1.0)` | `ndarray (node_count, n_species)` | Execute one water quality time step |
 | `update_hydraulics(simtime=0)` | `None` | Recompute hydraulics; detects flow reversals and rebuilds routing caches |
+| `set_initial_quality(node_quality, simtime=0, dt=None)` | `None` | Fill every pipe with one segment carrying the concentrations of its upstream node (EPANET-MSX `[QUALITY]` style) and initialise tanks from their node concentration. With `track_mass=True` the initial mass is booked as injection. `dt` [s] (quality step) splits each pipe into segments of about v·dt so that the initial water arrives at the right times; without `dt` each pipe keeps one segment and a warning is issued. Call before `EPSRunner.run()` |
 | `warmup_numba()` | `None` | Trigger Numba JIT compilation before the simulation (call once after init) |
 | `inject(node_uid, C_vector, volume)` | `None` | Inject from a node, distributed proportionally over outgoing pipes |
 | `inject_pipe(pipe_uid, C_vector, volume, x=0.0)` | `None` | Inject directly into a pipe at position `x` [m] |
 | `booster_inject(node_uid, C_set, flow_frac=1.0)` | `None` | Fix concentration at a set value on outgoing pipes |
 | `check_stability(dt, decay_k, warn=True)` | `dict` | CFL and reaction stability check |
 | `recommended_dt(decay_k)` | `float` | Maximum stable time step [s] |
-| `mass_balance()` | `dict \| None` | Mass balance report (requires `track_mass=True`) |
+| `mass_balance()` | `dict \| None` | Mass balance report incl. tank mass and leakage (requires `track_mass=True`) |
 | `geochem_report(C_vec)` | `dict` | LSI, saturation indices, pH (requires `geochem`) |
 
 **Attributes**
@@ -374,12 +396,31 @@ run(
     inject_schedule:  dict  = None,     # {node: [(t_start, t_end, C_vec), ...]}
     inject_fn:        callable = None,  # dynamic injection callback
     booster_schedule: dict  = None,     # {node: [(t_start, t_end, C_set), ...]}
+    mass_schedule:    dict  = None,     # {node: [(t_start, t_end, mass_flux_vec), ...]} MASS source [mass/s]
     merge_interval:   int   = 10,
     merge_tol:        float = 1e-6,
+    merge_rel_tol:    float = 0.0,      # relative merge tolerance (0 = off)
     check_cfl:        bool  = True,
     verbose:          bool  = False,
-) -> ndarray  # shape: (n_steps, node_count, n_species)
+    record_every:     int   = 1,        # store every n-th quality step
+    merge_span:       float | None = 1.0,  # None = no span limit
+) -> ndarray  # shape: (n_steps // record_every, node_count, n_species)
 ```
+
+**Memory: `record_every`.** By default `run()` stores the node concentrations after every quality step: `n_steps × node_count × n_species × 8` bytes. With a small `qual_dt` that is most of the memory (24 h at 10 s on a 27,000-node network: 1.9 GB). `record_every=int(3600 / qual_dt)` keeps only hourly values, and `time_axis()` follows. On that network the stored values were identical and the run time unchanged, and peak memory fell from 2081 MB to 334 MB. Steps that do not complete an interval are not stored.
+
+**Quality time step and merging (one network).** On one network (26,893 nodes, 24 h, one CPU), a smaller `qual_dt` improved agreement with EPANET (run with a 60 s step) more than any merge setting. Mean error after 24 h:
+
+| Merge settings | `qual_dt` | Run time | Error (mg/L) |
+|---|---|---|---|
+| defaults | 300 s | 190 s | 2.46 |
+| defaults | 60 s | 274 s | 1.34 |
+| defaults | 30 s | 429 s | 0.71 |
+| `merge_rel_tol=0.005, merge_span=None, merge_interval=5` | 30 s | 187 s | 1.10 |
+| same | 15 s | 271 s | 0.69 |
+| same | 10 s | 313 s | 0.59 |
+
+At the same step the defaults are more accurate and the relative merge is cheaper (about 40 to 55 % less time, 3 to 4 times fewer segments). At the same run time the relative merge with a smaller step was more accurate in the measured range. This is one network and one machine; the defaults are unchanged. See `benchmark_joure/RESULTATEN_EPYNET.md`.
 
 **`inject_schedule` format**
 
@@ -410,6 +451,8 @@ results = runner.run(decay_k=..., inject_fn=my_injection)
 t_hours = runner.time_axis(unit="h")   # "s", "min", or "h"
 ```
 
+`results[i]` is the state *after* quality step `i`, so it belongs to `t = (i + 1)·qual_dt`: the axis starts at `qual_dt`, not at 0. The number of steps is `floor(duration / qual_dt)`, computed with a small tolerance so float noise (`0.3 / 0.1 = 2.9999…`) does not drop a step.
+
 ---
 
 ### HydraulicModel
@@ -417,14 +460,15 @@ t_hours = runner.time_axis(unit="h")   # "s", "min", or "h"
 Low-level EPANET coupling via epynet. Normally instantiated internally by `NzingaFlowSolver`.
 
 ```python
-HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool = False)
+HydraulicModel(inp_path: str, include_pumps: bool = False, include_valves: bool = False,
+               cache_links: bool = False, reversal_deadband: float = 1e-5)
 ```
 
 | Method | Description |
 |---|---|
 | `solve(simtime=0)` | Solve hydraulics for one EPS time step [s]; memoized — re-solving the same `simtime` is a no-op |
 | `close()` | Close the underlying EPANET hydraulic session (`EN_closeH`). Idempotent; a later `solve()` reopens it automatically |
-| `get_topology()` | Returns `(pipe_start, pipe_end, pipe_length, pipe_area, node_count, pipe_ids, node_names)` — cached |
+| `get_topology()` | Returns `(pipe_start, pipe_end, pipe_length, pipe_area, node_count, pipe_ids, node_names)` — cached; `pipe_length` in m (converted from ft for US flow units) |
 | `get_topology_with_reversal()` | Topology with pipe_start/end corrected for actual flow direction |
 | `get_hydraulic_state()` | Returns `(flow [m³/s], velocity [m/s], reversed_mask)` — always SI units |
 | `summary()` | Diagnostic overview of the network as a string |
@@ -491,11 +535,11 @@ from nzingaflow.lta import (
 | `combined_decay_multi` | `(C, pipe, combined_exp, n=None) → None` | `C *= combined_exp[pipe]` in-place; one memory pass for both bulk and wall decay |
 | `bulk_first_order_multi` | `(C, k_vec, dt, n=None) → None` | `C *= exp(-k_vec * dt)` in-place; broadcasts over all segments |
 | `wall_first_order_multi` | `(C, pipe, k_wall, dt, n=None) → None` | Wall decay per segment in-place |
-| `compute_wall_k` | `(diam, velocity, k_w, D_mol, nu) → (n_pipes, n_species) [1/s]` | Volumetric wall reaction rate via two-film model |
+| `compute_wall_k` | `(diam, velocity, k_w, D_mol, nu, pipe_length=None, temperature=None) → (n_pipes, n_species) [1/s]` | Volumetric wall reaction rate via two-film model |
 | `advect` | `(x, pipe, velocity, dt, n=None) → None` | `x += velocity[pipe] * dt` in-place |
 | `exit_detect` | `(x, pipe, pipe_length, exit_mask, n=None) → int` | Fill `exit_mask` in-place; returns number of exiting segments |
 | `node_mixing_multi` | `(exit_mask, pipe, C, flow, pipe_end, node_count, out=None, wC_buf=None, node_flow_buf=None, n=None) → ndarray` | Flow-weighted mixing; zero allocations when pre-allocated buffers are provided |
-| `tank_step_implicit` | `(C_tank, Q_in, C_in, Q_out, V_tank, k_b, dt) → None` | CSTR implicit Euler in-place |
+| `tank_step_implicit` | `(C_tank, Q_in, C_in, Q_out, V_tank, k_b, dt) → None` | CSTR implicit Euler in-place: `C_new = (C + Q_in·C_in/V·dt) / (1 + (Q_in/V + k_b)·dt)`. `Q_out` does not affect C (kept in the signature for compatibility); `V_tank` is clamped to ≥ 1e-9 m³. The solver's own tank step is a mass-conserving variant (see Architecture) |
 | `warmup_numba` | `(n_species=1) → None` | Trigger JIT compilation; call once after creating the solver |
 
 > **Performance tip:** use `combined_decay_multi` together with `build_combined_exp` instead of separate `bulk_first_order_multi` + `wall_first_order_multi` calls. This halves the number of memory passes over `C` and eliminates the per-step `exp()` computation.
@@ -506,7 +550,7 @@ from nzingaflow.lta import (
 
 PhreeqPython integration that replaces first-order bulk decay with full PHREEQC geochemistry.
 
-> Requires: `pip install nzingaflow[geochem]` or `pip install phreeqpython`
+> Requires the `geochem` extra (see Installation), or `pip install phreeqpython`
 
 #### SpeciesMap
 
@@ -531,6 +575,8 @@ smap = SpeciesMap(
 ```
 
 Supported PHREEQC elements: `Cl`, `Ca`, `Mg`, `Na`, `K`, `Fe`, `Mn`, `N(5)` (NO₃), `N(3)` (NO₂), `N(-3)` (NH₄), `Alk`, `C(4)` (TIC/CO₂), `S(6)` (SO₄), `P` (phosphate).
+
+**Units and PHREEQC.** PHREEQC works per kg of water. NzingaFlow therefore writes every concentration to PHREEQC per kg of water (`mg/L` becomes `mmol/kgw` through the molar mass table in `GeochemSolver._MOLAR_MASS`, `meq/L` becomes `meq/kgw`) and reads it back the same way, so a round trip through PHREEQC returns exactly what went in. In practice "mg/L" in the species vector is treated as mg per kg of water (about 0.03 to 0.3 % different from mg per litre of solution). Alkalinity is read back from PHREEQC's own `ALK`, which includes ion pairs and hydroxo complexes (for example with iron and manganese). Earlier versions converted per litre on the way in and per kg on the way out, which made water drift on every step (in one test 73 % alkalinity and 1.7 % calcium after 60 steps); see the changelog.
 
 #### GeochemSolver
 
@@ -579,7 +625,7 @@ mixing. Use it when exact pH after mixing matters, or when downstream code
 needs direct PHREEQC solution objects (e.g. Victoria-style workflows).
 About ~2× slower than `GeochemSolver`; PHREEQC memory grows with the number
 of unique solutions, so call `garbage_collect()` regularly (or set
-`auto_gc_interval`).
+`auto_gc_interval`). Water released by tanks enters the pipes with the background solution.
 
 ```python
 PhreeqSolutionMode(
@@ -637,7 +683,7 @@ print(sol.pH, sol.total_element('Ca'))
 
 MSX-compatible multi-species reaction layer implementing the four EPANET-MSX 2.0 concepts: `RATE`, `EQUIL`, `FORMULA`, and surface species (`WALL`). Pass an `MsxReactionSystem` instance as the `geochem` argument to `NzingaFlowSolver`.
 
-> Requires: `pip install nzingaflow` (no extra dependency; scipy required for `rk45`/`radau` solvers)
+> Requires: no extra dependency (scipy is needed for the `rk45`/`radau` solvers)
 
 ```python
 from nzingaflow.msx import MsxReactionSystem
@@ -647,9 +693,13 @@ rxn = MsxReactionSystem(
     wall_species=[],       # list of wall-bound species names
     params={},             # {name: value} reaction parameters
     pipe_rates={},         # {species: expression} in pipes
+    pipe_equil={},         # EQUIL expressions in pipes (optional)
     pipe_formulas={},      # {species: expression} derived variables
     tank_rates={},         # {species: expression} in tanks
+    tank_formulas={},      # FORMULA expressions in tanks (optional)
     solver='rk4',          # 'euler', 'rk4', 'ros2' (stiff, no scipy), 'rk45', 'radau'
+    rtol=1e-3,             # relative tolerance for adaptive solvers
+    atol=1e-6,             # absolute tolerance for adaptive solvers
 )
 ```
 
@@ -683,7 +733,7 @@ rxn = MsxReactionSystem(
     bulk_species = ['Cl2', 'NH3', 'NH2Cl'],
     wall_species = ['BF'],
     params       = {'k1': 1.5e-4, 'k2': 3e-3, 'k4': 0.01,
-                    'k5': 0.005, 'BFmax': 100.0},
+                    'k3': 1e-3, 'k5': 0.005, 'BFmax': 100.0},
     pipe_rates   = {
         'Cl2':   '-k1 * Cl2 * NH3 - k2 * Cl2 * BF * Av',
         'NH3':   '-k1 * Cl2 * NH3',
@@ -753,7 +803,7 @@ MsxSimulation(
 | `load()` | `MsxNetworkState` | Open the MSX file and build a full network snapshot |
 | `run(save_to_file=False, hyd_file=None)` | `MsxSimulationResult` | Run the full simulation; optionally from a previously saved hydraulics file |
 | `update_initial_quality(node_values=None, link_values=None)` | `None` | Adjust initial concentrations before `run()`: `{name: {species: value}}` |
-| `configure_source(node, species, kind, level, pattern_name=None)` | `None` | Configure a source; `kind` = `'CONCEN'`, `'MASS'`, `'SETPOINT'`, `'FLOWPACED'` or `'NOSOURCE'` |
+| `configure_source(node_name, species_name, kind, level, pattern_name=None)` | `None` | Configure a source; `kind` = `'CONCEN'`, `'MASS'`, `'SETPOINT'`, `'FLOWPACED'` or `'NOSOURCE'` |
 | `update_constant(name, value)` | `None` | Change a named constant in the .msx file |
 | `add_time_pattern(name, multipliers)` | `None` | Add a new time pattern with the given multipliers |
 | `close()` | `None` | Close the library and free memory |
@@ -835,6 +885,32 @@ lib.close()
 
 ---
 
+### Flow reversal dead band and external inflow
+
+Pipes whose flow magnitude is below `reversal_deadband` [m³/s] keep their previous flow direction. Without this, nearly stagnant water flips direction every hydraulic step and the segments are mirrored each time. The default `1e-5` m³/s is the value that gave the best agreement with EPANET on `wst.inp`. Set `reversal_deadband=0` to restore the previous behaviour.
+
+`merge_span` (argument of `step()`, default `1.0`) limits merging: adjacent segments are only merged when their position spread is at most `merge_span · v · dt`. Pass `None` to disable this check.
+
+`set_source_quality(node_uid, C_vector)` sets the concentration of water entering a node through an external inflow (a junction with negative demand, for example `J7` in `pulse4.inp`). The default is 0. It applies to all steps until the next call. Reservoirs are not affected; see *Automatic reservoir sources* below.
+
+### Automatic reservoir sources
+
+By default (`auto_reservoir_sources=True`) the solver feeds every reservoir with a head above 0 automatically:
+
+- With a `[SOURCES]` entry of type `CONCEN`, the reservoir water has concentration `strength × pattern(t)`.
+- Without a source, the reservoir keeps its initial quality (from `set_initial_quality`), as EPANET does.
+- The volume is the reservoir's outgoing flow × the quality time step. Reservoirs with head 0 are switched off and skipped.
+
+### Junctions with negative demand
+
+A junction with a negative demand is an external inflow. The inflowing water has the concentration of the junction's `[SOURCES]` entry (`CONCEN` × pattern), as in EPANET. A junction without a source delivers water with concentration 0 (or the value set with `set_source_quality`). A `CONCEN` source is applied only in steps where the junction's demand is negative. Other source types on a junction give a warning and are not applied automatically.
+
+Other source types (`MASS`, `SETPOINT`, `FLOWPACED`) on an active reservoir raise a `NotImplementedError`; use `auto_reservoir_sources=False` and feed them with `inject()`.
+
+If you already feed a reservoir with `inject()` (for example through `inject_schedule`), set `auto_reservoir_sources=False`. Otherwise the reservoir water is counted twice; `inject()` warns when it targets an automatically fed reservoir.
+
+`set_mixed_pipes(mask)` treats the pipes in `mask` as fully mixed volumes (like a tank) instead of Lagrangian segments. This is **experimental**: it does not work well for pipes with real through-flow, because it can break the volume balance. Use it only for pipes that mostly contain stagnant water going back and forth.
+
 ### Stability Functions
 
 ```python
@@ -855,8 +931,8 @@ recommended_dt(
 ) -> float
 ```
 
-Computes `min(dt_CFL, dt_rxn) × safety` where:
-- **CFL:** `dt_CFL = min(L / v)` over all pipes
+Computes `min(dt_CFL, dt_rxn) × safety`, clamped between `min_dt` and `max_dt` (the lower clamp never exceeds the CFL limit), where:
+- **CFL:** `dt_CFL = min(L / v)` over all pipes with `L > 0` (zero-length elements such as valves with `include_valves=True` and pumps are ignored; they would otherwise give `dt_CFL = 0`)
 - **Reaction:** `dt_rxn = 0.1 / k_max` (10× safety margin)
 
 #### `check_dt()` — returns a report dict
@@ -884,13 +960,18 @@ mb = solver.mass_balance()
 # {
 #   "injected":      ndarray,   # mass injected per species
 #   "in_system":     ndarray,   # mass currently in segments
+#   "in_tanks":      ndarray,   # mass currently stored in tanks
 #   "bulk_decay":    ndarray,   # cumulative bulk decay loss
 #   "wall_decay":    ndarray,   # cumulative wall decay loss
 #   "outflow":       ndarray,   # mass that left via sink nodes
-#   "balance_error": ndarray,   # relative error per species
+#   "leakage":       ndarray,   # mass lost through leakage (leakage_fraction)
+#   "accounted":     ndarray,   # in_system + in_tanks + decay + outflow + leakage
+#   "balance_error": ndarray,   # |injected − accounted| / injected per species
 #   "ok":            bool,      # True if error < 1%
 # }
 ```
+
+What is booked as *injected*: `inject()` / `inject_pipe()`, the initial mass from `set_initial_quality()`, mass changes caused by `booster_inject()` overwriting existing segments (`record_injection_mass()`), and the EPANET tank-volume reset at `update_hydraulics()`. Decay is measured exactly around the decay pass and split per segment into bulk and wall loss (`k_bulk / (k_bulk + k_wall)`); tank decay is booked as bulk decay. Callers that use `MassBalanceTracker.record_step()` directly without `decay_loss=` get the older estimate based on the previous step's mass.
 
 ---
 
@@ -996,6 +1077,7 @@ results = runner.run(
 mb = solver.mass_balance()
 print(f"Injected:    {mb['injected'][0]:.4f} kg")
 print(f"In system:   {mb['in_system'][0]:.4f} kg")
+print(f"In tanks:    {mb['in_tanks'][0]:.4f} kg")
 print(f"Bulk decay:  {mb['bulk_decay'][0]:.4f} kg")
 print(f"Outflow:     {mb['outflow'][0]:.4f} kg")
 print(f"Error:       {mb['balance_error'][0]*100:.3f}%  OK={mb['ok']}")
@@ -1043,7 +1125,8 @@ Re    = v · D / ν
 Sh    = 0.023 · Re^0.83 · Sc^(1/3)                                (turbulent, Re > 4000)
 Sh    = (3.66³ + max(1.615·(Re·Sc·D/L)^(1/3) − 0.7, 0)³)^(1/3)  (laminar, Re < 2300)
 Sh    = linear interpolation Sh_lam ↔ Sh_turb                     (transition, 2300 ≤ Re ≤ 4000)
-k_f   = max(Sh · D_mol / D, 4·D_mol/D)   [m/s]   (stagnation floor)
+k_f   = Sh · D_mol / D                       [m/s]   (convective film)
+k_f   = max(k_f, 4·D_mol/D)  for Re < 10    [m/s]   (stagnation floor)
 k_eff = k_f · k_w / (k_f + k_w)                  (series resistance, wall_mode='two_film')
 k_vol = k_eff · 4 / D                    [1/s]    (cylinder A/V = 4/D)
 ```
@@ -1059,7 +1142,7 @@ D_mol(T) = D_mol_20 · exp(17000/R · (1/T₀ − 1/T))   [Hayduk & Laudie 1974]
 k_wall(T) = k_wall · 1.047^(T−20)                    [Rossman 2000]
 ```
 
-Effect: factor 0.59× at 5°C to 1.38× at 30°C on k_wall_vol.
+Effect on k_wall_vol: the factor depends on how the film and wall resistances compare. When the wall reaction is the limiting resistance (k_w ≪ k_f) it approaches θ_w^(T−20), i.e. 0.50× at 5 °C and 1.58× at 30 °C. For a worked example (D = 0.1 m, v = 0.05 m/s, L = 500 m, k_w = 1e-5 m/s), `compute_wall_k()` gives 0.69× at 5 °C and 1.25× at 30 °C.
 
 ### Specifying k_wall per pipe
 
@@ -1093,12 +1176,13 @@ Use `solver.recommended_dt()` to compute the optimal time step and pass it as `q
 **Q: The mass balance error exceeds 1%. What are possible causes?**
 
 - The time step is too large (CFL violation)
-- Wall reactions are active — the mass balance estimate is an approximation for wall decay
 - Geochemistry is active: non-linear reactions are not tracked by the linear mass balance
+- You call `MassBalanceTracker.record_step()` yourself without `decay_loss=` — decay is then only estimated from the previous step's mass (the solver itself measures it exactly)
+- `balance_error` is relative to the injected mass, including the initial mass from `set_initial_quality()`; a run that never injects anything reports 0
 
 **Q: How do I get the best performance?**
 
-1. Install Numba: `pip install nzingaflow[numba]`
+1. Install the `numba` extra (see Installation), e.g. `pip install -e ".[numba]"` from source
 2. Call `solver.warmup_numba()` once after creating the solver, before the simulation loop
 3. Use `combined_decay_multi` + `build_combined_exp` instead of separate bulk/wall calls (done automatically by the solver)
 
@@ -1177,11 +1261,36 @@ solver = NzingaFlowSolver("network.inp", include_valves=True)
 
 ### Unreleased
 
+**Bugfix batch 2 — overshoot at pipe transitions, tank inflow, CFL, mass balance, EPS step count**
+
+- `solver._handle_exits()`: the distance travelled beyond the pipe end is now carried into the next pipe as *time*; before, every pipe transit was rounded up to whole time steps (≈ dt/2 too long per pipe).
+- **Tank source (new).** Tanks absorb arriving segments and release water to their outflow pipes as new segments (`x = 0`, `volume = Q·dt`, `C = C_tank`). The CSTR is mass-conserving with tank mass as state; `set_initial_quality()` initialises tanks; `mass_balance()` reports `in_tanks`. `_update_tanks()` no longer dilutes with C = 0 on steps without arriving segments.
+- `solver._get_tank_volumes()`: tank volume converted from ft³ to m³ for US flow units (`units.volume_to_m3()`).
+- `recommended_dt()` / `check_dt()`: zero-length elements are ignored (valves with `include_valves=True` gave `dt_CFL = 0`).
+- `MassBalanceTracker`: leakage is booked (`leakage`, `record_leakage()`); `booster_inject()` overwrites are booked (`record_injection_mass()`); decay is measured exactly (`record_step(..., decay_loss=...)`); `set_initial_quality()` books the initial mass.
+- `EPSRunner`: float-safe step count (`_n_steps()`, also used by `time_axis()`).
+
+**Bugfix batch 1 — decay cache, pipe length (US units), tank CSTR, `time_axis`**
+
+- `solver.step()`: the combined-decay cache is rebuilt on any change of `decay_k` (exact comparison instead of `atol=1e-8`, which ignored changes below ≈ 0.001/day).
+- Pipe length converted from ft to m for US flow units in `hydraulics.get_topology()` and `parse_inp()` (`units.length_to_m()`).
+- `lta.tank_step_implicit()`: the denominator uses `Q_in` instead of `Q_out`; an empty tank no longer gives `NaN`.
+- `EPSRunner.time_axis()` starts at `qual_dt` instead of 0.
+
+Details: see [CHANGELOG.md](CHANGELOG.md).
+
+### 1.3.1
+
+- **Bugfix — `PhreeqSolutionMode` is now actually wired into the simulation loop.** `step()` builds `node_inflows` itself, `sol_ids` is kept in sync on removal, split and injection, and segment merging is skipped in this mode (known limitation). New methods `on_segment_added()`, `mirror_removal()`, `copy_solution()`; usage examples corrected.
+
+### 1.3.0
+
 - **Hydraulics refactor + `units.py`.** `HydraulicModel` internals reworked around `Topology`/`HydraulicState` dataclasses, with a cached topology/pipe list and a read-once hydraulic snapshot after `solve()`. Public API unchanged except two additions: `close()` and context-manager support (`with HydraulicModel(...) as hm:`) for explicit EPANET session cleanup (`EN_closeH`).
 - Replaced the internal hydraulic solver with a session-reusing implementation (`EN_openH()` stays open across `solve()` calls; `EN_INITFLOW` used for correct cold-start behaviour), improving EPS performance.
 - New module `nzingaflow/units.py`: centralises EPANET unit-system conversions and enums (fixes AFD/MLD and diameter/velocity US↔SI conversion bugs), now shared by `hydraulics.py` and `parse_inp.py`.
 - `parse_inp.py` updated to use typed node/link classes and the corrected unit conversions.
-- New tests: `tests/gen_grid_network.py`; extended `tests/test_epynet_networks.py` with session-reuse/regression and memoization checks.
+- **Bugfix** — `_get_tank_volumes()` used a non-existent attribute (`n.volume`); the swallowed `AttributeError` made every tank report the 1000 m³ fallback instead of the EPANET volume.
+- New tests: `tests/gen_grid_network.py`; extended `tests/test_epynet_networks.py` with session-reuse/regression, tank-volume and memoization checks.
 
 ### 1.2.2
 
@@ -1213,8 +1322,8 @@ solver = NzingaFlowSolver("network.inp", include_valves=True)
 ### 1.1.0
 
 - **Three-regime Sherwood correlation** in `compute_wall_k()`: laminar (Graetz + entry-length), transition (linear interpolation), turbulent (Dittus-Boelter). Eliminates factor 1.5× error at night-time flows in DN100 pipes.
-- **Temperature correction** (`temperature=` parameter): Arrhenius correction on D_mol (Hayduk & Laudie 1974) and θ=1.047 correction on k_wall (Rossman 2000). Effect: 0.59× at 5°C to 1.38× at 30°C.
-- **Stagnation floor** in `compute_wall_k()`: minimum film transport `k_f_min = 4·D_mol/D` at near-zero velocity.
+- **Temperature correction** (`temperature=` parameter): Arrhenius correction on D_mol (Hayduk & Laudie 1974) and θ=1.047 correction on k_wall (Rossman 2000). Effect: depends on conditions; see the Wall Reactions section.
+- **Stagnation floor** in `compute_wall_k()`: minimum film transport `k_f_min = 4·D_mol/D` for Re < 10.
 - **Leakage modelling** (`leakage_fraction=` parameter): proportional volume loss per segment per timestep without contaminant ingress.
 - **`wall_mode` parameter**: `'two_film'` (default, EPANET-compatible) or `'direct'` (k_wall already k_eff).
 - **`MsxReactionSystem`** (`nzingaflow.msx`): EPANET-MSX 2.0 compatible reaction layer supporting `RATE`, `EQUIL`, `FORMULA`, and wall species. Five numerical solvers: `euler`, `rk4`, `ros2` (stiff, no scipy), `rk45`, `radau`.
