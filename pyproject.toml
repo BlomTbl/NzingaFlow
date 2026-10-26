@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=70.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -41,6 +41,8 @@ dependencies = [
     # zelf (zie hydraulics.py::_NoSaveHydraulicSolver). Vanaf NzingaFlow
     # 1.3.0 is de oude epynet (<2.0, met Network.solve(simtime=...)/
     # .ep-shim) niet meer ondersteund — zie CHANGELOG.md.
+    # LET OP: epynet>=2.0 staat niet op PyPI; eerst vanuit broncode installeren
+    # (zie README, Installatie), anders kan pip deze afhankelijkheid niet oplossen.
     "epynet>=2.0",
 ]
 

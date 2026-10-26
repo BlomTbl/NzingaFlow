@@ -71,10 +71,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 
-from epynet.network import Network
-from epynet.solver import HydraulicSolver
+try:
+    from epynet.network import Network
+    from epynet.solver import HydraulicSolver
+except ImportError as _exc:   # pragma: no cover - afhankelijk van omgeving
+    raise ImportError(
+        "NzingaFlow vereist EPYnetDTD (epynet >= 2.0, met epynet.solver). "
+        "Dat staat niet op PyPI (daar bestaat alleen epynet <= 1.1). Installeer het "
+        "eerst uit de privé-repository, bijvoorbeeld: "
+        "pip install \"epynet @ git+ssh://git@github.com/<org>/epynet.git@v2.0.0\". "
+        "Zie 'Installatie' in de README."
+    ) from _exc
 
 from . import units as u
+
+
+def _is_junction(node) -> bool:
+    """True als het EPANET-knooppunt een junction is (geen tank of reservoir)."""
+    t = getattr(node, "type", None)
+    name = getattr(t, "name", str(t))
+    return str(name).upper().endswith("JUNCTION")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -108,6 +124,9 @@ class HydraulicState:
     velocity: np.ndarray   # (n_pipes,) float64  m/s,  altijd ≥ 0
     reversed: np.ndarray   # (n_pipes,) bool     True = omgekeerd t.o.v. EPANET-definitie
     simtime: int
+    # (node_count,) float64 m³/s, positief = onttrekking, negatief = externe
+    # instroom (EPANET negatieve vraag). None als niet beschikbaar.
+    node_demand: np.ndarray | None = None
 
     def as_tuple(self) -> tuple:
         return (self.flow, self.velocity, self.reversed)
@@ -256,6 +275,11 @@ class HydraulicModel:
     include_pumps : bool, default False
         Als True worden pompen ook als 'leidingen' opgenomen in de topologie.
         Standaard False: pompen worden overgeslagen (geen dispersie, geen verval).
+    cache_links : bool, default False
+        True = de lijst met link-objecten wordt na een solve() niet opnieuw
+        opgebouwd (de objecten veranderen niet; alleen hun live properties).
+        Bespaart bij grote netwerken (27k links: ~0,08 s per hydraulische
+        stap).  Standaard False voor achterwaartse compatibiliteit.
     include_valves : bool, default False
         Als True worden afsluiters (PRV, PSV, TCV, FCV, GPV, PCV) ook als
         'leidingen' opgenomen in de topologie.  EPANET lost de hydraulica voor
@@ -276,13 +300,22 @@ class HydraulicModel:
     """
 
     def __init__(self, inp_path: str, include_pumps: bool = False,
-                 include_valves: bool = False):
+                 include_valves: bool = False, cache_links: bool = False,
+                 reversal_deadband: float = 1e-5):
         self.net              = Network(inp_path)
+        # Dode zone voor stroomrichting [m³/s]: een leiding met |Q| onder deze
+        # waarde behoudt zijn vorige richting. Voorkomt dat bijna-stilstaand water
+        # bij elke hydraulische stap omkeert (en de segmenten dan spiegelt).
+        # Standaard 1e-5 m³/s (beste waarde op wst.inp: mediaan 1,82 mg/L).
+        # 0 = uit (oud gedrag).
+        self._reversal_deadband = float(reversal_deadband)
+        self._prev_reversed: np.ndarray | None = None
         self._solver          = _NoSaveHydraulicSolver(self.net)
         self._solved_for_simtime: int | None = None   # None = nog niet opgelost
         self._include_pumps   = include_pumps
         self._include_valves  = include_valves
         self._pipe_list       = None    # gecached na eerste _get_links()
+        self._cache_links     = cache_links
         self._topology: Topology | None = None
         self._state: HydraulicState | None = None
         self._units           = None    # gecached na eerste _get_flow_units()
@@ -319,7 +352,8 @@ class HydraulicModel:
 
         self._solver.solve_step(pattern_start_time=simtime)
         self._solved_for_simtime = simtime
-        self._pipe_list = None    # invalideer link-cache na nieuwe oplossing
+        if not self._cache_links:
+            self._pipe_list = None    # invalideer link-cache na nieuwe oplossing
         self._state = self._read_hydraulic_state(simtime)
 
     def close(self) -> None:
@@ -376,10 +410,13 @@ class HydraulicModel:
         # getattr(..., 0.0) voorkomt een AttributeError zodra include_valves=True
         # en behandelt een valve in topologie-berekeningen als een lengteloos
         # verbindingselement (lengte 0 m).
-        pipe_length = np.array(
+        # Lengte → m: EPANET geeft ft terug bij US-flow-eenheden (net als
+        # diameter in inch en snelheid in ft/s), zie units.length_to_m().
+        length_raw  = np.array(
             [getattr(lnk, 'length', 0.0) for lnk in links],
             dtype=np.float64,
         )
+        pipe_length = u.length_to_m(length_raw, units)
 
         # ── Diameter → m ───────────────────────────────────────────────────────
         # NB: epynet Pump-objecten hebben geen 'diameter' static_property
@@ -472,6 +509,25 @@ class HydraulicModel:
             )
         return self._state.as_tuple()
 
+    def get_node_demand(self) -> np.ndarray:
+        """
+        Knoopvraag per knoop [m³/s], in dezelfde volgorde als ``node_names``.
+
+        Positief = onttrekking uit het net; negatief = externe instroom
+        (EPANET negatieve vraag, bv. een invoedpunt op een junction).
+
+        Raises
+        ──────────────────────
+        RuntimeError als solve() nog niet is uitgevoerd.
+        """
+        if self._state is None:
+            raise RuntimeError(
+                "get_node_demand() aangeroepen vóór solve()."
+            )
+        if self._state.node_demand is None:
+            return np.zeros(len(list(self.net.nodes)), dtype=np.float64)
+        return self._state.node_demand
+
     def _read_hydraulic_state(self, simtime: int) -> HydraulicState:
         """Lees flow/velocity voor alle actieve links in één moeite in, ná
         een solve()-aanroep. Wordt gecachet in self._state; downstream code
@@ -487,10 +543,31 @@ class HydraulicModel:
         vel_si   = u.velocity_to_ms(vel_raw, units)
 
         reversed_mask = flow_si < 0.0
+        if self._reversal_deadband > 0.0:
+            # Richting alleen wijzigen bij een debiet boven de dode zone.
+            if self._prev_reversed is not None and self._prev_reversed.shape == reversed_mask.shape:
+                small = np.abs(flow_si) < self._reversal_deadband
+                reversed_mask = np.where(small, self._prev_reversed, reversed_mask)
+            self._prev_reversed = reversed_mask.copy()
+
+        # Knoopvraag (EPANET-volgorde == node_names). Alleen junctions dragen
+        # een vraag; tanks/reservoirs geven 0 of geen attribuut.
+        # Alleen junctions: een reservoir heeft een negatieve 'vraag' die zijn
+        # uitvoer is (een bron), geen externe instroom. Tanks worden in de
+        # solver apart behandeld.
+        nodes = list(self.net.nodes)
+        dem_raw = np.array(
+            [float(getattr(nd, "demand", 0.0) or 0.0)
+             if _is_junction(nd) else 0.0
+             for nd in nodes],
+            dtype=np.float64,
+        )
+        node_demand = u.flow_to_m3s(dem_raw, units)
 
         return HydraulicState(
             flow=np.abs(flow_si), velocity=np.abs(vel_si),
             reversed=reversed_mask, simtime=simtime,
+            node_demand=node_demand,
         )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -521,6 +598,44 @@ class HydraulicModel:
                 pipes = pipes + list(self.net.valves)
             self._pipe_list = pipes
         return self._pipe_list
+
+    def get_valve_mask(self) -> np.ndarray:
+        """
+        (n_links,) bool — True voor links die een afsluiter (Valve) zijn.
+
+        Volgorde identiek aan get_topology(): pipes, [pumps], [valves].
+        Zonder include_valves is de mask overal False.
+        """
+        links = self._get_links()
+        mask  = np.zeros(len(links), dtype=bool)
+        if self._include_valves:
+            n_valves = len(list(self.net.valves))
+            if n_valves:
+                mask[len(links) - n_valves:] = True
+        return mask
+
+    def get_closed_mask(self) -> np.ndarray:
+        """
+        (n_links,) bool — True voor afsluiters die in de huidige hydraulische
+        toestand gesloten zijn (EPANET-status CLOSED, 0).  Gesloten
+        afsluiters worden door de solver nooit overgeslagen: ze blokkeren.
+        Alleen afsluiters worden uitgelezen; overige links zijn False.
+        Is de status van een afsluiter niet uit te lezen, dan volgt een
+        RuntimeError (geen stille aanname dat de afsluiter open is).
+        """
+        links = self._get_links()
+        out = np.zeros(len(links), dtype=bool)
+        for i in np.where(self.get_valve_mask())[0]:
+            try:
+                out[i] = float(links[i].status) == 0.0
+            except Exception as exc:
+                # Onbekende status mag niet als 'open' worden behandeld: dan
+                # zou transport door een mogelijk gesloten afsluiter lopen.
+                raise RuntimeError(
+                    f"Status van afsluiter '{getattr(links[i], 'uid', i)}' kon "
+                    f"niet worden uitgelezen ({type(exc).__name__}: {exc})."
+                ) from exc
+        return out
 
     def _get_flow_units(self) -> str:
         """Lees de flow-eenheid uit het EPANET-project (gecached)."""

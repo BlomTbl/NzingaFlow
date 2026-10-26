@@ -367,12 +367,29 @@ def tank_step_implicit(
     """
     CSTR-tankmodel met impliciet Euler (onvoorwaardelijk stabiel).
 
-        C_new = (C_old + Q_in*C_in/V * dt) / (1 + (Q_out/V + k_b) * dt)
+    Massabalans bij veranderend volume (dV/dt = Q_in - Q_out):
+
+        d(V·C)/dt = Q_in·C_in - Q_out·C - k_b·V·C
+        V·dC/dt   = Q_in·(C_in - C) - k_b·V·C
+
+    Q_out valt dus weg: water dat de tank verlaat heeft concentratie C en
+    verandert C niet; alleen instroom (menging) en reactie doen dat.
+    Impliciet Euler (V constant binnen de stap):
+
+        C_new = (C_old + Q_in*C_in/V * dt) / (1 + (Q_in/V + k_b) * dt)
+
+    Voor Q_in = Q_out is dit gelijk aan de klassieke CSTR-vergelijking.
+    Q_out blijft in de signatuur voor achterwaartse compatibiliteit.
+
+    V_tank wordt naar onder begrensd (1e-9 m³): een lege tank (V = 0) gaf
+    anders 0/0 = NaN. Een (bijna) lege tank neemt zo direct de
+    instroomconcentratie aan.
     """
     if C_tank.size == 0:
         return
-    denom     = 1.0 + (Q_out[:, np.newaxis] / V_tank[:, np.newaxis] + k_b[np.newaxis, :]) * dt
-    numerator = C_tank + (Q_in[:, np.newaxis] * C_in / V_tank[:, np.newaxis]) * dt
+    V         = np.maximum(V_tank, 1e-9)[:, np.newaxis]
+    denom     = 1.0 + (Q_in[:, np.newaxis] / V + k_b[np.newaxis, :]) * dt
+    numerator = C_tank + (Q_in[:, np.newaxis] * C_in / V) * dt
     C_tank[:] = numerator / denom
 
 

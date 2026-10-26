@@ -2,7 +2,7 @@
 """
 Integratietests tegen echte EPANET .inp-netwerken via epynet.
 
-In tegenstelling tot tests/test_inzingaflow.py en tests/test_validation.py
+In tegenstelling tot tests/test_validation.py
 (die volledig op synthetische numpy-topologieën draaien) laden deze tests
 daadwerkelijke .inp-bestanden via HydraulicModel/NzingaFlowSolver, zodat
 epynet-specifieke edge cases worden gedekt die met arrays-only tests niet
