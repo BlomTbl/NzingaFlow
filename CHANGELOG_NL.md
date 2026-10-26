@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Review: stille fouten, verouderde test, dode module, documentatie
+
+- **Gewijzigd: alkaliniteits-fallback geeft niet langer 0.** `_sol_value(sol, 'Alk')` gooit een `RuntimeError` als de speciatie van een oplossing niet beschikbaar is, in plaats van stilzwijgend 0 terug te geven. Ook een fout bij het opzoeken van een soort in de som wordt niet langer weggeslikt. Dit pad wordt alleen gebruikt als de exacte PHREEQC-`ALK` (`_alk_batch`) faalt; het normale pad is ongewijzigd.
+- **Gewijzigd: mislukte verzadigingsindices zijn zichtbaar.** `saturation_indices()` geeft `NaN` terug voor een mineraal dat niet berekend kan worden, en logt een waarschuwing, in plaats van de sleutel weg te laten.
+- **Gewijzigd: validatietest slaat niet meer stil over.** In `test_validation.py` werd de steady-state-test met `pytest.skip` overgeslagen als er geen segmenten in het steady-state-venster zaten. Die test controleerde dan niets en verscheen alleen als "skipped". Hij faalt nu met een melding.
+- **Verwijderd: `tests/test_inzingaflow.py`.** Het was een verouderde kopie van `tests/test_validation.py` (ongeveer 60 tests) met de Sherwood-formule van vóór v1.1.0 (`Sh = 3.65`) en een lokale kopie van die formule in plaats van de code die getest moest worden. De actuele tests staan in `test_validation.py`.
+- **Verwijderd: `nzingaflow/inp_sources.py`.** Het vorige item meldde al dat het verwijderd was; het bestand stond nog in het pakket. Het werd nergens geïmporteerd.
+- **Tests:** nieuw `tests/test_geochem_foutafhandeling.py` (3 tests) voor de twee geochemie-wijzigingen. De suite draait 151 tests (211 met het verouderde bestand, 151 zonder).
+- **Documentatie:** de modultabel bevat `network_sources.py`, `parse_inp.py` en `locale_guard.py`; de parametertabel van `NzingaFlowSolver` bevat `auto_reservoir_sources`; gebroken ankers hersteld. De kopieën in `nzingaflow/documentation/` komen weer overeen met de README's in de root.
+
 ### Bronnen uit het geladen epynet-netwerk (vervangt `inp_sources.py`)
 
 - **Gewijzigd:** reservoir- en junctionbronnen, hun patronen en de patroontiming worden uit het geladen epynet-netwerk gelezen (`nzingaflow/network_sources.py`), niet meer uit de `.inp`-tekst. epynet leest het bestand met de EPANET-kern, dus patroonstart en -stap volgen de betekenis van EPANET.
