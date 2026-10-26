@@ -305,6 +305,18 @@ def _sol_value(sol, pname: str) -> float:
     if pname == 'Alk':
         try:
             sp = sol.species
+<<<<<<< HEAD
+        except Exception as exc:
+            # Geen stille 0: een ontbrekende speciatie zou het water als
+            # alkaliniteitsloos laten gelden en de pH verkeerd doen bewegen.
+            raise RuntimeError(
+                f"Alkaliniteit niet te bepalen: speciatie van de oplossing "
+                f"is niet beschikbaar ({exc})"
+            ) from exc
+        alk_molar = 0.0
+        for name, coeff in _ALK_SPECIES.items():
+            alk_molar += coeff * float(sp.get(name, 0.0))
+=======
         except Exception:
             return 0.0
         alk_molar = 0.0
@@ -313,6 +325,7 @@ def _sol_value(sol, pname: str) -> float:
                 alk_molar += coeff * float(sp.get(name, 0.0))
             except Exception:
                 pass
+>>>>>>> 6802704785e71ed64a409922e041a6e05c6e869d
         return alk_molar * 1000.0
     return float(sol.total_element(_readback_name(pname)))
 
@@ -1035,8 +1048,17 @@ class GeochemSolver:
         for m in minerals:
             try:
                 result[m] = sol.si(m)
+<<<<<<< HEAD
+            except Exception as exc:
+                # NaN in plaats van weglaten: de sleutel blijft aanwezig en de
+                # ontbrekende waarde is zichtbaar, zonder de hele berekening te
+                # laten falen.
+                logger.warning("Verzadigingsindex voor %s niet te berekenen: %s", m, exc)
+                result[m] = float("nan")
+=======
             except Exception:
                 pass
+>>>>>>> 6802704785e71ed64a409922e041a6e05c6e869d
         sol.forget()
         return result
 
