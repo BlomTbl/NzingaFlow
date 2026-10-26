@@ -761,9 +761,9 @@ class TestV4_TankModel:
     def test_mass_balance_tank(self):
         """
         Massabehoud over de tank:
-            V · (C_new - C_old) = (Q_in · C_in - Q_out · C_old) · dt
-                                  - k · V · C_old · dt
-        (impliciet Euler: C_old in de teller, C_new als onbekende)
+            d(V·C)/dt = Q_in·C_in - Q_out·C - k·V·C   met dV/dt = Q_in - Q_out
+            =>  V · dC/dt = Q_in · (C_in - C) - k · V · C
+        (Q_out valt weg; impliciet Euler met C_new als onbekende)
         """
         Q_in  = 0.01
         Q_out = 0.008
@@ -785,7 +785,7 @@ class TestV4_TankModel:
         C_after = C_tank[0, 0]
 
         # Herbereken C_new via impliciet Euler formule
-        denom    = 1 + (Q_out / V + k) * dt
+        denom    = 1 + (Q_in / V + k) * dt
         numer    = C_before + (Q_in * C_in / V) * dt
         C_expect = numer / denom
 
@@ -1322,8 +1322,9 @@ class TestV7_SeriesNetwork:
         idx_ss = int(0.8 * len(C_out))
         C_ss   = C_out[idx_ss:]
         C_ss   = C_ss[C_ss > 0]
-        if len(C_ss) == 0:
-            pytest.skip("Geen exiterende segmenten in steady-state venster")
+        # Geen stille skip: een validatietest zonder meetpunten controleert niets
+        # en moet dus falen, niet verdwijnen in de samenvatting.
+        assert len(C_ss) > 0, "Geen exiterende segmenten in steady-state venster"
 
         C_ss_mean = C_ss.mean()
         rel_err   = abs(C_ss_mean - C_analytical) / max(C_analytical, 1e-12)

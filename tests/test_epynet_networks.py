@@ -293,7 +293,7 @@ class TestIncludeValvesTransport:
     """E2 — end-to-end stoftransport door een klep."""
 
     def test_tracer_reaches_downstream_deadend(self, valve_inp):
-        solver = NzingaFlowSolver(valve_inp, n_species=1, include_valves=True)
+        solver = NzingaFlowSolver(valve_inp, n_species=1, include_valves=True, auto_reservoir_sources=False)
         solver.inject("R1", C_vector=[1.0], volume=0.0005)
 
         j3 = solver.node_index["J3"]
@@ -315,7 +315,7 @@ class TestIncludeValvesTransport:
     def test_no_transport_when_valves_excluded(self, valve_inp):
         # Zonder include_valves is J1→J2 topologisch niet verbonden, dus
         # een injectie bij R1 kan J2/J3 nooit bereiken.
-        solver = NzingaFlowSolver(valve_inp, n_species=1, include_valves=False)
+        solver = NzingaFlowSolver(valve_inp, n_species=1, include_valves=False, auto_reservoir_sources=False)
         solver.inject("R1", C_vector=[1.0], volume=0.0005)
 
         j3 = solver.node_index["J3"]
@@ -353,7 +353,7 @@ class TestTankVolume:
     def test_tank_volume_matches_computed_cylinder_volume(self, tank_inp):
         # T1: diameter 20 m, initieel peil 5 m boven de bodem (min_level=0,
         # elevation los van level) → verwacht volume = π·r²·h = π·10²·5.
-        solver = NzingaFlowSolver(tank_inp, n_species=1)
+        solver = NzingaFlowSolver(tank_inp, n_species=1, auto_reservoir_sources=False)
         volumes = solver._get_tank_volumes()
 
         assert volumes.shape == (1,)
