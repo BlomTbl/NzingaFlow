@@ -105,7 +105,16 @@ cd nzingaflow
 pip install -e ".[dev]"
 ```
 
-Optional extras: `[numba]` (JIT compilation), `[geochem]` (PhreeqPython) and `[all]` (everything).
+Optional extras: `[numba]` (JIT compilation), `[geochem]` (PhreeqPython), `[msx]` (SciPy, for the `rk45`/`radau` MSX solvers), `[pandas]` (`to_dataframe()`) and `[all]` (everything).
+
+Checks that CI runs on every push (the same commands work locally):
+
+```bash
+ruff check nzingaflow tests
+ruff format --check nzingaflow tests
+mypy nzingaflow
+pytest
+```
 
 > **Requirements:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0 (see step 1)
 
@@ -272,6 +281,10 @@ Each time step `dt`, the solver executes the following phases:
 Steps 1–4 are executed by Numba JIT kernels when Numba is installed, with no intermediate array allocations.
 
 ### Module Overview
+
+![Module dependencies of nzingaflow](nzingaflow/documentation/module-dependencies.svg)
+
+*Solid arrows: imports in code (all inside functions, so they load lazily). Dashed arrows: an object you pass in, with no import (`EPSRunner(solver, ...)` and `NzingaFlowSolver(..., geochem=...)`). `parse_inp.py` is not imported by any module and is only used by tests. `scipy` and `pandas` are only needed for the `rk45`/`radau` solvers and `to_dataframe()`.*
 
 | Module | Class / Function | Responsibility |
 |---|---|---|
@@ -687,7 +700,7 @@ print(sol.pH, sol.total_element('Ca'))
 
 MSX-compatible multi-species reaction layer implementing the four EPANET-MSX 2.0 concepts: `RATE`, `EQUIL`, `FORMULA`, and surface species (`WALL`). Pass an `MsxReactionSystem` instance as the `geochem` argument to `NzingaFlowSolver`.
 
-> Requires: no extra dependency (scipy is needed for the `rk45`/`radau` solvers)
+> Requires: no extra dependency (scipy is needed for the `rk45`/`radau` solvers: `pip install nzingaflow[msx]`)
 
 ```python
 from nzingaflow.msx import MsxReactionSystem

@@ -7,6 +7,7 @@ E3  time_axis() volgt record_every
 E4  Niet-deelbaar aantal stappen: de laatste, onvolledige reeks wordt niet bewaard
 E5  Ongeldige waarden geven een ValueError
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -48,7 +49,7 @@ def _run(tmp_path, **kw):
     p.write_text(NET, encoding="utf-8")
     s = NzingaFlowSolver(str(p), n_species=1)
     s.set_initial_quality(np.zeros((s.node_count, 1)))
-    r = EPSRunner(s, qual_dt=300.0, hyd_dt=300.0, duration=7200.0)       # 24 stappen
+    r = EPSRunner(s, qual_dt=300.0, hyd_dt=300.0, duration=7200.0)  # 24 stappen
     res = r.run(decay_k=[0.0], check_cfl=False, **kw)
     return r, res
 
@@ -74,7 +75,7 @@ def test_e3_time_axis_follows_record_every(tmp_path):
 
 
 def test_e4_non_divisible_drops_incomplete_tail(tmp_path):
-    r, thin = _run(tmp_path, record_every=5)          # 24 stappen: 4 rijen (na stap 5, 10, 15, 20)
+    r, thin = _run(tmp_path, record_every=5)  # 24 stappen: 4 rijen (na stap 5, 10, 15, 20)
     assert thin.shape[0] == 4
     np.testing.assert_allclose(r.time_axis("s"), [1500.0, 3000.0, 4500.0, 6000.0])
 
@@ -94,6 +95,6 @@ def test_e6_merge_span_reaches_solver_step(tmp_path):
     orig = s.step
     s.step = lambda *a, **k: (seen.append(k.get("merge_span", "ontbreekt")), orig(*a, **k))[1]
     r = EPSRunner(s, qual_dt=300.0, hyd_dt=300.0, duration=1200.0)
-    r.run(decay_k=[0.0], check_cfl=False)                       # standaard
-    r.run(decay_k=[0.0], check_cfl=False, merge_span=None)      # geen beperking
+    r.run(decay_k=[0.0], check_cfl=False)  # standaard
+    r.run(decay_k=[0.0], check_cfl=False, merge_span=None)  # geen beperking
     assert seen[:4] == [1.0] * 4 and seen[4:] == [None] * 4

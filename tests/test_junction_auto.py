@@ -6,6 +6,7 @@ J2  Die instroom bereikt het netwerk stroomafwaarts; concentratie gelijk aan EPA
 J3  Zonder automatische modus blijft de instroom op de standaard (0)
 J4  Junction zonder [SOURCES]-regel houdt het oude gedrag (set_source_quality werkt)
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -47,7 +48,7 @@ def _solver(tmp_path, text=NET, auto=True):
     p.write_text(text, encoding="utf-8")
     s = NzingaFlowSolver(str(p), n_species=1, auto_reservoir_sources=auto)
     init = np.zeros((s.node_count, 1))
-    init[s.node_index["J1"], 0] = 5.0          # zelfde beginkwaliteit als in de EPANET-test
+    init[s.node_index["J1"], 0] = 5.0  # zelfde beginkwaliteit als in de EPANET-test
     s.set_initial_quality(init)
     return s
 
@@ -69,8 +70,8 @@ def test_j1_source_on_negative_demand_junction(tmp_path):
 
 def test_j2_downstream_reaches_source_concentration(tmp_path):
     rows = _series(_solver(tmp_path))
-    assert rows[0][1] == pytest.approx(0.0, abs=1e-9)   # eerst nog geen aankomst
-    assert rows[6][1] == pytest.approx(2.0, abs=1e-3)   # t = 2100 s, EPANET: 2.0
+    assert rows[0][1] == pytest.approx(0.0, abs=1e-9)  # eerst nog geen aankomst
+    assert rows[6][1] == pytest.approx(2.0, abs=1e-3)  # t = 2100 s, EPANET: 2.0
 
 
 def test_j3_disabled_gives_zero_instroom(tmp_path):

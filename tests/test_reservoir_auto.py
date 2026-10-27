@@ -6,6 +6,7 @@ A2  auto_reservoir_sources=False voedt niets automatisch
 A3  Automatisch gelijk aan handmatige inject() met hetzelfde volume
 A4  MASS-bron op een actief reservoir wordt geweigerd met een duidelijke fout
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -63,8 +64,8 @@ def test_a1_active_source_fed_inactive_not(tmp_path):
     s = NzingaFlowSolver(_inp(tmp_path), n_species=1, auto_reservoir_sources=True)
     s.set_initial_quality(np.zeros((s.node_count, 1)))
     c = _j1_conc(s, steps=48)
-    assert c > 0.5                       # R_on levert 1.0 mg/L
-    assert c <= 1.0 + 1e-6               # R_off (5.0) mag nooit meetellen
+    assert c > 0.5  # R_on levert 1.0 mg/L
+    assert c <= 1.0 + 1e-6  # R_off (5.0) mag nooit meetellen
 
 
 def test_a2_disabled_feeds_nothing(tmp_path):
@@ -191,10 +192,10 @@ def test_a6_reservoir_without_source_keeps_initial_quality_after_reversal(tmp_pa
     init[s.node_index["R1"], 0] = 2.0
     s.set_initial_quality(init)
     rows = _series(s, ["J1", "R2"], 24)
-    assert rows[11]["J1"] == pytest.approx(2.0, abs=1e-6)    # t = 3600 s: nog stroming R1 -> R2
-    assert rows[14]["J1"] == pytest.approx(0.0, abs=1e-6)    # t = 4500 s: omgekeerd, EPANET: 0
+    assert rows[11]["J1"] == pytest.approx(2.0, abs=1e-6)  # t = 3600 s: nog stroming R1 -> R2
+    assert rows[14]["J1"] == pytest.approx(0.0, abs=1e-6)  # t = 4500 s: omgekeerd, EPANET: 0
     assert rows[23]["J1"] == pytest.approx(0.0, abs=1e-6)
-    assert all(r["R2"] == pytest.approx(0.0, abs=1e-12) for r in rows)   # gerapporteerd als EPANET
+    assert all(r["R2"] == pytest.approx(0.0, abs=1e-12) for r in rows)  # gerapporteerd als EPANET
 
 
 def test_a7_pattern_start_matches_epanet(tmp_path):
@@ -202,7 +203,7 @@ def test_a7_pattern_start_matches_epanet(tmp_path):
     s = NzingaFlowSolver(_inp(tmp_path, _NET_PSTART), n_species=1, auto_reservoir_sources=True)
     s.set_initial_quality(np.zeros((s.node_count, 1)))
     rows = _series(s, ["J1"], 6)
-    epanet = {1: 2.4657, 2: 3.8219, 3: 4.8219, 4: 5.8219}   # index k = einde stap k+1
+    epanet = {1: 2.4657, 2: 3.8219, 3: 4.8219, 4: 5.8219}  # index k = einde stap k+1
     for k, ref in epanet.items():
         assert rows[k]["J1"] == pytest.approx(ref, abs=0.25)
 

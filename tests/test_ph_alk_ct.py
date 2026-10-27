@@ -5,6 +5,7 @@ P1  Waarde gelijk aan directe PHREEQC-aanroep, met achtergrondionen.
 P2  Ongeldige invoer geeft NaN; vorm blijft behouden.
 P3  Dubbele paren worden één keer berekend (zelfde uitkomst).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -19,8 +20,13 @@ BG = {"Na": 1.74, "Ca": 1.01, "Mg": 0.20, "Cl": 0.98, "S(6)": 0.11, "N(5)": 0.11
 
 def _direct(alk, ct):
     pp = phreeqpython.PhreeqPython()
-    d = {"temp": "15", "pe": "4", "units": "mmol/kgw", "Alkalinity": f"{alk} meq/kgw",
-         "C(4)": f"{ct} mmol/kgw"}
+    d = {
+        "temp": "15",
+        "pe": "4",
+        "units": "mmol/kgw",
+        "Alkalinity": f"{alk} meq/kgw",
+        "C(4)": f"{ct} mmol/kgw",
+    }
     d.update({k: f"{v} mmol/kgw" for k, v in BG.items()})
     s = pp.add_solution(d)
     return s.pH
@@ -28,7 +34,9 @@ def _direct(alk, ct):
 
 @pytest.mark.parametrize("alk, ct", [(3.06, 3.13), (2.0, 2.5), (0.05, 1.0), (4.0, 2.0)])
 def test_p1_matches_direct_phreeqc(alk, ct):
-    assert float(ph_from_alk_ct(alk, ct, background=BG)) == pytest.approx(_direct(alk, ct), abs=1e-3)
+    assert float(ph_from_alk_ct(alk, ct, background=BG)) == pytest.approx(
+        _direct(alk, ct), abs=1e-3
+    )
 
 
 def test_p2_invalid_input_is_nan_and_shape_kept():

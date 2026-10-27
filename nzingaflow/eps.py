@@ -1,7 +1,9 @@
 # nzingaflow/eps.py
 from __future__ import annotations
+
+from collections.abc import Callable
+
 import numpy as np
-from typing import Callable
 
 
 class EPSRunner:
@@ -31,30 +33,30 @@ class EPSRunner:
     def __init__(
         self,
         solver,
-        qual_dt:  float,
-        hyd_dt:   float,
+        qual_dt: float,
+        hyd_dt: float,
         duration: float,
     ):
-        self.solver   = solver
-        self.qual_dt  = float(qual_dt)
-        self.hyd_dt   = float(hyd_dt)
+        self.solver = solver
+        self.qual_dt = float(qual_dt)
+        self.hyd_dt = float(hyd_dt)
         self.duration = float(duration)
-        self._record_every = 1          # wordt door run() gezet; time_axis() gebruikt hem
+        self._record_every = 1  # wordt door run() gezet; time_axis() gebruikt hem
 
     def run(
         self,
         decay_k,
-        inject_schedule:  dict | None = None,
-        inject_fn:        Callable | None = None,
+        inject_schedule: dict | None = None,
+        inject_fn: Callable | None = None,
         booster_schedule: dict | None = None,
-        mass_schedule:    dict | None = None,
-        merge_interval:   int   = 10,
-        merge_tol:        float = 1e-6,
-        merge_rel_tol:    float = 0.0,
-        check_cfl:        bool  = True,
-        verbose:          bool  = False,
-        record_every:     int   = 1,
-        merge_span:       float | None = 1.0,
+        mass_schedule: dict | None = None,
+        merge_interval: int = 10,
+        merge_tol: float = 1e-6,
+        merge_rel_tol: float = 0.0,
+        check_cfl: bool = True,
+        verbose: bool = False,
+        record_every: int = 1,
+        merge_span: float | None = 1.0,
     ) -> np.ndarray:
         """
         LET OP — beginwater: zonder aanroep van ``solver.set_initial_quality()``
@@ -104,25 +106,26 @@ class EPSRunner:
         results : (n_stappen // record_every, node_count, n_species)
         """
         if int(record_every) != record_every or record_every < 1:
-            raise ValueError(f"record_every moet een geheel getal >= 1 zijn, kreeg {record_every!r}")
+            raise ValueError(
+                f"record_every moet een geheel getal >= 1 zijn, kreeg {record_every!r}"
+            )
         record_every = int(record_every)
         self._record_every = record_every
-        decay_k          = np.asarray(decay_k, dtype=np.float64)
-        inject_schedule  = inject_schedule  or {}
+        decay_k = np.asarray(decay_k, dtype=np.float64)
+        inject_schedule = inject_schedule or {}
         booster_schedule = booster_schedule or {}
-        mass_schedule    = mass_schedule    or {}
+        mass_schedule = mass_schedule or {}
         n_steps = self._n_steps()
         results = np.zeros(
             (n_steps // record_every, self.solver.node_count, self.solver.n_species),
             dtype=np.float64,
         )
 
-        t        = 0.0
+        t = 0.0
         next_hyd = 0.0
         verbose_every = max(1, n_steps // 10)
 
         for step in range(n_steps):
-
             # Hydraulica bijwerken
             if t >= next_hyd:
                 self.solver.update_hydraulics(simtime=int(t))
@@ -161,11 +164,11 @@ class EPSRunner:
                 mb = self.solver.mass_balance()
                 mb_str = ""
                 if mb:
-                    err = mb['balance_error']
-                    mb_str = f"  massafout={err.max()*100:.3f}%"
+                    err = mb["balance_error"]
+                    mb_str = f"  massafout={err.max() * 100:.3f}%"
                 print(
-                    f"  EPS {100*(step+1)/n_steps:5.1f}%  "
-                    f"t={t/3600:.2f}h  segs={self.solver.segments.n}"
+                    f"  EPS {100 * (step + 1) / n_steps:5.1f}%  "
+                    f"t={t / 3600:.2f}h  segs={self.solver.segments.n}"
                     f"{mb_str}"
                 )
 
@@ -246,9 +249,7 @@ class EPSRunner:
 
                 node_idx = self.solver.node_index.get(node_uid)
                 if node_idx is None:
-                    raise KeyError(
-                        f"mass_schedule: onbekende knoopnaam {node_uid!r}"
-                    )
+                    raise KeyError(f"mass_schedule: onbekende knoopnaam {node_uid!r}")
                 out = self.solver._node_outpipes.get(node_idx, [])
                 if not out:
                     continue
@@ -256,7 +257,7 @@ class EPSRunner:
                 # Totaal uitstromend debiet [m³/s]
                 Q_out = sum(float(flow[p]) for p in out)
                 if Q_out < 1e-12:
-                    continue   # stilstand: injectie overgeslagen
+                    continue  # stilstand: injectie overgeslagen
 
                 # Massa deze tijdstap [eenheid] = flux [eenheid/s] * dt [s]
                 M_dt = np.asarray(mass_flux_vec, dtype=np.float64) * dt
@@ -276,7 +277,7 @@ class EPSRunner:
         """
         return int(np.floor(self.duration / self.qual_dt + 1e-9))
 
-    def time_axis(self, unit: str = 's') -> np.ndarray:
+    def time_axis(self, unit: str = "s") -> np.ndarray:
         """
         Tijdas van simulatieresultaten. unit: 's', 'min' of 'h'.
 
@@ -286,10 +287,10 @@ class EPSRunner:
         """
         n = self._record_every
         t = (np.arange(self._n_steps() // n) + 1) * (self.qual_dt * n)
-        return t / {'s': 1, 'min': 60, 'h': 3600}.get(unit, 1)
+        return t / {"s": 1, "min": 60, "h": 3600}.get(unit, 1)
 
     def __repr__(self) -> str:
         return (
             f"<EPSRunner qual_dt={self.qual_dt}s hyd_dt={self.hyd_dt}s "
-            f"duration={self.duration/3600:.1f}h>"
+            f"duration={self.duration / 3600:.1f}h>"
         )

@@ -2,14 +2,22 @@
 
 ## [Unreleased]
 
-### Review: silent failures, stale test, dead module, docs
+### Review: silent failures, stale test, dead module, docs, lint and types
 
 - **Changed: alkalinity fallback no longer returns 0.** `_sol_value(sol, 'Alk')` raises a `RuntimeError` when the speciation of a solution is not available, instead of silently returning 0. A failing species lookup inside the sum is no longer swallowed either. This path is only used when the exact PHREEQC `ALK` (`_alk_batch`) fails; the normal path is unchanged.
 - **Changed: failing saturation indices are visible.** `saturation_indices()` returns `NaN` for a mineral that cannot be computed and logs a warning, instead of leaving the key out of the result.
 - **Changed: validation test no longer skips silently.** In `test_validation.py` the steady-state test used `pytest.skip` when no segments were in the steady-state window, so it checked nothing and only showed as "skipped". It now fails with a message.
 - **Removed: `tests/test_inzingaflow.py`.** It was an outdated copy of `tests/test_validation.py` (about 60 tests) with the pre-v1.1.0 Sherwood formula (`Sh = 3.65`) and a local copy of that formula instead of the code under test. The current tests live in `test_validation.py`.
 - **Removed: `nzingaflow/inp_sources.py`.** The entry above already said it was removed; the file was still in the package. It was not imported anywhere.
-- **Tests:** new `tests/test_geochem_foutafhandeling.py` (3 tests) for the two geochemistry changes. The suite runs 151 tests (211 with the stale file, 151 without it).
+- **Added: lint, format and type checks in CI.** New workflow `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check` and `mypy` on every push and pull request. It needs no private epynet and no secrets. The release build runs the same checks before the tests.
+- **Changed: code formatted and lint-clean.** `ruff format` applied to the whole package and test suite (formatting only; the 151 tests give the same result). Unused imports, unused variables and outdated type syntax fixed. `E402`/`F811` are allowed in `tests/` (pytest fixture imports and `importorskip`).
+- **Changed: type annotations.** Attributes that start as `None` are now annotated (`_pipe_list`, `_units`, `_k_wall_vol`, `SegmentStore.on_resize`); `nodes` in `parse_inp` is typed as `dict[str, dict[str, Any]]`; the CSR cache in `SegmentStore` also checks `_csr_ptr`; `MsxSimulation.run` raises a clear error when no state is loaded. `mypy nzingaflow` passes.
+- **Known limit (mypy):** `geochemistry` and `solver` (arrays and PHREEQC objects that only exist after the first solve) and `lta`/`merging` (numba) have documented, per-module error-code exceptions in `pyproject.toml`. All other modules are fully checked.
+- **Fixed: dead code and a weak test.** Removed the unused `v_max` in `stability.check_dt`. `test_mass_conservation_in_mixing` now checks the output of `node_mixing_multi` (flow-weighted mass balance) instead of recomputing the result in the test. `test_series_decay_bolus` now asserts the arrival time (never early, at most one `dt` of delay per pipe in the test loop).
+- **Added: optional extras `[msx]` and `[pandas]`.** `scipy` (only for the `rk45`/`radau` solvers of `MsxReactionSystem`) and `pandas` (only for `MsxSimulationResult.to_dataframe()`) were imported lazily but not listed anywhere, so a plain install failed with a bare `ModuleNotFoundError`. Both now have an extra, and `[all]` includes them.
+- **Changed: clear error when `scipy` or `pandas` is missing.** The `ImportError` now names the extra to install (`pip install nzingaflow[msx]` / `[pandas]`). The `euler`, `rk4` and `ros2` solvers still work without `scipy`.
+- **Added: module dependency diagram.** `nzingaflow/documentation/module-dependencies.svg` (EN) and `module-afhankelijkheden.svg` (NL), shown in the README under *Module Overview*. Drawn from the real imports: the solver imports its seven helper modules lazily, `eps` and `geochemistry` are linked through objects, and `msx`, `msxlibrary`, `parse_inp` and `locale_guard` stand alone. `parse_inp.py` is not imported by any module and is only used by tests.
+- **Tests:** new `tests/test_geochem_foutafhandeling.py` (3 tests) for the two geochemistry changes, and `tests/test_optionele_afhankelijkheden.py` (5 tests) for the missing-`scipy`/`pandas` errors. The suite runs 156 tests (it was 208 at the start of this review, before the stale duplicate `test_inzingaflow.py` was removed).
 - **Docs:** the module table lists `network_sources.py`, `parse_inp.py` and `locale_guard.py`; the `NzingaFlowSolver` parameter table lists `auto_reservoir_sources`; broken anchors fixed. The copies in `nzingaflow/documentation/` match the root READMEs again.
 
 ### Sources from the loaded epynet network (replaces `inp_sources.py`)

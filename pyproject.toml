@@ -53,6 +53,12 @@ numba = [
 geochem = [
     "phreeqpython>=1.4",
 ]
+msx = [
+    "scipy>=1.10",   # alleen voor de solvers 'rk45' en 'radau' in MsxReactionSystem
+]
+pandas = [
+    "pandas>=1.5",   # alleen voor MsxSimulationResult.to_dataframe()
+]
 dev = [
     "pytest>=7.0",
     "scipy>=1.10",
@@ -61,7 +67,7 @@ dev = [
     "mypy>=1.8",
 ]
 all = [
-    "nzingaflow[numba,geochem,dev]",
+    "nzingaflow[numba,geochem,msx,pandas,dev]",
 ]
 
 [project.urls]
@@ -87,6 +93,9 @@ nzingaflow = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Markdown (README-codeblokken) niet door ruff laten formatteren: de kopieën in
+# nzingaflow/documentation/ moeten identiek blijven aan de README's in de root.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP"]
@@ -95,12 +104,38 @@ ignore = [
     "E741",   # ambiguous variable name (l, O, I — ok in wetenschappelijke code)
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# pytest: een fixture importeren en daarna als parameter gebruiken geeft F811;
+# importorskip vóór de imports van optionele pakketten geeft E402. Beide zijn bedoeld.
+"tests/*" = ["F811", "E402"]
+
 # ── mypy ──────────────────────────────────────────────────────────────────────
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true   # epynet heeft geen stubs
+
+# Bekende, bewust gedocumenteerde uitzonderingen (geen stille wildcard):
+#
+# lta, merging: numba. `njit` en de numba-Dispatcher-objecten zijn voor mypy
+#   onleesbaar (no-redef bij de optionele import, assignment bij het kiezen van
+#   de kernel, no-any-return omdat gecompileerde functies Any teruggeven).
+#
+# geochemistry, solver: arrays en phreeqpython-objecten worden in __init__ op None
+#   gezet en pas bij de eerste solve/init gevuld. mypy ziet die volgorde niet
+#   (index, attr-defined, union-attr, arg-type). Oplossing op termijn: de
+#   attributen laten ontstaan in __init__, of een _require()-helper per attribuut.
+[[tool.mypy.overrides]]
+module = ["nzingaflow.lta", "nzingaflow.merging"]
+disable_error_code = ["no-redef", "assignment", "no-any-return"]
+
+[[tool.mypy.overrides]]
+module = ["nzingaflow.geochemistry", "nzingaflow.solver"]
+disable_error_code = [
+    "index", "attr-defined", "union-attr", "arg-type",
+    "no-any-return", "dict-item",
+]
 
 # ── pytest ────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]

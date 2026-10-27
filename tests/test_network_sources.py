@@ -6,15 +6,18 @@ N2  Bronsoorten: CONCEN geeft sterkte en patroon, geen bron geeft None
 N3  Patroonwaarden en patroonfactor (herhalend, met start en stap)
 N4  Junctions met bron komen in de junctionlijst, reservoirs niet
 """
+
 from __future__ import annotations
 
 import pytest
 
 epynet_network = pytest.importorskip("epynet.network")
-from epynet.enum import EN_TimeParameter  # noqa: E402
 
 from nzingaflow.network_sources import (  # noqa: E402
-    junction_sources, pattern_multiplier, pattern_timing, pattern_values,
+    junction_sources,
+    pattern_multiplier,
+    pattern_timing,
+    pattern_values,
     reservoir_sources,
 )
 
@@ -54,13 +57,14 @@ Headloss D-W
 def net(tmp_path):
     p = tmp_path / "net.inp"
     p.write_text(INP, encoding="utf-8")
-    return epynet_network.Network(str(p), rpt_file=str(tmp_path / "r.rpt"),
-                                  out_file=str(tmp_path / "o.out"))
+    return epynet_network.Network(
+        str(p), rpt_file=str(tmp_path / "r.rpt"), out_file=str(tmp_path / "o.out")
+    )
 
 
 def test_n1_only_active_reservoirs(net):
     names = [r.name for r in reservoir_sources(net)]
-    assert names == ["R_on", "R_plain"]          # R_off (head 0) uitgesloten
+    assert names == ["R_on", "R_plain"]  # R_off (head 0) uitgesloten
 
 
 def test_n2_source_kinds(net):
@@ -79,9 +83,9 @@ def test_n3_pattern_values_and_multiplier(net):
     assert (step, start) == (300, 0)
     assert pattern_multiplier(vals, 0, step, start) == 1.0
     assert pattern_multiplier(vals, 300, step, start) == 2.0
-    assert pattern_multiplier(vals, 900, step, start) == 1.0      # herhaalt
+    assert pattern_multiplier(vals, 900, step, start) == 1.0  # herhaalt
 
 
 def test_n4_junction_sources(net):
     names = [j.name for j in junction_sources(net)]
-    assert names == ["J2"]                       # reservoirs horen niet in deze lijst
+    assert names == ["J2"]  # reservoirs horen niet in deze lijst

@@ -32,29 +32,44 @@ Performance (n=5000, 2 stoffen, 30% mergeable)
 """
 
 from __future__ import annotations
+
 import numpy as np
 
 # ── Numba import ──────────────────────────────────────────────────────────────
 
 try:
     from numba import njit as _njit
+
     USE_NUMBA = True
 except ImportError:
+
     def _njit(*args, **kwargs):
-        def decorator(fn): return fn
-        if len(args) == 1 and callable(args[0]): return args[0]
+        def decorator(fn):
+            return fn
+
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
         return decorator
+
     USE_NUMBA = False
 
 
 # ── Numba JIT kernels ─────────────────────────────────────────────────────────
 
+
 @_njit(cache=True)
 def _detect_candidates_kernel(
-    pipe, C, V, x, span,
-    n, n_species,
-    tol, rel_tol, min_volume,
-    cand_buf,          # (n-1,) int32 uitvoerbuffer voor kandidaatindices
+    pipe,
+    C,
+    V,
+    x,
+    span,
+    n,
+    n_species,
+    tol,
+    rel_tol,
+    min_volume,
+    cand_buf,  # (n-1,) int32 uitvoerbuffer voor kandidaatindices
 ) -> int:
     """
     Detecteer mergeable buurparen in één pass (Numba kernel).
@@ -97,9 +112,11 @@ def _detect_candidates_kernel(
 
 @_njit(cache=True)
 def _merge_pairs_kernel(
-    C, V,
-    cand_sel,          # (n_sel,) int32  geselecteerde linkerpartners
-    n_sel, n_species,
+    C,
+    V,
+    cand_sel,  # (n_sel,) int32  geselecteerde linkerpartners
+    n_sel,
+    n_species,
 ) -> None:
     """
     Voer het samenvoegen uit: segment i+1 absorbeert i (in-place).
@@ -122,11 +139,12 @@ def _merge_pairs_kernel(
 
 @_njit(cache=True)
 def _build_keep_mask(
-    cand_sel,          # (n_sel,) geselecteerde linkerpartners
-    V,                 # (n_cur,) huidige volumes
-    n_cur, n_sel,
+    cand_sel,  # (n_sel,) geselecteerde linkerpartners
+    V,  # (n_cur,) huidige volumes
+    n_cur,
+    n_sel,
     min_volume,
-    keep,              # (n_cur,) bool uitvoerbuffer
+    keep,  # (n_cur,) bool uitvoerbuffer
 ) -> int:
     """
     Bouw keep-masker: False voor geselecteerde linkerpartners en te-kleine segs.
@@ -145,15 +163,16 @@ def _build_keep_mask(
 
 # ── NumPy fallbacks ───────────────────────────────────────────────────────────
 
+
 def _detect_candidates_numpy(pipe, C, V, x, span, n, n_species, tol, rel_tol, min_volume, cand_buf):
     n1 = n - 1
     same = pipe[:n1] == pipe[1:n]
-    dC   = np.abs(C[1:n] - C[:n1])
-    thr  = tol
+    dC = np.abs(C[1:n] - C[:n1])
+    thr = tol
     if rel_tol > 0.0:
         thr = np.maximum(tol, rel_tol * np.maximum(np.abs(C[:n1]), np.abs(C[1:n])))
     ok_c = (dC < thr).all(axis=1)
-    big  = (V[:n1] >= min_volume) & (V[1:n] >= min_volume)
+    big = (V[:n1] >= min_volume) & (V[1:n] >= min_volume)
     near = (x[1:n] - x[:n1]) <= span[pipe[:n1]]
     cand = np.where(same & ok_c & big & near)[0]
     n_cand = len(cand)
@@ -162,11 +181,11 @@ def _detect_candidates_numpy(pipe, C, V, x, span, n, n_species, tol, rel_tol, mi
 
 
 def _merge_pairs_numpy(C, V, cand_sel, n_sel, n_species):
-    j      = cand_sel[:n_sel] + 1
-    i      = cand_sel[:n_sel]
-    tot_V  = V[i] + V[j]
-    C[j]   = (V[i, np.newaxis] * C[i] + V[j, np.newaxis] * C[j]) / tot_V[:, np.newaxis]
-    V[j]   = tot_V
+    j = cand_sel[:n_sel] + 1
+    i = cand_sel[:n_sel]
+    tot_V = V[i] + V[j]
+    C[j] = (V[i, np.newaxis] * C[i] + V[j, np.newaxis] * C[j]) / tot_V[:, np.newaxis]
+    V[j] = tot_V
 
 
 def _build_keep_mask_numpy(cand_sel, V, n_cur, n_sel, min_volume, keep):
@@ -178,67 +197,70 @@ def _build_keep_mask_numpy(cand_sel, V, n_cur, n_sel, min_volume, keep):
 # ── Implementatieselectie ─────────────────────────────────────────────────────
 
 if USE_NUMBA:
-    _detect_impl    = _detect_candidates_kernel
-    _merge_impl     = _merge_pairs_kernel
-    _keep_impl      = _build_keep_mask
+    _detect_impl = _detect_candidates_kernel
+    _merge_impl = _merge_pairs_kernel
+    _keep_impl = _build_keep_mask
 else:
-    _detect_impl    = _detect_candidates_numpy
-    _merge_impl     = _merge_pairs_numpy
-    _keep_impl      = _build_keep_mask_numpy
+    _detect_impl = _detect_candidates_numpy
+    _merge_impl = _merge_pairs_numpy
+    _keep_impl = _build_keep_mask_numpy
 
 
 # ── Pre-allocated werkbuffers (module-level singletons) ───────────────────────
 # Groeien mee met de grootste store die ooit werd verwerkt.
 # Vermijdt heap-allocaties per merge-aanroep en per pass.
 
-_cand_buf  = np.empty(0, dtype=np.int32)   # kandidaatindices
-_sel_buf   = np.empty(0, dtype=np.int32)   # geselecteerde linkerpartners
-_keep_buf  = np.empty(0, dtype=np.bool_)   # keep-masker
-_pos_buf   = np.empty(0, dtype=np.int64)   # pos_in_block voor niet-overlappende sel
+_cand_buf = np.empty(0, dtype=np.int32)  # kandidaatindices
+_sel_buf = np.empty(0, dtype=np.int32)  # geselecteerde linkerpartners
+_keep_buf = np.empty(0, dtype=np.bool_)  # keep-masker
+_pos_buf = np.empty(0, dtype=np.int64)  # pos_in_block voor niet-overlappende sel
+
 
 def _ensure_bufs(n: int) -> None:
     global _cand_buf, _sel_buf, _keep_buf, _pos_buf
     if n > len(_cand_buf):
         _cand_buf = np.empty(n, dtype=np.int32)
-        _sel_buf  = np.empty(n, dtype=np.int32)
+        _sel_buf = np.empty(n, dtype=np.int32)
         _keep_buf = np.empty(n, dtype=np.bool_)
-        _pos_buf  = np.empty(n, dtype=np.int64)
+        _pos_buf = np.empty(n, dtype=np.int64)
 
 
 # ── Niet-overlappende selectie (pure numpy, per pass) ─────────────────────────
+
 
 def _select_nonoverlapping(cand_buf, n_cand, pipe) -> tuple[np.ndarray, int]:
     """
     Selecteer even posities per leidingblok uit cand_buf[:n_cand].
     Geeft (sel_array, n_sel) terug zonder nieuwe allocatie als _sel_buf groot genoeg is.
     """
-    cand_idx     = cand_buf[:n_cand]
+    cand_idx = cand_buf[:n_cand]
     pipe_of_cand = pipe[cand_idx]
 
     # Blokgrenzen: waar verandert pipe?
-    new_pipe         = np.empty(n_cand, dtype=np.bool_)
-    new_pipe[0]      = True
-    new_pipe[1:]     = pipe_of_cand[1:] != pipe_of_cand[:-1]
+    new_pipe = np.empty(n_cand, dtype=np.bool_)
+    new_pipe[0] = True
+    new_pipe[1:] = pipe_of_cand[1:] != pipe_of_cand[:-1]
 
     boundary_pos = np.where(new_pipe)[0]
-    block_id     = np.cumsum(new_pipe) - 1
+    block_id = np.cumsum(new_pipe) - 1
     pos_in_block = np.arange(n_cand, dtype=np.int64) - boundary_pos[block_id]
 
     sel_mask = pos_in_block % 2 == 0
-    n_sel    = int(sel_mask.sum())
+    n_sel = int(sel_mask.sum())
     _sel_buf[:n_sel] = cand_idx[sel_mask]
     return _sel_buf, n_sel
 
 
 # ── Hoofd API ─────────────────────────────────────────────────────────────────
 
+
 def merge_segments(
     store,
-    tol:        float = 1e-6,
+    tol: float = 1e-6,
     min_volume: float = 1e-12,
-    n_pipes:    int   = 0,
-    max_span:   np.ndarray | float | None = None,
-    rel_tol:    float = 0.0,
+    n_pipes: int = 0,
+    max_span: np.ndarray | float | None = None,
+    rel_tol: float = 0.0,
 ) -> int:
     """
     Voeg aangrenzende segmenten samen die (bijna) dezelfde concentratie hebben.
@@ -280,20 +302,18 @@ def merge_segments(
 
     # ── Gesorteerde kopieën via CSR-index ─────────────────────────────────
     n_pipes_use = n_pipes if n_pipes > 0 else int(store.pipe[:n].max()) + 1
-    order, _    = store.build_csr(n_pipes_use)
+    order, _ = store.build_csr(n_pipes_use)
 
     if max_span is None:
         span_arr = np.full(n_pipes_use, np.inf, dtype=np.float64)
     else:
-        span_arr = np.broadcast_to(
-            np.asarray(max_span, dtype=np.float64), (n_pipes_use,)
-        ).copy()
+        span_arr = np.broadcast_to(np.asarray(max_span, dtype=np.float64), (n_pipes_use,)).copy()
 
     # Werk op lokale gesorteerde kopieën — store pas aan het einde bijwerken
     pipe = store.pipe[:n][order].copy()
-    x    = store.x[:n][order].copy()
-    V    = store.volume[:n][order].copy()
-    C    = store.C[:n][order].copy()
+    x = store.x[:n][order].copy()
+    V = store.volume[:n][order].copy()
+    C = store.C[:n][order].copy()
 
     _ensure_bufs(n)
     n_species = C.shape[1]
@@ -308,9 +328,16 @@ def merge_segments(
 
         # 1. Detecteer kandidaten in één pass
         n_cand = _detect_impl(
-            pipe, C, V, x, span_arr,
-            n_cur, n_species,
-            tol, rel_tol, min_volume,
+            pipe,
+            C,
+            V,
+            x,
+            span_arr,
+            n_cur,
+            n_species,
+            tol,
+            rel_tol,
+            min_volume,
             _cand_buf,
         )
         if n_cand == 0:
@@ -329,25 +356,28 @@ def merge_segments(
         if n_keep == n_cur:
             break
 
-        keep_mask       = _keep_buf[:n_cur]
+        keep_mask = _keep_buf[:n_cur]
         pipe = pipe[keep_mask]
-        x    = x[keep_mask]
-        V    = V[keep_mask]
-        C    = C[keep_mask]
+        x = x[keep_mask]
+        V = V[keep_mask]
+        C = C[keep_mask]
 
     # ── Verwijder te-kleine restanten ─────────────────────────────────────
     big = V >= min_volume
     if not big.all():
-        pipe = pipe[big]; x = x[big]; V = V[big]; C = C[big]
+        pipe = pipe[big]
+        x = x[big]
+        V = V[big]
+        C = C[big]
 
     # ── Terugschrijven naar store ──────────────────────────────────────────
     n_new = len(pipe)
-    store.pipe[:n_new]   = pipe
-    store.x[:n_new]      = x
+    store.pipe[:n_new] = pipe
+    store.x[:n_new] = x
     store.volume[:n_new] = V
-    store.C[:n_new]      = C
-    store.n              = n_new
-    store._csr_dirty     = True
+    store.C[:n_new] = C
+    store.n = n_new
+    store._csr_dirty = True
 
     return n - n_new
 
@@ -362,12 +392,12 @@ def warmup_numba_merging(n_species: int = 1) -> None:
         return
     n = 20
     pipe = np.zeros(n, dtype=np.int32)
-    C    = np.ones((n, n_species), dtype=np.float64)
-    V    = np.ones(n, dtype=np.float64) * 0.01
-    buf  = np.empty(n, dtype=np.int32)
+    C = np.ones((n, n_species), dtype=np.float64)
+    V = np.ones(n, dtype=np.float64) * 0.01
+    buf = np.empty(n, dtype=np.int32)
     keep = np.empty(n, dtype=np.bool_)
 
-    x    = np.arange(n, dtype=np.float64) * 1e-3
+    x = np.arange(n, dtype=np.float64) * 1e-3
     span = np.full(1, np.inf)
     nc = _detect_candidates_kernel(pipe, C, V, x, span, n, n_species, 1e-6, 0.0, 1e-12, buf)
     if nc > 0:

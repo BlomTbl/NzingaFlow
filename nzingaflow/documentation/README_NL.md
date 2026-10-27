@@ -105,7 +105,16 @@ cd nzingaflow
 pip install -e ".[dev]"
 ```
 
-Optionele extra's: `[numba]` (JIT-compilatie), `[geochem]` (PhreeqPython) en `[all]` (alles).
+Optionele extra's: `[numba]` (JIT-compilatie), `[geochem]` (PhreeqPython), `[msx]` (SciPy, voor de MSX-solvers `rk45`/`radau`), `[pandas]` (`to_dataframe()`) en `[all]` (alles).
+
+Controles die CI bij elke push draait (dezelfde commando's werken lokaal):
+
+```bash
+ruff check nzingaflow tests
+ruff format --check nzingaflow tests
+mypy nzingaflow
+pytest
+```
 
 > **Vereisten:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0 (zie stap 1)
 
@@ -271,6 +280,10 @@ Elke tijdstap `dt` doorloopt de solver de volgende fasen:
 Stappen 1–4 worden uitgevoerd door Numba JIT-kernels als Numba is geïnstalleerd, zonder tussenliggende array-allocaties.
 
 ### Modulaire opbouw
+
+![Afhankelijkheden tussen de modules van nzingaflow](nzingaflow/documentation/module-afhankelijkheden.svg)
+
+*Doorgetrokken pijlen: imports in de code (allemaal binnen functies, dus ze worden pas bij gebruik geladen). Gestippelde pijlen: een object dat je zelf meegeeft, zonder import (`EPSRunner(solver, ...)` en `NzingaFlowSolver(..., geochem=...)`). `parse_inp.py` wordt door geen enkele module geïmporteerd en alleen in tests gebruikt. `scipy` en `pandas` zijn alleen nodig voor de solvers `rk45`/`radau` en voor `to_dataframe()`.*
 
 | Module | Klasse / Functie | Verantwoordelijkheid |
 |---|---|---|
@@ -687,7 +700,7 @@ print(sol.pH, sol.total_element('Ca'))
 
 MSX-compatibele multi-species reactielaag die de vier EPANET-MSX 2.0 concepten implementeert: `RATE`, `EQUIL`, `FORMULA` en oppervlaktesoorten (`WALL`). Geef een `MsxReactionSystem`-instantie mee als `geochem`-argument aan `NzingaFlowSolver`.
 
-> Vereist: geen extra afhankelijkheid (scipy nodig voor de `rk45`/`radau`-solvers)
+> Vereist: geen extra afhankelijkheid (scipy nodig voor de `rk45`/`radau`-solvers: `pip install nzingaflow[msx]`)
 
 ```python
 from nzingaflow.msx import MsxReactionSystem

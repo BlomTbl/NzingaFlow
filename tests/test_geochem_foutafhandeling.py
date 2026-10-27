@@ -4,6 +4,7 @@ Fouten in de geochemie worden zichtbaar gemaakt, niet stilzwijgend weggegooid.
 F1  _sol_value('Alk') gooit een fout als de speciatie niet beschikbaar is (was: stil 0)
 F2  Een mineraal dat niet berekend kan worden geeft NaN en een waarschuwing (was: weggelaten)
 """
+
 from __future__ import annotations
 
 import logging

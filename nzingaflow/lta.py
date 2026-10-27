@@ -32,24 +32,30 @@ L2-cache-resident is voor typische netwerken (n_pipes < 1000).
 """
 
 from __future__ import annotations
+
 import numpy as np
 
 # ── Numba import (optioneel) ──────────────────────────────────────────────────
 
 try:
     from numba import njit as _njit
+
     USE_NUMBA = True
 except ImportError:
+
     def _njit(*args, **kwargs):
         def decorator(fn):
             return fn
+
         if len(args) == 1 and callable(args[0]):
             return args[0]
         return decorator
+
     USE_NUMBA = False
 
 
 # ── Numba JIT kernels ─────────────────────────────────────────────────────────
+
 
 @_njit(cache=True)
 def _bulk_decay_kernel(C, n, n_species, factors):
@@ -106,17 +112,25 @@ def _exit_detect_kernel(x, n, pipe, pipe_length, exit_mask):
 
 @_njit(cache=True)
 def _node_mixing_kernel(
-    exit_mask, n, pipe, C, flow, pipe_end,
-    node_C, node_flow, wC,
-    n_species, node_count,
+    exit_mask,
+    n,
+    pipe,
+    C,
+    flow,
+    pipe_end,
+    node_C,
+    node_flow,
+    wC,
+    n_species,
+    node_count,
 ):
     """Debietgewogen knoopmenging (Numba scalar loop)."""
     n_exit = 0
     for i in range(n):
         if not exit_mask[i]:
             continue
-        p  = pipe[i]
-        w  = flow[p]
+        p = pipe[i]
+        w = flow[p]
         nd = pipe_end[p]
         node_flow[nd] += w
         for s in range(n_species):
@@ -131,6 +145,7 @@ def _node_mixing_kernel(
 
 
 # ── NumPy fallback functies ───────────────────────────────────────────────────
+
 
 def _bulk_decay_numpy(C, n, n_species, factors):
     C[:n] *= factors
@@ -158,8 +173,12 @@ def _exit_detect_numpy(x, n, pipe, pipe_length, exit_mask):
         # niet wegschrijven naar exit_mask — het segment is in een groeiende store
         # dit is een configuratiefout; de buffer had mee moeten schalen
         import warnings
-        warnings.warn(f'exit_detect: buffer ({exit_mask.shape[0]}) < n ({n}); '
-                      'roep warmup_numba of vergroot capacity aan', RuntimeWarning)
+
+        warnings.warn(
+            f"exit_detect: buffer ({exit_mask.shape[0]}) < n ({n}); "
+            "roep warmup_numba of vergroot capacity aan",
+            RuntimeWarning,
+        )
     return n_exits
 
 
@@ -168,17 +187,25 @@ def _combined_decay_numpy(C, n, n_species, pipe, combined_exp):
 
 
 def _node_mixing_numpy(
-    exit_mask, n, pipe, C, flow, pipe_end,
-    node_C, node_flow, wC,
-    n_species, node_count,
+    exit_mask,
+    n,
+    pipe,
+    C,
+    flow,
+    pipe_end,
+    node_C,
+    node_flow,
+    wC,
+    n_species,
+    node_count,
 ):
-    node_C[:node_count]    = 0.0
+    node_C[:node_count] = 0.0
     node_flow[:node_count] = 0.0
     if not exit_mask[:n].any():
         return 0
-    ep    = pipe[:n][exit_mask[:n]]
+    ep = pipe[:n][exit_mask[:n]]
     nodes = pipe_end[ep]
-    w     = flow[ep]
+    w = flow[ep]
     n_exit = ep.shape[0]
     wC_view = wC[:n_exit]
     np.multiply(C[:n][exit_mask[:n]], w[:, np.newaxis], out=wC_view)
@@ -194,27 +221,28 @@ def _node_mixing_numpy(
 
 if USE_NUMBA:
     _combined_decay_impl = _combined_decay_kernel
-    _bulk_decay_impl  = _bulk_decay_kernel
-    _wall_decay_impl  = _wall_decay_kernel
-    _advect_impl      = _advect_kernel
+    _bulk_decay_impl = _bulk_decay_kernel
+    _wall_decay_impl = _wall_decay_kernel
+    _advect_impl = _advect_kernel
     _exit_detect_impl = _exit_detect_kernel
     _node_mixing_impl = _node_mixing_kernel
 else:
     _combined_decay_impl = _combined_decay_numpy
-    _bulk_decay_impl  = _bulk_decay_numpy
-    _wall_decay_impl  = _wall_decay_numpy
-    _advect_impl      = _advect_numpy
+    _bulk_decay_impl = _bulk_decay_numpy
+    _wall_decay_impl = _wall_decay_numpy
+    _advect_impl = _advect_numpy
     _exit_detect_impl = _exit_detect_numpy
     _node_mixing_impl = _node_mixing_numpy
 
 
 # ── Publieke API ──────────────────────────────────────────────────────────────
 
+
 def bulk_first_order_multi(
-    C:     np.ndarray,
+    C: np.ndarray,
     k_vec: np.ndarray,
-    dt:    float,
-    n:     int | None = None,
+    dt: float,
+    n: int | None = None,
 ) -> None:
     """
     Eerste-orde bulkverval voor alle actieve segmenten x stoffen (in-place).
@@ -223,33 +251,33 @@ def bulk_first_order_multi(
     """
     if C.size == 0:
         return
-    n_active  = C.shape[0] if n is None else n
+    n_active = C.shape[0] if n is None else n
     n_species = C.shape[1]
-    factors   = np.exp(-k_vec * dt).astype(np.float64)
+    factors = np.exp(-k_vec * dt).astype(np.float64)
     _bulk_decay_impl(C, n_active, n_species, factors)
 
 
 def wall_first_order_multi(
-    C:      np.ndarray,
-    pipe:   np.ndarray,
+    C: np.ndarray,
+    pipe: np.ndarray,
     k_wall: np.ndarray,
-    dt:     float,
-    n:      int | None = None,
+    dt: float,
+    n: int | None = None,
 ) -> None:
     """Eerste-orde wandverval per segment (in-place)."""
     if C.size == 0:
         return
-    n_active      = C.shape[0] if n is None else n
-    n_species     = C.shape[1]
+    n_active = C.shape[0] if n is None else n
+    n_species = C.shape[1]
     k_wall_dt_exp = np.exp(-k_wall * dt).astype(np.float64)
     _wall_decay_impl(C, n_active, n_species, pipe, k_wall_dt_exp)
 
 
 def combined_decay_multi(
-    C:            np.ndarray,   # (n, n_species) — in-place
-    pipe:         np.ndarray,   # (n,) int32
-    combined_exp: np.ndarray,   # (n_pipes, n_species) pre-berekend
-    n:            int | None = None,
+    C: np.ndarray,  # (n, n_species) — in-place
+    pipe: np.ndarray,  # (n,) int32
+    combined_exp: np.ndarray,  # (n_pipes, n_species) pre-berekend
+    n: int | None = None,
 ) -> None:
     """
     Gecombineerd bulk + wandverval in één pass (in-place).
@@ -263,16 +291,16 @@ def combined_decay_multi(
     """
     if C.size == 0:
         return
-    n_active  = C.shape[0] if n is None else n
+    n_active = C.shape[0] if n is None else n
     n_species = C.shape[1]
     _combined_decay_impl(C, n_active, n_species, pipe, combined_exp)
 
 
 def build_combined_exp(
-    k_bulk:     np.ndarray,   # (n_species,) [1/s]
+    k_bulk: np.ndarray,  # (n_species,) [1/s]
     k_wall_vol: np.ndarray | None,  # (n_pipes, n_species) [1/s] of None
-    dt:         float,
-    n_pipes:    int,
+    dt: float,
+    n_pipes: int,
 ) -> np.ndarray:
     """
     Bereken combined_exp[p, s] = exp(-(k_bulk[s] + k_wall_vol[p, s]) * dt).
@@ -288,12 +316,11 @@ def build_combined_exp(
 
 
 def advect(
-
-    x:        np.ndarray,
-    pipe:     np.ndarray,
+    x: np.ndarray,
+    pipe: np.ndarray,
     velocity: np.ndarray,
-    dt:       float,
-    n:        int | None = None,
+    dt: float,
+    n: int | None = None,
 ) -> None:
     """Verschuif alle segmenten stroomafwaarts (in-place): x += v[pipe] * dt."""
     if x.size == 0:
@@ -303,11 +330,11 @@ def advect(
 
 
 def exit_detect(
-    x:           np.ndarray,
-    pipe:        np.ndarray,
+    x: np.ndarray,
+    pipe: np.ndarray,
     pipe_length: np.ndarray,
-    exit_mask:   np.ndarray,
-    n:           int | None = None,
+    exit_mask: np.ndarray,
+    n: int | None = None,
 ) -> int:
     """
     Detecteer exiterende segmenten; schrijft in-place in exit_mask[:n].
@@ -321,48 +348,56 @@ def exit_detect(
 
 
 def node_mixing_multi(
-    exit_mask:     np.ndarray,
-    pipe:          np.ndarray,
-    C:             np.ndarray,
-    flow:          np.ndarray,
-    pipe_end:      np.ndarray,
-    node_count:    int,
-    out:           np.ndarray | None = None,
-    wC_buf:        np.ndarray | None = None,
+    exit_mask: np.ndarray,
+    pipe: np.ndarray,
+    C: np.ndarray,
+    flow: np.ndarray,
+    pipe_end: np.ndarray,
+    node_count: int,
+    out: np.ndarray | None = None,
+    wC_buf: np.ndarray | None = None,
     node_flow_buf: np.ndarray | None = None,
-    n:             int | None = None,
+    n: int | None = None,
 ) -> np.ndarray:
     """
     Debietgewogen knoopmenging. Geen heap-allocatie als out, wC_buf en
     node_flow_buf worden meegegeven.
     """
-    n_active  = C.shape[0] if n is None else n
+    n_active = C.shape[0] if n is None else n
     n_species = C.shape[1]
 
-    node_C = out           if out           is not None else np.zeros((node_count, n_species), dtype=np.float64)
-    nf_buf = node_flow_buf if node_flow_buf is not None else np.zeros(node_count,              dtype=np.float64)
-    wC     = wC_buf        if wC_buf        is not None else np.zeros((n_active, n_species),   dtype=np.float64)
+    node_C = out if out is not None else np.zeros((node_count, n_species), dtype=np.float64)
+    nf_buf = node_flow_buf if node_flow_buf is not None else np.zeros(node_count, dtype=np.float64)
+    wC = wC_buf if wC_buf is not None else np.zeros((n_active, n_species), dtype=np.float64)
 
     # Reset uitvoerbuffers (Numba-kernel doet dit niet zelf)
     node_C[:node_count] = 0.0
     nf_buf[:node_count] = 0.0
 
     _node_mixing_impl(
-        exit_mask, n_active, pipe, C, flow, pipe_end,
-        node_C, nf_buf, wC,
-        n_species, node_count,
+        exit_mask,
+        n_active,
+        pipe,
+        C,
+        flow,
+        pipe_end,
+        node_C,
+        nf_buf,
+        wC,
+        n_species,
+        node_count,
     )
     return node_C
 
 
 def tank_step_implicit(
-    C_tank:  np.ndarray,
-    Q_in:    np.ndarray,
-    C_in:    np.ndarray,
-    Q_out:   np.ndarray,
-    V_tank:  np.ndarray,
-    k_b:     np.ndarray,
-    dt:      float,
+    C_tank: np.ndarray,
+    Q_in: np.ndarray,
+    C_in: np.ndarray,
+    Q_out: np.ndarray,
+    V_tank: np.ndarray,
+    k_b: np.ndarray,
+    dt: float,
 ) -> None:
     """
     CSTR-tankmodel met impliciet Euler (onvoorwaardelijk stabiel).
@@ -387,8 +422,8 @@ def tank_step_implicit(
     """
     if C_tank.size == 0:
         return
-    V         = np.maximum(V_tank, 1e-9)[:, np.newaxis]
-    denom     = 1.0 + (Q_in[:, np.newaxis] / V + k_b[np.newaxis, :]) * dt
+    V = np.maximum(V_tank, 1e-9)[:, np.newaxis]
+    denom = 1.0 + (Q_in[:, np.newaxis] / V + k_b[np.newaxis, :]) * dt
     numerator = C_tank + (Q_in[:, np.newaxis] * C_in / V) * dt
     C_tank[:] = numerator / denom
 
@@ -396,11 +431,11 @@ def tank_step_implicit(
 def compute_wall_k(
     pipe_diameter: np.ndarray,
     pipe_velocity: np.ndarray,
-    k_w:           np.ndarray,
-    D_mol:         float = 1.3e-9,
-    nu:            float = 1e-6,
-    pipe_length:   np.ndarray | None = None,
-    temperature:   float | None = None,
+    k_w: np.ndarray,
+    D_mol: float = 1.3e-9,
+    nu: float = 1e-6,
+    pipe_length: np.ndarray | None = None,
+    temperature: float | None = None,
 ) -> np.ndarray:
     """
     Volumetrische wandreactiesnelheid [1/s] via verbeterd twee-film-model.
@@ -444,21 +479,21 @@ def compute_wall_k(
     -------
     k_wall_vol : (n_pipes, n_species) volumetrische wandreactiesnelheid [1/s]
     """
-    D = np.asarray(pipe_diameter,  dtype=np.float64)
-    v = np.asarray(pipe_velocity,  dtype=np.float64)
+    D = np.asarray(pipe_diameter, dtype=np.float64)
+    v = np.asarray(pipe_velocity, dtype=np.float64)
 
     # ── Temperatuurcorrectie D_mol en k_w ────────────────────────────────────
     if temperature is not None:
-        T    = float(temperature)
-        R    = 8.314            # J/mol/K
-        Ea_D = 17_000.0         # J/mol  (Hayduk & Laudie 1974)
+        T = float(temperature)
+        R = 8.314  # J/mol/K
+        Ea_D = 17_000.0  # J/mol  (Hayduk & Laudie 1974)
         D_mol = D_mol * np.exp(Ea_D / R * (1.0 / 293.15 - 1.0 / (T + 273.15)))
         theta_w = 1.047
         k_w = np.asarray(k_w, dtype=np.float64) * theta_w ** (T - 20.0)
 
     # ── Dimensieloze getallen ─────────────────────────────────────────────────
     Sc = nu / D_mol
-    Re = v * D / nu                                        # (n_pipes,)
+    Re = v * D / nu  # (n_pipes,)
 
     # ── Sherwood-getal: drie regimes ─────────────────────────────────────────
     # Laminaire basiswaarde: Graetz-oplossing voor uniforme wandconcentratie.
@@ -468,49 +503,53 @@ def compute_wall_k(
     # Zonder pipe_length: Sh_lam = 3.66 (volledig ontwikkeld, conservatief).
     if pipe_length is not None:
         L_over_D = pipe_length / np.maximum(D, 1e-6)
-        L_over_D  = np.maximum(L_over_D, 1.0)
-        Gz        = Re * Sc / L_over_D                    # Graetz getal
-        entry     = np.maximum(1.615 * Gz**(1.0/3.0) - 0.7, 0.0)
-        Sh_lam    = (3.66**3 + entry**3)**(1.0/3.0)
+        L_over_D = np.maximum(L_over_D, 1.0)
+        Gz = Re * Sc / L_over_D  # Graetz getal
+        entry = np.maximum(1.615 * Gz ** (1.0 / 3.0) - 0.7, 0.0)
+        Sh_lam = (3.66**3 + entry**3) ** (1.0 / 3.0)
     else:
-        Sh_lam    = np.full_like(D, 3.66)                 # volledig ontwikkeld laminair
+        Sh_lam = np.full_like(D, 3.66)  # volledig ontwikkeld laminair
 
     # Turbulente Nusselt (Dittus-Boelter, onveranderd)
-    Sh_turb = 0.023 * Re**0.83 * Sc**(1.0/3.0)
+    Sh_turb = 0.023 * Re**0.83 * Sc ** (1.0 / 3.0)
 
     # Transitie: lineaire interpolatie over Re ∈ [2300, 4000]
     f_trans = np.clip((Re - 2300.0) / 1700.0, 0.0, 1.0)
-    Sh      = np.where(
-        Re >= 4000.0, Sh_turb,
+    Sh = np.where(
+        Re >= 4000.0,
+        Sh_turb,
         np.where(Re < 2300.0, Sh_lam, Sh_lam + f_trans * (Sh_turb - Sh_lam)),
     )
 
     # ── Filmtransport-coëfficiënt k_f [m/s] ──────────────────────────────────
-    k_f_conv = Sh * D_mol / D                             # convectief (Sh-gebaseerd)
+    k_f_conv = Sh * D_mol / D  # convectief (Sh-gebaseerd)
 
     # Stagnatie-zone correctie: bij Re < 10 domineert moleculaire diffusie.
     # In een stilstaande cilinder is het tijdgemiddelde k_f ≈ 4·D_mol/D
     # (eerste term Bessel-reeks voor diffusie in een eindige cilinder).
-    k_f_diff = 4.0 * D_mol / D                            # puur diffusief minimum
+    k_f_diff = 4.0 * D_mol / D  # puur diffusief minimum
     # Alleen toepassen als Re < 10: buiten dit stagnatieregime is Sh=3.66
     # (of de Sherwood-correlatie) leidend, ook al is k_f_diff > k_f_conv
     # (k_f_diff komt overeen met Sh=4, dus zou anders altijd domineren).
-    k_f = np.where(Re < 10.0, np.maximum(k_f_conv, k_f_diff), k_f_conv)[:, np.newaxis]  # (n_pipes, 1)
+    k_f = np.where(Re < 10.0, np.maximum(k_f_conv, k_f_diff), k_f_conv)[
+        :, np.newaxis
+    ]  # (n_pipes, 1)
 
     # ── Serieweerstand: film + wandreactie ────────────────────────────────────
-    k_w_arr   = np.atleast_2d(np.asarray(k_w, dtype=np.float64))
+    k_w_arr = np.atleast_2d(np.asarray(k_w, dtype=np.float64))
     if k_w_arr.shape[0] == 1:
         k_w_arr = np.broadcast_to(k_w_arr, (len(D), k_w_arr.shape[1]))
 
     zero_mask = k_w_arr == 0.0
-    denom     = np.where(zero_mask, 1.0, k_f + k_w_arr)
-    k_eff     = np.where(zero_mask, 0.0, k_f * k_w_arr / denom)
+    denom = np.where(zero_mask, 1.0, k_f + k_w_arr)
+    k_eff = np.where(zero_mask, 0.0, k_f * k_w_arr / denom)
 
     # k_vol [1/s]: k_eff × (A/V per lengte) = k_eff × 4/D  voor een cilinder
     return (k_eff * (4.0 / D[:, np.newaxis])).astype(np.float64)
 
 
 # ── Numba warmup ──────────────────────────────────────────────────────────────
+
 
 def warmup_numba(n_species: int = 1) -> None:
     """
@@ -527,19 +566,19 @@ def warmup_numba(n_species: int = 1) -> None:
     if not USE_NUMBA:
         return
     n = 10
-    C   = np.ones((n, n_species), dtype=np.float64)
-    p   = np.zeros(n, dtype=np.int32)
-    x   = np.linspace(0, 90, n, dtype=np.float64)
+    C = np.ones((n, n_species), dtype=np.float64)
+    p = np.zeros(n, dtype=np.int32)
+    x = np.linspace(0, 90, n, dtype=np.float64)
     vel = np.array([1.0], dtype=np.float64)
-    L   = np.array([100.0], dtype=np.float64)
-    fl  = np.array([0.01], dtype=np.float64)
-    pe  = np.array([1], dtype=np.int32)
+    L = np.array([100.0], dtype=np.float64)
+    fl = np.array([0.01], dtype=np.float64)
+    pe = np.array([1], dtype=np.int32)
     kwe = np.ones((1, n_species), dtype=np.float64)
     fac = np.ones(n_species, dtype=np.float64)
-    em  = np.zeros(n, dtype=np.bool_)
-    nC  = np.zeros((2, n_species), dtype=np.float64)
-    nf  = np.zeros(2, dtype=np.float64)
-    wC  = np.zeros((n, n_species), dtype=np.float64)
+    em = np.zeros(n, dtype=np.bool_)
+    nC = np.zeros((2, n_species), dtype=np.float64)
+    nf = np.zeros(2, dtype=np.float64)
+    wC = np.zeros((n, n_species), dtype=np.float64)
 
     _bulk_decay_kernel(C, n, n_species, fac)
     comb_exp = np.ones((1, n_species), dtype=np.float64)
