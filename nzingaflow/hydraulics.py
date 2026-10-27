@@ -68,18 +68,20 @@ Invarianten die niet zijn veranderd
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass
+
 import numpy as np
 
 try:
     from epynet.network import Network
     from epynet.solver import HydraulicSolver
-except ImportError as _exc:   # pragma: no cover - afhankelijk van omgeving
+except ImportError as _exc:  # pragma: no cover - afhankelijk van omgeving
     raise ImportError(
         "NzingaFlow vereist EPYnetDTD (epynet >= 2.0, met epynet.solver). "
         "Dat staat niet op PyPI (daar bestaat alleen epynet <= 1.1). Installeer het "
         "eerst uit de privé-repository, bijvoorbeeld: "
-        "pip install \"epynet @ git+ssh://git@github.com/<org>/epynet.git@v2.0.0\". "
+        'pip install "epynet @ git+ssh://git@github.com/<org>/epynet.git@v2.0.0". '
         "Zie 'Installatie' in de README."
     ) from _exc
 
@@ -97,13 +99,15 @@ def _is_junction(node) -> bool:
 # Onveranderlijke/snapshot-datastructuren
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 @dataclass(frozen=True, eq=False)
 class Topology:
     """Onveranderlijke netwerktopologie, eenmalig berekend bij laden."""
-    pipe_start: np.ndarray    # (n_pipes,) int32  0-based knoopindex beginpunt
-    pipe_end: np.ndarray      # (n_pipes,) int32  0-based knoopindex eindpunt
-    pipe_length: np.ndarray   # (n_pipes,) float64  [m]
-    pipe_area: np.ndarray     # (n_pipes,) float64  [m²]
+
+    pipe_start: np.ndarray  # (n_pipes,) int32  0-based knoopindex beginpunt
+    pipe_end: np.ndarray  # (n_pipes,) int32  0-based knoopindex eindpunt
+    pipe_length: np.ndarray  # (n_pipes,) float64  [m]
+    pipe_area: np.ndarray  # (n_pipes,) float64  [m²]
     node_count: int
     pipe_ids: list
     node_names: list
@@ -112,17 +116,23 @@ class Topology:
         """Zelfde 7-tuple als de oude get_topology()-return — voor
         achterwaartse compatibiliteit met solver.py/eps.py."""
         return (
-            self.pipe_start, self.pipe_end, self.pipe_length, self.pipe_area,
-            self.node_count, self.pipe_ids, self.node_names,
+            self.pipe_start,
+            self.pipe_end,
+            self.pipe_length,
+            self.pipe_area,
+            self.node_count,
+            self.pipe_ids,
+            self.node_names,
         )
 
 
 @dataclass(frozen=True, eq=False)
 class HydraulicState:
     """Snapshot van de laatst opgeloste hydraulica (na solve())."""
-    flow: np.ndarray       # (n_pipes,) float64  m³/s, altijd ≥ 0
-    velocity: np.ndarray   # (n_pipes,) float64  m/s,  altijd ≥ 0
-    reversed: np.ndarray   # (n_pipes,) bool     True = omgekeerd t.o.v. EPANET-definitie
+
+    flow: np.ndarray  # (n_pipes,) float64  m³/s, altijd ≥ 0
+    velocity: np.ndarray  # (n_pipes,) float64  m/s,  altijd ≥ 0
+    reversed: np.ndarray  # (n_pipes,) bool     True = omgekeerd t.o.v. EPANET-definitie
     simtime: int
     # (node_count,) float64 m³/s, positief = onttrekking, negatief = externe
     # instroom (EPANET negatieve vraag). None als niet beschikbaar.
@@ -135,6 +145,7 @@ class HydraulicState:
 # ═══════════════════════════════════════════════════════════════════════════
 # Solver
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 class _NoSaveHydraulicSolver(HydraulicSolver):
     """
@@ -257,6 +268,7 @@ class _NoSaveHydraulicSolver(HydraulicSolver):
 # Façade
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 class HydraulicModel:
     """
     Koppeling tussen epynet (EPANET via Python) en NzingaFlow.
@@ -299,10 +311,15 @@ class HydraulicModel:
             ...
     """
 
-    def __init__(self, inp_path: str, include_pumps: bool = False,
-                 include_valves: bool = False, cache_links: bool = False,
-                 reversal_deadband: float = 1e-5):
-        self.net              = Network(inp_path)
+    def __init__(
+        self,
+        inp_path: str,
+        include_pumps: bool = False,
+        include_valves: bool = False,
+        cache_links: bool = False,
+        reversal_deadband: float = 1e-5,
+    ):
+        self.net = Network(inp_path)
         # Dode zone voor stroomrichting [m³/s]: een leiding met |Q| onder deze
         # waarde behoudt zijn vorige richting. Voorkomt dat bijna-stilstaand water
         # bij elke hydraulische stap omkeert (en de segmenten dan spiegelt).
@@ -310,17 +327,17 @@ class HydraulicModel:
         # 0 = uit (oud gedrag).
         self._reversal_deadband = float(reversal_deadband)
         self._prev_reversed: np.ndarray | None = None
-        self._solver          = _NoSaveHydraulicSolver(self.net)
-        self._solved_for_simtime: int | None = None   # None = nog niet opgelost
-        self._include_pumps   = include_pumps
-        self._include_valves  = include_valves
-        self._pipe_list       = None    # gecached na eerste _get_links()
-        self._cache_links     = cache_links
+        self._solver = _NoSaveHydraulicSolver(self.net)
+        self._solved_for_simtime: int | None = None  # None = nog niet opgelost
+        self._include_pumps = include_pumps
+        self._include_valves = include_valves
+        self._pipe_list: list | None = None  # gecached na eerste _get_links()
+        self._cache_links = cache_links
         self._topology: Topology | None = None
         self._state: HydraulicState | None = None
-        self._units           = None    # gecached na eerste _get_flow_units()
+        self._units: str | None = None  # gecached na eerste _get_flow_units()
 
-    def __enter__(self) -> "HydraulicModel":
+    def __enter__(self) -> HydraulicModel:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -353,7 +370,7 @@ class HydraulicModel:
         self._solver.solve_step(pattern_start_time=simtime)
         self._solved_for_simtime = simtime
         if not self._cache_links:
-            self._pipe_list = None    # invalideer link-cache na nieuwe oplossing
+            self._pipe_list = None  # invalideer link-cache na nieuwe oplossing
         self._state = self._read_hydraulic_state(simtime)
 
     def close(self) -> None:
@@ -385,23 +402,23 @@ class HydraulicModel:
         if self._topology is not None:
             return self._topology.as_tuple()
 
-        links    = self._get_links()
-        units    = self._get_flow_units()
+        links = self._get_links()
+        units = self._get_flow_units()
 
         # ── Knoopindex-tabel (0-based) ────────────────────────────────────────
         # node.index is 1-based (EPANET-conventie); wij willen 0-based.
         # De volgorde in self.net.nodes (kale generator) is de volgorde
         # van inlezen, die overeenkomt met de EPANET-interne indices.
-        node_names  = [n.uid for n in self.net.nodes]
-        node_index  = {uid: i for i, uid in enumerate(node_names)}
-        node_count  = len(node_names)
+        node_names = [n.uid for n in self.net.nodes]
+        node_index = {uid: i for i, uid in enumerate(node_names)}
+        node_count = len(node_names)
 
         # ── Topologie-arrays ──────────────────────────────────────────────────
-        pipe_start  = np.array(
+        pipe_start = np.array(
             [node_index[lnk.from_node.uid] for lnk in links],
             dtype=np.int32,
         )
-        pipe_end    = np.array(
+        pipe_end = np.array(
             [node_index[lnk.to_node.uid] for lnk in links],
             dtype=np.int32,
         )
@@ -412,8 +429,8 @@ class HydraulicModel:
         # verbindingselement (lengte 0 m).
         # Lengte → m: EPANET geeft ft terug bij US-flow-eenheden (net als
         # diameter in inch en snelheid in ft/s), zie units.length_to_m().
-        length_raw  = np.array(
-            [getattr(lnk, 'length', 0.0) for lnk in links],
+        length_raw = np.array(
+            [getattr(lnk, "length", 0.0) for lnk in links],
             dtype=np.float64,
         )
         pipe_length = u.length_to_m(length_raw, units)
@@ -424,19 +441,23 @@ class HydraulicModel:
         # een AttributeError zodra include_pumps=True en behandelt een pomp
         # in dwarsdoorsnede-afhankelijke berekeningen als nul-oppervlak
         # element (analoog aan de length-fallback voor valves).
-        diam_raw   = np.array(
-            [getattr(lnk, 'diameter', 0.0) for lnk in links],
+        diam_raw = np.array(
+            [getattr(lnk, "diameter", 0.0) for lnk in links],
             dtype=np.float64,
         )
-        pipe_diam  = u.diameter_to_m(diam_raw, units)
-        pipe_area  = np.pi * (pipe_diam / 2.0) ** 2
+        pipe_diam = u.diameter_to_m(diam_raw, units)
+        pipe_area = np.pi * (pipe_diam / 2.0) ** 2
 
-        pipe_ids   = [lnk.uid for lnk in links]
+        pipe_ids = [lnk.uid for lnk in links]
 
         self._topology = Topology(
-            pipe_start=pipe_start, pipe_end=pipe_end,
-            pipe_length=pipe_length, pipe_area=pipe_area,
-            node_count=node_count, pipe_ids=pipe_ids, node_names=node_names,
+            pipe_start=pipe_start,
+            pipe_end=pipe_end,
+            pipe_length=pipe_length,
+            pipe_area=pipe_area,
+            node_count=node_count,
+            pipe_ids=pipe_ids,
+            node_names=node_names,
         )
         return self._topology.as_tuple()
 
@@ -458,23 +479,32 @@ class HydraulicModel:
         gecorrigeerd voor de huidige hydraulische toestand.
         """
         (
-            pipe_start_base, pipe_end_base,
-            pipe_length, pipe_area,
-            node_count, pipe_ids, node_names,
+            pipe_start_base,
+            pipe_end_base,
+            pipe_length,
+            pipe_area,
+            node_count,
+            pipe_ids,
+            node_names,
         ) = self.get_topology()
 
         _, _, reversed_mask = self.get_hydraulic_state()
 
         pipe_start = pipe_start_base.copy()
-        pipe_end   = pipe_end_base.copy()
+        pipe_end = pipe_end_base.copy()
 
         if reversed_mask.any():
             pipe_start[reversed_mask] = pipe_end_base[reversed_mask]
-            pipe_end[reversed_mask]   = pipe_start_base[reversed_mask]
+            pipe_end[reversed_mask] = pipe_start_base[reversed_mask]
 
         return (
-            pipe_start, pipe_end, pipe_length, pipe_area,
-            node_count, pipe_ids, node_names,
+            pipe_start,
+            pipe_end,
+            pipe_length,
+            pipe_area,
+            node_count,
+            pipe_ids,
+            node_names,
         )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -521,9 +551,7 @@ class HydraulicModel:
         RuntimeError als solve() nog niet is uitgevoerd.
         """
         if self._state is None:
-            raise RuntimeError(
-                "get_node_demand() aangeroepen vóór solve()."
-            )
+            raise RuntimeError("get_node_demand() aangeroepen vóór solve().")
         if self._state.node_demand is None:
             return np.zeros(len(list(self.net.nodes)), dtype=np.float64)
         return self._state.node_demand
@@ -533,14 +561,14 @@ class HydraulicModel:
         een solve()-aanroep. Wordt gecachet in self._state; downstream code
         (solver.py) leest dus geen losse live epynet-properties meer per
         aanroep van get_hydraulic_state()."""
-        links   = self._get_links()
-        units   = self._get_flow_units()
+        links = self._get_links()
+        units = self._get_flow_units()
 
-        flow_raw = np.array([lnk.flow     for lnk in links], dtype=np.float64)
-        vel_raw  = np.array([lnk.velocity for lnk in links], dtype=np.float64)
+        flow_raw = np.array([lnk.flow for lnk in links], dtype=np.float64)
+        vel_raw = np.array([lnk.velocity for lnk in links], dtype=np.float64)
 
-        flow_si  = u.flow_to_m3s(flow_raw, units)
-        vel_si   = u.velocity_to_ms(vel_raw, units)
+        flow_si = u.flow_to_m3s(flow_raw, units)
+        vel_si = u.velocity_to_ms(vel_raw, units)
 
         reversed_mask = flow_si < 0.0
         if self._reversal_deadband > 0.0:
@@ -557,16 +585,16 @@ class HydraulicModel:
         # solver apart behandeld.
         nodes = list(self.net.nodes)
         dem_raw = np.array(
-            [float(getattr(nd, "demand", 0.0) or 0.0)
-             if _is_junction(nd) else 0.0
-             for nd in nodes],
+            [float(getattr(nd, "demand", 0.0) or 0.0) if _is_junction(nd) else 0.0 for nd in nodes],
             dtype=np.float64,
         )
         node_demand = u.flow_to_m3s(dem_raw, units)
 
         return HydraulicState(
-            flow=np.abs(flow_si), velocity=np.abs(vel_si),
-            reversed=reversed_mask, simtime=simtime,
+            flow=np.abs(flow_si),
+            velocity=np.abs(vel_si),
+            reversed=reversed_mask,
+            simtime=simtime,
             node_demand=node_demand,
         )
 
@@ -607,11 +635,11 @@ class HydraulicModel:
         Zonder include_valves is de mask overal False.
         """
         links = self._get_links()
-        mask  = np.zeros(len(links), dtype=bool)
+        mask = np.zeros(len(links), dtype=bool)
         if self._include_valves:
             n_valves = len(list(self.net.valves))
             if n_valves:
-                mask[len(links) - n_valves:] = True
+                mask[len(links) - n_valves :] = True
         return mask
 
     def get_closed_mask(self) -> np.ndarray:
@@ -653,19 +681,19 @@ class HydraulicModel:
 
         Nuttig voor debuggen en verificatie van de eenheidsinstellingen.
         """
-        links     = self._get_links()
+        links = self._get_links()
         flow_units = self._get_flow_units()
         # net.nodes / .tanks / .reservoirs zijn kale generators in EPYnetDTD
         # (geen ObjectCollection meer) — dus expliciet naar list() voor len().
         # net.getNodeCount() is O(1) (EN_getcount) en dus sneller dan
         # len(list(net.nodes)) voor het totaal — voor tanks/reservoirs
         # bestaat geen losse O(1)-teller, dus die blijven list()-gebaseerd.
-        n_nodes   = self.net.getNodeCount()
-        n_pipes   = len(list(self.net.pipes))
-        n_pumps   = len(list(self.net.pumps))
-        n_valves  = len(list(self.net.valves))
-        n_tanks   = len(list(self.net.tanks))
-        n_res     = len(list(self.net.reservoirs))
+        n_nodes = self.net.getNodeCount()
+        n_pipes = len(list(self.net.pipes))
+        n_pumps = len(list(self.net.pumps))
+        n_valves = len(list(self.net.valves))
+        n_tanks = len(list(self.net.tanks))
+        n_res = len(list(self.net.reservoirs))
 
         lines = [
             f"HydraulicModel — {self.net.inputfile or '(geen .inp)'}",
@@ -700,7 +728,7 @@ class HydraulicModel:
     def __repr__(self) -> str:
         n_pipes = len(self._get_links())
         n_nodes = self.net.getNodeCount()
-        units   = self._get_flow_units()
+        units = self._get_flow_units()
         return (
             f"<HydraulicModel pipes={n_pipes} nodes={n_nodes} "
             f"units={units} solved={self._state is not None}>"
