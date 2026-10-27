@@ -6,7 +6,9 @@ F2  Afsluiterstatus niet uitleesbaar   -> RuntimeError (niet stil 'open')
 F3  Bronkwaliteit niet uitleesbaar     -> RuntimeWarning met reservoir-id
 F4  Mislukte hydraulische berekening   -> RuntimeWarning (niet stil debiet 0)
 """
+
 from __future__ import annotations
+
 import warnings
 
 import pytest
@@ -53,8 +55,8 @@ def test_bronkwaliteit_fout_geeft_waarschuwing(valve_inp, monkeypatch):
     net = hm.net
     orig = net.EN_getnodevalue
 
-
     from nzingaflow import units as u
+
     prop = u.EN_NodeProperty.EN_SOURCEQUAL
 
     def stuk2(idx, p):
@@ -74,9 +76,14 @@ def test_mislukte_solve_geeft_waarschuwing(valve_inp, monkeypatch):
     import nzingaflow.hydraulics as hyd
 
     class Kapot:
-        def __init__(self, net): pass
-        def solve_step(self, **k): raise ValueError("solve faalt")
-        def close(self): pass
+        def __init__(self, net):
+            pass
+
+        def solve_step(self, **k):
+            raise ValueError("solve faalt")
+
+        def close(self):
+            pass
 
     monkeypatch.setattr(hyd, "_NoSaveHydraulicSolver", Kapot)
     with pytest.warns(RuntimeWarning, match="Hydraulische berekening"):

@@ -12,8 +12,9 @@ V7  EPANET-referentie  — tijdreeks op het mengpunt vs. EPANET-kwaliteitsbereke
 Alle tests gebruiken kleine netwerken uit tekst (tmp_path) en zijn gemarkeerd
 met @pytest.mark.requires_epynet.
 """
+
 from __future__ import annotations
-import textwrap
+
 import numpy as np
 import pytest
 
@@ -248,8 +249,9 @@ def _bron(**conc):
 
 def _epanet_tijdreeks(inp, bronnen, knopen, t_eind):
     """Referentie: EPANET-kwaliteitsberekening (stof, reservoir-INITQUAL = bron)."""
-    from epynet.network import Network
     from epynet import enum
+    from epynet.network import Network
+
     n = Network(inp)
     n.EN_setqualtype(enum.EN_QualityType.EN_CHEM, "chem", "mg/L", "")
     idx = {nd.uid: nd.index for nd in n.nodes}
@@ -281,7 +283,7 @@ def test_een_leiding_aankomsttijd_en_massabehoud(tmp_path):
     dt = 5.0
     s, r, res = _run(inp, _bron(R1=1.0), 1200.0, dt=dt)
     flow, vel = s._get_hydraulics()
-    t_aank = 30.0 / float(vel[0])                    # L / v
+    t_aank = 30.0 / float(vel[0])  # L / v
     j1 = s.node_index["J1"]
     t = r.time_axis("s")
     voor = res[t < t_aank - 2 * dt, j1, 0]
@@ -313,7 +315,7 @@ def test_mengpunt_stationair_is_debietgewogen_gemiddelde(tmp_path):
 # ── V4 ────────────────────────────────────────────────────────────────────────
 def _mix_run(inp, gevuld):
     s = NzingaFlowSolver(inp, n_species=1, track_mass=True, auto_reservoir_sources=False)
-    if gevuld:   # leidingen vooraf gevuld met water van concentratie 0 (zoals [QUALITY] GLOBAL)
+    if gevuld:  # leidingen vooraf gevuld met water van concentratie 0 (zoals [QUALITY] GLOBAL)
         s.set_initial_quality(np.zeros((len(s.node_index), 1)), dt=5.0)
     r = EPSRunner(s, qual_dt=5.0, hyd_dt=300.0, duration=900.0)
     r.run(decay_k=[0.0], inject_schedule=_bron(R1=1.0, R2=1.0), check_cfl=False)
@@ -344,8 +346,7 @@ def test_mengpunt_lege_leidingen_verliest_massa_bekende_beperking(tmp_path):
 # ── V5 ────────────────────────────────────────────────────────────────────────
 def test_open_afsluiter_laat_stof_door(tmp_path):
     inp = _inp(tmp_path, _NET_VALVE_OPEN)
-    s, r, res = _run(inp, _bron(R1=1.0), 3000.0,
-                     include_valves=True, skip_short_valves=False)
+    s, r, res = _run(inp, _bron(R1=1.0), 3000.0, include_valves=True, skip_short_valves=False)
     for knoop in ("J1", "J2", "J3"):
         assert res[-1, s.node_index[knoop], 0] == pytest.approx(1.0, abs=1e-9)
 
@@ -355,8 +356,7 @@ def test_gesloten_afsluiter_blokkeert_stof(tmp_path):
     hm = HydraulicModel(inp, include_valves=True)
     hm.solve()
     assert hm.get_closed_mask().any()
-    s, r, res = _run(inp, _bron(R1=1.0), 3000.0,
-                     include_valves=True, skip_short_valves=False)
+    s, r, res = _run(inp, _bron(R1=1.0), 3000.0, include_valves=True, skip_short_valves=False)
     assert res[-1, s.node_index["J1"], 0] == pytest.approx(1.0, abs=1e-9)
     assert np.all(res[:, s.node_index["J2"], 0] == 0.0)
     assert np.all(res[:, s.node_index["J3"], 0] == 0.0)

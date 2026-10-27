@@ -99,16 +99,19 @@ Gebruik — PhreeqSolutionMode (oplossingnummer-modus)
 """
 
 from __future__ import annotations
-import warnings
+
 import logging
-import numpy as np
+import warnings
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Sequence, Tuple
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
 # ── Gegevensklassen ───────────────────────────────────────────────────────────
+
 
 @dataclass
 class SpeciesMap:
@@ -138,10 +141,11 @@ class SpeciesMap:
             is_pH        =[False, True, False],
         )
     """
+
     species_names: list[str]
     phreeqc_names: list[str | None]
-    units:         list[str]
-    is_pH:         list[bool] = field(default_factory=list)
+    units: list[str]
+    is_pH: list[bool] = field(default_factory=list)
 
     def __post_init__(self):
         n = len(self.species_names)
@@ -154,21 +158,19 @@ class SpeciesMap:
             )
         if len(self.units) != n:
             raise ValueError(
-                f"units heeft {len(self.units)} elementen, "
-                f"verwacht {n} (gelijk aan species_names)"
+                f"units heeft {len(self.units)} elementen, verwacht {n} (gelijk aan species_names)"
             )
         if len(self.is_pH) != n:
             raise ValueError(
-                f"is_pH heeft {len(self.is_pH)} elementen, "
-                f"verwacht {n} (gelijk aan species_names)"
+                f"is_pH heeft {len(self.is_pH)} elementen, verwacht {n} (gelijk aan species_names)"
             )
         for pname, unit in zip(self.phreeqc_names, self.units):
-            if pname == 'Alkalinity':
+            if pname == "Alkalinity":
                 raise ValueError(
                     "phreeqc_names: gebruik 'Alk' (niet 'Alkalinity'). 'Alkalinity' is "
                     "geen element in PHREEQC; de waarde zou stil 0 worden."
                 )
-            if pname not in (None, 'Alk') and unit in ('meq/L', 'meq/l', 'ueq/L'):
+            if pname not in (None, "Alk") and unit in ("meq/L", "meq/l", "ueq/L"):
                 raise ValueError(
                     f"units='{unit}' voor '{pname}' is niet ondersteund: meq is alleen "
                     "zinvol voor de alkaliniteit ('Alk'). Gebruik mmol/L of mg/L voor "
@@ -187,8 +189,11 @@ class SpeciesMap:
         maar wel in de oplossing moet). Zonder de pH-stof bleef pH na elke
         evenwichtsstap op de oude waarde staan, en liep calciet op.
         """
-        return [i for i, n in enumerate(self.phreeqc_names)
-                if n is not None or (i < len(self.is_pH) and self.is_pH[i])]
+        return [
+            i
+            for i, n in enumerate(self.phreeqc_names)
+            if n is not None or (i < len(self.is_pH) and self.is_pH[i])
+        ]
 
     @property
     def ph_index(self) -> int | None:
@@ -207,18 +212,19 @@ class SpeciesMap:
 # carbonaatmengsel met ~0,3 eenheden). Zet ionen die je wilt, expliciet in
 # background_solution.
 DEFAULT_BACKGROUND = {
-    'temp':   15.0,    # °C
-    'pH':      7.5,
-    'pe':      4.0,
-    'units':  'mol/L',
+    "temp": 15.0,  # °C
+    "pH": 7.5,
+    "pe": 4.0,
+    "units": "mol/L",
 }
 
 
 # ── Hoofd-klasse ──────────────────────────────────────────────────────────────
 
+
 def _phreeqc_key(pname: str) -> str:
     """PHREEQC-invoersleutel voor een stofkoppeling ('Alk' → 'Alkalinity')."""
-    return 'Alkalinity' if pname == 'Alk' else pname
+    return "Alkalinity" if pname == "Alk" else pname
 
 
 # Alkaliniteitsbijdrage (equivalenten per mol) van soorten in PHREEQC-oplossingen.
@@ -226,18 +232,39 @@ def _phreeqc_key(pname: str) -> str:
 # carbonaat-ionparen en hydroxocomplexen uit phreeqc.dat / wateq4f / minteq.
 # Ontbrekende soorten in de gekozen database tellen als 0 mee. Deze lijst is alleen de
 # terugvaloptie (coëfficiënten volgens phreeqc.dat); de primaire route is PHREEQC's ALK.
-_ALK_SPECIES: Dict[str, float] = {
-    'HCO3-': 1.0, 'CO3-2': 2.0, 'OH-': 1.0, 'H+': -1.0,
-    'CaHCO3+': 1.0, 'CaCO3': 2.0, 'CaOH+': 1.0,
-    'MgHCO3+': 1.0, 'MgCO3': 2.0, 'MgOH+': 1.0,
-    'NaHCO3': 1.0, 'NaCO3-': 2.0,
-    'FeHCO3+': 1.0, 'FeCO3': 2.0, 'FeOH+': 1.0, 'Fe(OH)2': 2.0,
-    'MnHCO3+': 1.0, 'MnCO3': 2.0, 'MnOH+': 1.0, 'Mn(OH)3-': 3.0, 'Mn2OH+3': 1.0,
+_ALK_SPECIES: dict[str, float] = {
+    "HCO3-": 1.0,
+    "CO3-2": 2.0,
+    "OH-": 1.0,
+    "H+": -1.0,
+    "CaHCO3+": 1.0,
+    "CaCO3": 2.0,
+    "CaOH+": 1.0,
+    "MgHCO3+": 1.0,
+    "MgCO3": 2.0,
+    "MgOH+": 1.0,
+    "NaHCO3": 1.0,
+    "NaCO3-": 2.0,
+    "FeHCO3+": 1.0,
+    "FeCO3": 2.0,
+    "FeOH+": 1.0,
+    "Fe(OH)2": 2.0,
+    "MnHCO3+": 1.0,
+    "MnCO3": 2.0,
+    "MnOH+": 1.0,
+    "Mn(OH)3-": 3.0,
+    "Mn2OH+3": 1.0,
     # Fe(III): in phreeqc.dat heeft Fe+3 een alkaliniteit van -2, dus
     # FeOH+2 = -2 + 1 = -1, Fe(OH)2+ = 0, Fe(OH)3 = +1, Fe(OH)4- = +2.
-    'Fe+3': -2.0, 'FeOH+2': -1.0, 'Fe(OH)2+': 0.0, 'Fe(OH)3': 1.0, 'Fe(OH)4-': 2.0,
-    'Fe2(OH)2+4': -2.0, 'Fe3(OH)4+5': -2.0, 'Fe(OH)3-': 3.0,
-    'HSO4-': -1.0,
+    "Fe+3": -2.0,
+    "FeOH+2": -1.0,
+    "Fe(OH)2+": 0.0,
+    "Fe(OH)3": 1.0,
+    "Fe(OH)4-": 2.0,
+    "Fe2(OH)2+4": -2.0,
+    "Fe3(OH)4+5": -2.0,
+    "Fe(OH)3-": 3.0,
+    "HSO4-": -1.0,
 }
 
 
@@ -247,12 +274,23 @@ _ALK_SPECIES: Dict[str, float] = {
 # (circa +0,02 tot +0,04 % per stap, bij honderden stappen tientallen procenten).
 # Daarom gaat alle invoer per kg water; mg/L gaat via onze eigen molmassatabel, in
 # beide richtingen dezelfde, zodat heen en terug exact elkaars inverse zijn.
-_UNIT_TO_KGW: Dict[str, str] = {
-    'mol/L': 'mol/kgw', 'mol/l': 'mol/kgw', 'M': 'mol/kgw',
-    'mmol/L': 'mmol/kgw', 'mmol/l': 'mmol/kgw', 'mM': 'mmol/kgw',
-    'umol/L': 'umol/kgw', 'umol/l': 'umol/kgw',
-    'eq/L': 'eq/kgw', 'meq/L': 'meq/kgw', 'meq/l': 'meq/kgw', 'ueq/L': 'ueq/kgw',
-    'mg/L': 'mg/kgw', 'mg/l': 'mg/kgw', 'ug/L': 'ug/kgw', 'ug/l': 'ug/kgw',
+_UNIT_TO_KGW: dict[str, str] = {
+    "mol/L": "mol/kgw",
+    "mol/l": "mol/kgw",
+    "M": "mol/kgw",
+    "mmol/L": "mmol/kgw",
+    "mmol/l": "mmol/kgw",
+    "mM": "mmol/kgw",
+    "umol/L": "umol/kgw",
+    "umol/l": "umol/kgw",
+    "eq/L": "eq/kgw",
+    "meq/L": "meq/kgw",
+    "meq/l": "meq/kgw",
+    "ueq/L": "ueq/kgw",
+    "mg/L": "mg/kgw",
+    "mg/l": "mg/kgw",
+    "ug/L": "ug/kgw",
+    "ug/l": "ug/kgw",
 }
 
 
@@ -270,8 +308,7 @@ def _alk_batch(pp, sol_nums) -> np.ndarray:
     if not nums:
         return np.empty(0, dtype=np.float64)
     ip = pp.ip
-    lines = ["SELECTED_OUTPUT 1", "  -reset false", "  -high_precision true",
-             "  -alkalinity true"]
+    lines = ["SELECTED_OUTPUT 1", "  -reset false", "  -high_precision true", "  -alkalinity true"]
     for n in nums:
         lines += [f"USE solution {n}", "REACTION 1", "  H2O 1", "  0 mol", "END"]
     ip.run_string("\n".join(lines))
@@ -286,8 +323,7 @@ def _alk_exact(pp, sol_nums, sols) -> np.ndarray:
     try:
         return _alk_batch(pp, sol_nums)
     except Exception:
-        return np.fromiter((_sol_value(s, 'Alk') for s in sols),
-                           dtype=float, count=len(sols))
+        return np.fromiter((_sol_value(s, "Alk") for s in sols), dtype=float, count=len(sols))
 
 
 def _sol_value(sol, pname: str) -> float:
@@ -302,17 +338,19 @@ def _sol_value(sol, pname: str) -> float:
     PHREEQC alkaliniteit en drijft passief water bij elke kwaliteitsstap weg.
     Alle andere namen gaan via total_element() (mmol/L).
     """
-    if pname == 'Alk':
+    if pname == "Alk":
         try:
             sp = sol.species
-        except Exception:
-            return 0.0
+        except Exception as exc:
+            # Geen stille 0: een ontbrekende speciatie zou het water als
+            # alkaliniteitsloos laten gelden en de pH verkeerd doen bewegen.
+            raise RuntimeError(
+                f"Alkaliniteit niet te bepalen: speciatie van de oplossing "
+                f"is niet beschikbaar ({exc})"
+            ) from exc
         alk_molar = 0.0
         for name, coeff in _ALK_SPECIES.items():
-            try:
-                alk_molar += coeff * float(sp.get(name, 0.0))
-            except Exception:
-                pass
+            alk_molar += coeff * float(sp.get(name, 0.0))
         return alk_molar * 1000.0
     return float(sol.total_element(_readback_name(pname)))
 
@@ -326,7 +364,7 @@ def _readback_name(pname: str) -> str:
     zwavel met meerdere oxidatietoestanden in één mapping is alleen het totaal
     van het element terug te lezen.
     """
-    return pname.split('(')[0]
+    return pname.split("(")[0]
 
 
 class GeochemSolver:
@@ -367,33 +405,33 @@ class GeochemSolver:
 
     def __init__(
         self,
-        species_map:         SpeciesMap,
+        species_map: SpeciesMap,
         background_solution: dict | None = None,
-        kinetics_script:     str  | None = None,
-        equilibrium_phases:  dict | None = None,
-        reaction_script:     str  | None = None,
-        db_path:             str  | None = None,
-        batch_size:          int  = 500,
-        min_C_threshold:     float = 1e-9,
+        kinetics_script: str | None = None,
+        equilibrium_phases: dict | None = None,
+        reaction_script: str | None = None,
+        db_path: str | None = None,
+        batch_size: int = 500,
+        min_C_threshold: float = 1e-9,
     ):
-        self.smap               = species_map
-        self.background         = {**DEFAULT_BACKGROUND, **(background_solution or {})}
+        self.smap = species_map
+        self.background = {**DEFAULT_BACKGROUND, **(background_solution or {})}
         # Alles per kg water (zie _UNIT_TO_KGW): ook de achtergrondeenheid.
-        _bg_units = self.background.get('units', 'mol/L')
-        self.background['units'] = _UNIT_TO_KGW.get(_bg_units, _bg_units)
-        self.kinetics_script    = kinetics_script
+        _bg_units = self.background.get("units", "mol/L")
+        self.background["units"] = _UNIT_TO_KGW.get(_bg_units, _bg_units)
+        self.kinetics_script = kinetics_script
         self.equilibrium_phases = equilibrium_phases or {}
-        self.reaction_script    = reaction_script
-        self.batch_size         = batch_size
-        self.min_C_threshold    = min_C_threshold
+        self.reaction_script = reaction_script
+        self.batch_size = batch_size
+        self.min_C_threshold = min_C_threshold
 
-        self._pp           = None   # PhreeqPython instantie (lazy init)
-        self._db_path      = db_path
-        self._step         = 0
+        self._pp = None  # PhreeqPython instantie (lazy init)
+        self._db_path = db_path
+        self._step = 0
         # Precompileerde hulpstructuren — ingevuld door _init_pp()
-        self._unit_factors: np.ndarray | None = None   # (n_species,) conversiefactoren
-        self._is_ph_mask:   np.ndarray | None = None   # (n_species,) bool
-        self._bg_block:     str        | None = None   # gecachte achtergrond-SOLUTION-regels
+        self._unit_factors: np.ndarray | None = None  # (n_species,) conversiefactoren
+        self._is_ph_mask: np.ndarray | None = None  # (n_species,) bool
+        self._bg_block: str | None = None  # gecachte achtergrond-SOLUTION-regels
 
     # ── Initialisatie ─────────────────────────────────────────────────────────
 
@@ -415,8 +453,7 @@ class GeochemSolver:
             from phreeqpython import PhreeqPython
         except ImportError:
             raise ImportError(
-                "PhreeqPython is niet geïnstalleerd. Installeer via:\n"
-                "    pip install phreeqpython"
+                "PhreeqPython is niet geïnstalleerd. Installeer via:\n    pip install phreeqpython"
             )
         if self._db_path:
             self._pp = PhreeqPython(database=self._db_path)
@@ -437,9 +474,9 @@ class GeochemSolver:
     def apply_geochemistry(
         self,
         store,
-        dt:         float,
-        pipe_diam:  np.ndarray | None = None,   # (n_pipes,) [m] voor wandreacties
-        pipe_vel:   np.ndarray | None = None,   # (n_pipes,) [m/s]
+        dt: float,
+        pipe_diam: np.ndarray | None = None,  # (n_pipes,) [m] voor wandreacties
+        pipe_vel: np.ndarray | None = None,  # (n_pipes,) [m/s]
     ) -> None:
         """
         Voer geochemische reacties uit voor alle actieve segmenten (in-place).
@@ -464,30 +501,30 @@ class GeochemSolver:
         if n == 0:
             return
 
-        C   = store.C[:n]       # (n, n_species) view
+        C = store.C[:n]  # (n, n_species) view
         act = self.smap.active_indices
         if not act:
             return
 
         # Bepaal welke segmenten actief zijn (niet bijna leeg)
         active_mask = np.any(C[:, act] > self.min_C_threshold, axis=1)
-        active_idx  = np.where(active_mask)[0]
+        active_idx = np.where(active_mask)[0]
 
         if len(active_idx) == 0:
             return
 
         # Verwerk in batches
         for batch_start in range(0, len(active_idx), self.batch_size):
-            batch = active_idx[batch_start: batch_start + self.batch_size]
+            batch = active_idx[batch_start : batch_start + self.batch_size]
             self._process_batch(C, batch, store.pipe[:n], dt, pipe_diam, pipe_vel)
 
         self._step += 1
 
     def apply_mixing(
         self,
-        node_C:    np.ndarray,   # (node_count, n_species) — in-place bijgewerkt
-        node_flow: np.ndarray,   # (node_count,) debiet gewicht
-        dt:        float,
+        node_C: np.ndarray,  # (node_count, n_species) — in-place bijgewerkt
+        node_flow: np.ndarray,  # (node_count,) debiet gewicht
+        dt: float,
     ) -> None:
         """
         Pas geochemisch evenwicht toe op knoopconcentraties na menging.
@@ -514,11 +551,11 @@ class GeochemSolver:
             try:
                 sol = self._make_solution(node_C[ni])
             except Exception:
-                self._record_failure(int(ni))   # knoop blijft ongewijzigd
+                self._record_failure(int(ni))  # knoop blijft ongewijzigd
                 continue
             sol_eq = self._run_equilibrium(sol, dt)
             node_C[ni] = self._read_back(node_C[ni], sol_eq)
-            sol.forget()          # geheugen vrijgeven (phreeqpython: forget)
+            sol.forget()  # geheugen vrijgeven (phreeqpython: forget)
             if sol_eq is not sol:
                 sol_eq.forget()
 
@@ -534,14 +571,14 @@ class GeochemSolver:
         dict geschikt als background_solution-argument voor GeochemSolver
         """
         sol_dict = dict(self.background)
-        for i, (pname, unit, is_ph) in enumerate(zip(
-            self.smap.phreeqc_names, self.smap.units, self.smap.is_pH
-        )):
+        for i, (pname, unit, is_ph) in enumerate(
+            zip(self.smap.phreeqc_names, self.smap.units, self.smap.is_pH)
+        ):
             if pname is None:
                 continue
             val = float(C_vector[i])
             if is_ph:
-                sol_dict['pH'] = val
+                sol_dict["pH"] = val
             else:
                 sol_dict[_phreeqc_key(pname)] = self._kgw_input(pname, val, unit)
         return sol_dict
@@ -551,31 +588,51 @@ class GeochemSolver:
     # Geprecompileerde unit-conversiefactoren (mmol/L → doeleenheid).
     # total_element() geeft altijd mmol/L terug (ongeacht de invoer-eenheid).
     # Berekend één keer per SpeciesMap; vermijdt branch per element per tijdstap.
-    _UNIT_FACTORS: Dict[str, float] = {
-        'mol/L':   1e-3,   # mmol/L → mol/L
-        'mol/l':   1e-3,
-        'M':       1e-3,
-        'mmol/L':  1.0,    # al in mmol/L
-        'mmol/l':  1.0,
-        'mM':      1.0,
-        'meq/L':   1.0,    # benadering: 1 mmol ≈ 1 meq voor eenwaardige ionen
-        'meq/l':   1.0,
-        'mg/L':    None,   # element-specifiek; afgehandeld via molmassa
-        'mg/l':    None,
+    _UNIT_FACTORS: dict[str, float] = {
+        "mol/L": 1e-3,  # mmol/L → mol/L
+        "mol/l": 1e-3,
+        "M": 1e-3,
+        "mmol/L": 1.0,  # al in mmol/L
+        "mmol/l": 1.0,
+        "mM": 1.0,
+        "meq/L": 1.0,  # benadering: 1 mmol ≈ 1 meq voor eenwaardige ionen
+        "meq/l": 1.0,
+        "mg/L": None,  # element-specifiek; afgehandeld via molmassa
+        "mg/l": None,
     }
 
     # Molmassa's [g/mol] voor veelgebruikte elementen (mg/L-conversie).
-    _MOLAR_MASS: Dict[str, float] = {
-        'Cl':   35.45,   'Ca':  40.08,   'Mg':  24.31,   'Na':  22.99,
-        'K':    39.10,   'Fe':  55.85,   'Mn':  54.94,   'Al':  26.98,
-        'S(6)': 32.06,   'P':   30.97,   'N(5)': 14.01,  'N(3)': 14.01,
-        'N(-3)':14.01,   'C(4)': 12.01,  'Si':  28.09,   'B':   10.81,
-        'Alk':  61.02,   'Ba':  137.33,  'Sr':  87.62,   'Li':  6.94,
-        'Zn':  65.38,    'Cu':  63.55,   'Pb':  207.2,   'As':  74.92,
-        'Cr':  52.00,    'Ni':  58.69,   'Cd':  112.41,
+    _MOLAR_MASS: dict[str, float] = {
+        "Cl": 35.45,
+        "Ca": 40.08,
+        "Mg": 24.31,
+        "Na": 22.99,
+        "K": 39.10,
+        "Fe": 55.85,
+        "Mn": 54.94,
+        "Al": 26.98,
+        "S(6)": 32.06,
+        "P": 30.97,
+        "N(5)": 14.01,
+        "N(3)": 14.01,
+        "N(-3)": 14.01,
+        "C(4)": 12.01,
+        "Si": 28.09,
+        "B": 10.81,
+        "Alk": 61.02,
+        "Ba": 137.33,
+        "Sr": 87.62,
+        "Li": 6.94,
+        "Zn": 65.38,
+        "Cu": 63.55,
+        "Pb": 207.2,
+        "As": 74.92,
+        "Cr": 52.00,
+        "Ni": 58.69,
+        "Cd": 112.41,
     }
 
-    def _kgw_input(self, pname: str, val: float, unit: str) -> Tuple[float, str]:
+    def _kgw_input(self, pname: str, val: float, unit: str) -> tuple[float, str]:
         """(waarde, eenheid) voor PHREEQC-invoer, per kg water.
 
         mg/L wordt met onze molmassatabel naar mmol/kgw omgerekend: het
@@ -583,11 +640,11 @@ class GeochemSolver:
         terug zijn exact elkaars inverse. Andere eenheden krijgen de kgw-variant.
         Onbekende eenheden gaan ongewijzigd door.
         """
-        if unit in ('mg/L', 'mg/l'):
-            return val / self._MOLAR_MASS.get(pname, 1.0), 'mmol/kgw'
+        if unit in ("mg/L", "mg/l"):
+            return val / self._MOLAR_MASS.get(pname, 1.0), "mmol/kgw"
         return val, _UNIT_TO_KGW.get(unit, unit)
 
-    def _build_unit_factors(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _build_unit_factors(self) -> tuple[np.ndarray, np.ndarray]:
         """
         Bouw conversiefactoren en pH-masker één keer bij initialisatie.
 
@@ -596,18 +653,16 @@ class GeochemSolver:
         factors : (n_species,) float64 — vermenigvuldig mol/L met factor → doel-eenheid
         is_ph   : (n_species,) bool    — True voor pH-stoffen
         """
-        n   = self.smap.n_species
+        n = self.smap.n_species
         fac = np.ones(n, dtype=np.float64)
         iph = np.array(self.smap.is_pH, dtype=bool)
 
-        for i, (pname, unit) in enumerate(
-            zip(self.smap.phreeqc_names, self.smap.units)
-        ):
+        for i, (pname, unit) in enumerate(zip(self.smap.phreeqc_names, self.smap.units)):
             if pname is None or iph[i]:
                 continue
-            if unit in ('mg/L', 'mg/l'):
+            if unit in ("mg/L", "mg/l"):
                 mm = self._MOLAR_MASS.get(pname, 1.0)
-                fac[i] = mm             # mmol/L → mg/L  (mm g/mol * 1 mmol/L = mm mg/L)
+                fac[i] = mm  # mmol/L → mg/L  (mm g/mol * 1 mmol/L = mm mg/L)
             else:
                 base = self._UNIT_FACTORS.get(unit, 1e3)
                 fac[i] = base if base is not None else 1.0
@@ -623,23 +678,23 @@ class GeochemSolver:
         bg = self.background
         lines = []
         lines.append(f"  temp {bg.get('temp', bg.get('temperature', 25))}")
-        if 'units' in bg:
+        if "units" in bg:
             lines.append(f"  units {_UNIT_TO_KGW.get(bg['units'], bg['units'])}")
         else:
             lines.append("  units mol/kgw")
         # pH als aparte regel (PHREEQC-notatie). Staat de pH al als stof in de
         # stofkoppeling, dan komt de pH per segment uit de concentratievector;
         # een achtergrond-pH ervoor wint anders in PHREEQC (eerste pH-regel).
-        if 'pH' in bg and not any(self.smap.is_pH):
+        if "pH" in bg and not any(self.smap.is_pH):
             lines.append(f"  pH {bg['pH']}")
         # Overige elementen
-        skip = {'temp', 'temperature', 'units', 'pH', 'pe'}
+        skip = {"temp", "temperature", "units", "pH", "pe"}
         # Sleutels die de stofkoppeling per segment zet, niet uit de achtergrond:
         # anders staan er twee waarden voor dezelfde stof in één oplossing
         # (achtergrond 'Alkalinity' + 'Alk' per segment → te veel alkaliniteit).
         own = {p for p in self.smap.phreeqc_names if p}
-        if 'Alk' in own:
-            own.add('Alkalinity')
+        if "Alk" in own:
+            own.add("Alkalinity")
         skip |= own
         for key, val in bg.items():
             if key in skip:
@@ -649,9 +704,9 @@ class GeochemSolver:
 
     def _build_bulk_input(
         self,
-        C:         np.ndarray,   # (n, n_species) view
-        batch_idx: np.ndarray,   # indices in C
-        base_num:  int,          # eerste op te nemen SOLUTION-nummer
+        C: np.ndarray,  # (n, n_species) view
+        batch_idx: np.ndarray,  # indices in C
+        base_num: int,  # eerste op te nemen SOLUTION-nummer
     ) -> str:
         """
         Bouw één grote PHREEQC-invoerstring voor alle segmenten in batch_idx.
@@ -662,13 +717,13 @@ class GeochemSolver:
         Elke oplossing begint vanuit de achtergrondsamenstelling en overschrijft
         de gesimuleerde concentraties.  pH wordt als aparte regel ingeplakt.
         """
-        bg_lines  = self._bg_block          # gecached bij __init__
-        act       = self.smap.active_indices
-        pnames    = self.smap.phreeqc_names
+        bg_lines = self._bg_block  # gecached bij __init__
+        act = self.smap.active_indices
+        pnames = self.smap.phreeqc_names
         units_lst = self.smap.units
-        is_ph     = self.smap.is_pH
+        is_ph = self.smap.is_pH
 
-        parts: List[str] = []
+        parts: list[str] = []
         for j, i in enumerate(batch_idx):
             num = base_num + j
             lines = [f"SOLUTION {num}", bg_lines]
@@ -676,7 +731,7 @@ class GeochemSolver:
             # Overschrijf geactiveerde elementen met simulatiewaarden
             for s_idx in act:
                 pname = pnames[s_idx]
-                val   = float(C[i, s_idx])
+                val = float(C[i, s_idx])
                 if val < 0.0:
                     val = 0.0
                 if is_ph[s_idx]:
@@ -698,7 +753,7 @@ class GeochemSolver:
 
     def _record_failure(self, i: int) -> None:
         """Telt een oplossing die PHREEQC niet kon verwerken; waarschuwt één keer."""
-        self._n_failed = getattr(self, '_n_failed', 0) + 1
+        self._n_failed = getattr(self, "_n_failed", 0) + 1
         if self._n_failed == 1:
             warnings.warn(
                 f"PHREEQC kon {'een oplossing' if i < 0 else f'segment {i}'} niet verwerken; "
@@ -709,12 +764,12 @@ class GeochemSolver:
 
     def _process_batch(
         self,
-        C:         np.ndarray,        # (n, n_species) view — wordt in-place bijgewerkt
-        batch_idx: np.ndarray,        # indices in C te verwerken
-        pipes:     np.ndarray,        # (n,) pipe-indices
-        dt:        float,
+        C: np.ndarray,  # (n, n_species) view — wordt in-place bijgewerkt
+        batch_idx: np.ndarray,  # indices in C te verwerken
+        pipes: np.ndarray,  # (n,) pipe-indices
+        dt: float,
         pipe_diam: np.ndarray | None,
-        pipe_vel:  np.ndarray | None,
+        pipe_vel: np.ndarray | None,
     ) -> None:
         """
         Verwerk één batch segmenten via PHREEQC — bulk aanmaak, bulk read-back.
@@ -724,13 +779,13 @@ class GeochemSolver:
         aangemaakt. Oplossingen die nog steeds falen blijven ongewijzigd en
         worden geteld; de run gaat door.
         """
-        pp         = self._pp
-        n_batch    = len(batch_idx)
-        base_num   = pp.solution_counter + 1
+        pp = self._pp
+        n_batch = len(batch_idx)
+        base_num = pp.solution_counter + 1
 
         # ── 1. Aanmaak: bulk, met terugval per oplossing ───────────────────
-        sol_nums: List[int] = []
-        ok_pos:   List[int] = []   # posities in batch_idx die bruikbaar zijn
+        sol_nums: list[int] = []
+        ok_pos: list[int] = []  # posities in batch_idx die bruikbaar zijn
         try:
             bulk_input = self._build_bulk_input(C, batch_idx, base_num)
             pp.solution_counter += n_batch
@@ -754,33 +809,32 @@ class GeochemSolver:
         batch_size = len(batch_ok)
 
         # ── 2. Reacties per oplossing (onvermijdelijk, PHREEQC-beperking) ──
-        result_nums: List[int] = []
+        result_nums: list[int] = []
         for i, num in zip(batch_ok, sol_nums):
             sol = pp.get_solution(num)
-            p   = int(pipes[i])
+            p = int(pipes[i])
             diam = float(pipe_diam[p]) if pipe_diam is not None else None
-            vel  = float(pipe_vel[p])  if pipe_vel  is not None else None
+            vel = float(pipe_vel[p]) if pipe_vel is not None else None
             sol_out = self._run_reactions(sol, dt, diam, vel)
             result_nums.append(sol_out.number)
 
         # ── 3. Read-back: vectorized per element ───────────────────────────
         result_sols = [pp.get_solution(n) for n in result_nums]
-        fac  = self._unit_factors   # (n_species,) precompiled
-        iph  = self._is_ph_mask     # (n_species,) bool
+        fac = self._unit_factors  # (n_species,) precompiled
+        iph = self._is_ph_mask  # (n_species,) bool
 
         for s_idx in self.smap.active_indices:
             pname = self.smap.phreeqc_names[s_idx]
             if iph[s_idx]:
-                vals = np.fromiter(
-                    (s.pH for s in result_sols), dtype=float, count=batch_size
-                )
+                vals = np.fromiter((s.pH for s in result_sols), dtype=float, count=batch_size)
             else:
-                if pname == 'Alk':
+                if pname == "Alk":
                     vals = _alk_exact(self._pp, result_nums, result_sols)
                 else:
                     vals = np.fromiter(
                         (_sol_value(s, pname) for s in result_sols),
-                        dtype=float, count=batch_size,
+                        dtype=float,
+                        count=batch_size,
                     )
                 # total_element() geeft mmol/kgw; converteer naar doel-eenheid
                 vals = vals * fac[s_idx]
@@ -799,20 +853,20 @@ class GeochemSolver:
         langelier_index().  Voor bulk-verwerking gebruikt _process_batch()
         de snellere _build_bulk_input()-methode.
         """
-        pp       = self._pp
+        pp = self._pp
         bg_lines = self._bg_block
-        act      = self.smap.active_indices
-        pnames   = self.smap.phreeqc_names
-        units_lst= self.smap.units
-        is_ph    = self.smap.is_pH
+        act = self.smap.active_indices
+        pnames = self.smap.phreeqc_names
+        units_lst = self.smap.units
+        is_ph = self.smap.is_pH
 
         pp.solution_counter += 1
-        num   = pp.solution_counter
+        num = pp.solution_counter
         lines = [f"SOLUTION {num}", bg_lines]
 
         for s_idx in act:
             pname = pnames[s_idx]
-            val   = float(C_vec[s_idx])
+            val = float(C_vec[s_idx])
             if val < 0.0:
                 val = 0.0
             if is_ph[s_idx]:
@@ -887,15 +941,15 @@ class GeochemSolver:
         Een literal accolade in het blok moet worden verdubbeld.
         """
         values = {
-            pname: _sol_value(sol, pname) * 1e-3     # mmol/L → mol/L
+            pname: _sol_value(sol, pname) * 1e-3  # mmol/L → mol/L
             for pname in self.smap.phreeqc_names
-            if pname is not None and pname != 'Alk'
+            if pname is not None and pname != "Alk"
         }
         values.update(dt_s=float(dt), dt_d=float(dt) / 86400.0)
         block = self.kinetics_script.format(**values)
         # Zonder een SAVE-regel in het RATES-blok hangt PHREEQC (gemeten). Fout vóór de
         # run, niet als stille hang.
-        if 'RATES' in block and 'SAVE' not in block:
+        if "RATES" in block and "SAVE" not in block:
             raise ValueError(
                 "kinetics_script: het RATES-blok moet eindigen met een SAVE-regel, "
                 "bijv. '20 SAVE rate * TIME'. Zonder die regel hangt PHREEQC."
@@ -923,8 +977,7 @@ class GeochemSolver:
                 target = float(si_target)
                 si = sol.si(phase)
                 if si < target - 1e-9:
-                    sol.saturate(phase, to_si=target,
-                                 in_phase=float(amount) if amount else 10)
+                    sol.saturate(phase, to_si=target, in_phase=float(amount) if amount else 10)
                 elif si > target + 1e-9:
                     sol.desaturate(phase, to_si=target)
             return sol
@@ -945,7 +998,7 @@ class GeochemSolver:
         """
         try:
             script = self.reaction_script.format(dt=dt / 86400.0, dt_s=dt)
-            return self._run_phreeqc_block(sol, script, kinetics='KINETICS 1' in script)
+            return self._run_phreeqc_block(sol, script, kinetics="KINETICS 1" in script)
         except Exception as e:
             warnings.warn(
                 f"PHREEQC script mislukt: {e}. Segment ongewijzigd.",
@@ -961,8 +1014,8 @@ class GeochemSolver:
         geoptimaliseerde vectorized read-back via np.fromiter().
         """
         C_out = C_vec.copy()
-        fac   = self._unit_factors
-        iph   = self._is_ph_mask
+        fac = self._unit_factors
+        iph = self._is_ph_mask
 
         for s_idx in self.smap.active_indices:
             pname = self.smap.phreeqc_names[s_idx]
@@ -970,8 +1023,11 @@ class GeochemSolver:
                 if iph[s_idx]:
                     C_out[s_idx] = sol.pH
                 else:
-                    raw = (_alk_exact(self._pp, [sol.number], [sol])[0] if pname == 'Alk'
-                           else _sol_value(sol, pname))   # mmol/kgw-equivalent
+                    raw = (
+                        _alk_exact(self._pp, [sol.number], [sol])[0]
+                        if pname == "Alk"
+                        else _sol_value(sol, pname)
+                    )  # mmol/kgw-equivalent
                     C_out[s_idx] = max(0.0, raw * fac[s_idx])
             except Exception:
                 # oorspronkelijke waarde blijft; wel geteld en (eenmalig) gemeld
@@ -988,11 +1044,11 @@ class GeochemSolver:
                 self._pp.ip.CleanupSimulation()
             except Exception:
                 pass
-        self._pp          = None
-        self._step        = 0
+        self._pp = None
+        self._step = 0
         self._unit_factors = None
-        self._is_ph_mask   = None
-        self._bg_block     = None
+        self._is_ph_mask = None
+        self._bg_block = None
 
     def background_solution(self) -> object:
         """Geeft een PhreeqPython-oplossing van de achtergrondsamenstelling."""
@@ -1013,9 +1069,9 @@ class GeochemSolver:
         self._init_pp()
         sol = self._make_solution(C_vec)
         try:
-            lsi = sol.si('Calcite')
+            lsi = sol.si("Calcite")
         except Exception:
-            lsi = float('nan')
+            lsi = float("nan")
         sol.forget()
         return lsi
 
@@ -1029,20 +1085,32 @@ class GeochemSolver:
         """
         self._init_pp()
         sol = self._make_solution(C_vec)
-        minerals = ['Calcite', 'Aragonite', 'Dolomite', 'Gypsum',
-                    'Goethite', 'Fe(OH)3(a)', 'Siderite', 'Vivianite']
+        minerals = [
+            "Calcite",
+            "Aragonite",
+            "Dolomite",
+            "Gypsum",
+            "Goethite",
+            "Fe(OH)3(a)",
+            "Siderite",
+            "Vivianite",
+        ]
         result = {}
         for m in minerals:
             try:
                 result[m] = sol.si(m)
-            except Exception:
-                pass
+            except Exception as exc:
+                # NaN in plaats van weglaten: de sleutel blijft aanwezig en de
+                # ontbrekende waarde is zichtbaar, zonder de hele berekening te
+                # laten falen.
+                logger.warning("Verzadigingsindex voor %s niet te berekenen: %s", m, exc)
+                result[m] = float("nan")
         sol.forget()
         return result
 
     def __repr__(self) -> str:
-        kinetics = 'ja' if self.kinetics_script else 'nee'
-        eq       = list(self.equilibrium_phases.keys()) if self.equilibrium_phases else []
+        kinetics = "ja" if self.kinetics_script else "nee"
+        eq = list(self.equilibrium_phases.keys()) if self.equilibrium_phases else []
         return (
             f"<GeochemSolver species={self.smap.species_names} "
             f"kinetics={kinetics} eq_phases={eq} stap={self._step}>"
@@ -1050,6 +1118,7 @@ class GeochemSolver:
 
 
 # ── Victoria-compatibele modus ────────────────────────────────────────────────
+
 
 class PhreeqSolutionMode:
     """
@@ -1125,13 +1194,13 @@ class PhreeqSolutionMode:
     def __init__(
         self,
         pp,
-        auto_gc_interval: int      = 100,
+        auto_gc_interval: int = 100,
         background_number: int | None = None,
     ):
-        self.pp                 = pp
-        self.auto_gc_interval   = auto_gc_interval
-        self.background_number  = background_number
-        self._step              = 0
+        self.pp = pp
+        self.auto_gc_interval = auto_gc_interval
+        self.background_number = background_number
+        self._step = 0
         # sol_ids: parallel aan SegmentStore; ingevuld door fill() of bij add
         self.sol_ids: np.ndarray | None = None
         self._capacity: int = 0
@@ -1152,12 +1221,12 @@ class PhreeqSolutionMode:
             PHREEQC-oplossingnummer van de bronoplossing.
         """
         self._ensure_capacity(store.n)
-        n  = store.n
+        n = store.n
         pp = self.pp
 
         # Maak n kopieën in één bulk run_string
         base_num = pp.solution_counter + 1
-        lines    = []
+        lines = []
         for j in range(n):
             num = base_num + j
             lines.append(f"COPY SOLUTION {solution_number} {num}")
@@ -1174,8 +1243,8 @@ class PhreeqSolutionMode:
         new_cap = max(needed, self._capacity * 2, 1000)
         new_arr = np.zeros(new_cap, dtype=np.int32)
         if self.sol_ids is not None and self._capacity > 0:
-            new_arr[:self._capacity] = self.sol_ids[:self._capacity]
-        self.sol_ids  = new_arr
+            new_arr[: self._capacity] = self.sol_ids[: self._capacity]
+        self.sol_ids = new_arr
         self._capacity = new_cap
 
     # ── Synchronisatie met SegmentStore-mutaties ──────────────────────────────
@@ -1255,10 +1324,10 @@ class PhreeqSolutionMode:
     def apply_geochemistry(
         self,
         store,
-        dt:        float,
+        dt: float,
         kinetics_fn: Callable | None = None,
         pipe_diam: np.ndarray | None = None,
-        pipe_vel:  np.ndarray | None = None,
+        pipe_vel: np.ndarray | None = None,
     ) -> None:
         """
         Voer reacties uit voor alle actieve segmenten.
@@ -1277,16 +1346,16 @@ class PhreeqSolutionMode:
             Optioneel; worden doorgegeven aan kinetics_fn als extra context.
         """
         if kinetics_fn is None:
-            return   # geen reacties gedefinieerd
+            return  # geen reacties gedefinieerd
 
         self._ensure_capacity(store.n)
-        pp  = self.pp
-        n   = store.n
+        pp = self.pp
+        n = store.n
         ids = self.sol_ids
 
         for i in range(n):
             old_num = int(ids[i])
-            sol     = pp.get_solution(old_num)
+            sol = pp.get_solution(old_num)
             sol_out = kinetics_fn(sol, dt)
             if sol_out.number != old_num:
                 # Nieuwe oplossing aangemaakt door kinetics_fn
@@ -1299,10 +1368,10 @@ class PhreeqSolutionMode:
 
     def apply_mixing(
         self,
-        node_C:       np.ndarray,   # (node_count, n_species) — NIET gebruikt
-        node_flow:    np.ndarray,   # (node_count,) debietgewichten
-        dt:           float,
-        node_inflows: List[List[Tuple[int, float]]] | None = None,
+        node_C: np.ndarray,  # (node_count, n_species) — NIET gebruikt
+        node_flow: np.ndarray,  # (node_count,) debietgewichten
+        dt: float,
+        node_inflows: list[list[tuple[int, float]]] | None = None,
     ) -> None:
         """
         Knoopmenging via pp.mix_solutions() — thermodynamisch exact.
@@ -1329,7 +1398,7 @@ class PhreeqSolutionMode:
             return
 
         pp = self.pp
-        self._node_solutions: Dict[int, int] = {}
+        self._node_solutions: dict[int, int] = {}
 
         for ni, inflow_list in enumerate(node_inflows):
             if not inflow_list or node_flow[ni] <= 0:
@@ -1353,9 +1422,7 @@ class PhreeqSolutionMode:
                 src_sol = next(iter(mix_dict))
                 pp.solution_counter += 1
                 num = pp.solution_counter
-                pp.ip.run_string(
-                    f"COPY SOLUTION {src_sol.number} {num}\nEND"
-                )
+                pp.ip.run_string(f"COPY SOLUTION {src_sol.number} {num}\nEND")
                 self._node_solutions[ni] = num
             else:
                 mixed = pp.mix_solutions(mix_dict)
@@ -1369,7 +1436,7 @@ class PhreeqSolutionMode:
         Gebruik in de solver om sol_ids bij te werken wanneer een nieuw
         segment wordt aangemaakt bij een knoop.
         """
-        node_sols = getattr(self, '_node_solutions', {})
+        node_sols = getattr(self, "_node_solutions", {})
         if node_idx in node_sols:
             return node_sols[node_idx]
         if self.background_number is not None:
@@ -1402,7 +1469,7 @@ class PhreeqSolutionMode:
         self,
         store,
         element: str,
-        units:   str = 'mg/L',
+        units: str = "mg/L",
     ) -> np.ndarray:
         """
         Geef concentraties voor alle actieve segmenten als NumPy-array.
@@ -1419,38 +1486,39 @@ class PhreeqSolutionMode:
         -------
         np.ndarray shape (n,)
         """
-        n   = store.n
-        pp  = self.pp
+        n = store.n
+        pp = self.pp
         ids = self.sol_ids[:n]
         sols = [pp.get_solution(int(num)) for num in ids]
 
-        if units == 'pH':
+        if units == "pH":
             return np.fromiter((s.pH for s in sols), dtype=float, count=n)
 
         # Bepaal conversiefactor mmol/L → gewenste eenheid
         # total_element() geeft altijd mmol/L terug
-        if units in ('mg/L', 'mg/l'):
-            mm  = GeochemSolver._MOLAR_MASS.get(element, 1.0)
-            fac = mm          # mmol/L * mm(g/mol) = mg/L
-        elif units in ('mol/L', 'mol/l', 'M'):
-            fac = 1e-3        # mmol/L → mol/L
+        if units in ("mg/L", "mg/l"):
+            mm = GeochemSolver._MOLAR_MASS.get(element, 1.0)
+            fac = mm  # mmol/L * mm(g/mol) = mg/L
+        elif units in ("mol/L", "mol/l", "M"):
+            fac = 1e-3  # mmol/L → mol/L
         else:
-            fac = 1.0         # al mmol/L
+            fac = 1.0  # al mmol/L
 
-        if element == 'Alk':
+        if element == "Alk":
             raw = _alk_exact(pp, [int(x) for x in ids], sols)
         else:
             raw = np.fromiter(
                 (_sol_value(s, element) for s in sols),
-                dtype=float, count=n,
+                dtype=float,
+                count=n,
             )
         return np.clip(raw * fac, 0.0, None)
 
     def get_ph(self, store) -> np.ndarray:
         """Geef pH voor alle actieve segmenten als NumPy-array."""
-        return self.get_conc(store, '', units='pH')
+        return self.get_conc(store, "", units="pH")
 
-    def get_properties(self, store) -> Dict[str, np.ndarray]:
+    def get_properties(self, store) -> dict[str, np.ndarray]:
         """
         Geef waterchemische eigenschappen voor alle actieve segmenten.
 
@@ -1459,14 +1527,14 @@ class PhreeqSolutionMode:
         dict met sleutels 'pH', 'sc' (spec. geleidbaarheid μS/cm),
         'temperature' (°C).
         """
-        n    = store.n
-        pp   = self.pp
-        ids  = self.sol_ids[:n]
+        n = store.n
+        pp = self.pp
+        ids = self.sol_ids[:n]
         sols = [pp.get_solution(int(num)) for num in ids]
         return {
-            'pH':          np.fromiter((s.pH          for s in sols), dtype=float, count=n),
-            'sc':          np.fromiter((s.sc           for s in sols), dtype=float, count=n),
-            'temperature': np.fromiter((s.temperature  for s in sols), dtype=float, count=n),
+            "pH": np.fromiter((s.pH for s in sols), dtype=float, count=n),
+            "sc": np.fromiter((s.sc for s in sols), dtype=float, count=n),
+            "temperature": np.fromiter((s.temperature for s in sols), dtype=float, count=n),
         }
 
     # ── Geheugenbeheer ────────────────────────────────────────────────────────
@@ -1492,19 +1560,19 @@ class PhreeqSolutionMode:
             Aantal verwijderde oplossingen.
         """
         pp = self.pp
-        n  = store.n
+        n = store.n
 
         # Actieve nummers: segmenten + node_solutions + keep-lijst
         active: set[int] = set(int(x) for x in self.sol_ids[:n] if x > 0)
-        if hasattr(self, '_node_solutions'):
+        if hasattr(self, "_node_solutions"):
             active.update(self._node_solutions.values())
         if keep:
             active.update(keep)
         if self.background_number is not None:
             active.add(self.background_number)
 
-        all_sols    = set(pp.get_solution_list())
-        to_remove   = list(all_sols - active)
+        all_sols = set(pp.get_solution_list())
+        to_remove = list(all_sols - active)
         if to_remove:
             pp.remove_solutions(to_remove)
             logger.debug("PhreeqSolutionMode GC: %d oplossingen verwijderd", len(to_remove))
@@ -1540,10 +1608,11 @@ class PhreeqSolutionMode:
 
 # ── Voorgeconfigureerde recepten ──────────────────────────────────────────────
 
+
 def chlorine_decay_geochem(
     k_bulk_per_day: float = 0.5,
-    k_wall_ms:      float = 0.0,
-    background:     dict | None = None,
+    k_wall_ms: float = 0.0,
+    background: dict | None = None,
 ) -> GeochemSolver:
     """
     Kant-en-klare GeochemSolver voor chloor-verval met pH-afhankelijkheid.
@@ -1575,10 +1644,10 @@ def chlorine_decay_geochem(
         solver.inject("R1", C_vector=[1.0, 7.5], volume=0.05)
     """
     smap = SpeciesMap(
-        species_names=['Cl2_total', 'pH'],
-        phreeqc_names=['Cl',        None],   # pH wordt via sol.pH gelezen, niet via sol.total()
-        units        =['mg/L',      ''],
-        is_pH        =[False,       True],
+        species_names=["Cl2_total", "pH"],
+        phreeqc_names=["Cl", None],  # pH wordt via sol.pH gelezen, niet via sol.total()
+        units=["mg/L", ""],
+        is_pH=[False, True],
     )
 
     # RATE in mol/s per kg water: k [1/s] · C [mol/kgw]. Het kinetische reactant
@@ -1634,13 +1703,13 @@ def full_water_chemistry(
     GeochemSolver geconfigureerd voor volledige waterchemie
     """
     if equilibrium_minerals is None:
-        equilibrium_minerals = ['Calcite']
+        equilibrium_minerals = ["Calcite"]
 
     smap = SpeciesMap(
-        species_names=['Cl2',  'pH',   'Alk',   'Ca',   'Fe',   'Mn'],
-        phreeqc_names=['Cl',    None,  'Alk',   'Ca',   'Fe',   'Mn'],
-        units        =['mg/L',  '',   'meq/L', 'mg/L', 'mg/L', 'mg/L'],
-        is_pH        =[False,   True,   False,   False,  False,  False],
+        species_names=["Cl2", "pH", "Alk", "Ca", "Fe", "Mn"],
+        phreeqc_names=["Cl", None, "Alk", "Ca", "Fe", "Mn"],
+        units=["mg/L", "", "meq/L", "mg/L", "mg/L", "mg/L"],
+        is_pH=[False, True, False, False, False, False],
     )
 
     eq_phases = {m: (0.0, 0.0) for m in equilibrium_minerals}
@@ -1654,7 +1723,7 @@ def full_water_chemistry(
 
 # ── pH uit alkaliniteit en koolstof (PHREEQC, één run per batch) ─────────────
 
-_PH_PP = None   # gedeelde PhreeqPython-instantie voor ph_from_alk_ct()
+_PH_PP = None  # gedeelde PhreeqPython-instantie voor ph_from_alk_ct()
 
 
 def _ph_pp():
@@ -1662,6 +1731,7 @@ def _ph_pp():
     global _PH_PP
     if _PH_PP is None:
         from phreeqpython import PhreeqPython
+
         _PH_PP = PhreeqPython()
         if _PH_PP.solution_counter < 0:
             _PH_PP.solution_counter = 0
@@ -1736,6 +1806,6 @@ def ph_from_alk_ct(
     uniq, inv = np.unique(keys, axis=0, return_inverse=True)
     ph_u = np.empty(len(uniq))
     for s in range(0, len(uniq), chunk):
-        ph_u[s:s + chunk] = _ph_batch(pp, uniq[s:s + chunk], temp, bg_lines)
+        ph_u[s : s + chunk] = _ph_batch(pp, uniq[s : s + chunk], temp, bg_lines)
     out[ok] = ph_u[np.asarray(inv).ravel()]
     return out.reshape(np.shape(alk)) if np.ndim(alk) else out.reshape(())

@@ -36,21 +36,23 @@ Beide functies geven dezelfde dict-structuur terug:
 """
 
 from __future__ import annotations
+
 import re
 import warnings
-import numpy as np
-from pathlib import Path
 from math import pi
+from pathlib import Path
+from typing import Any
 
-from epynet.node import Reservoir, Tank
+import numpy as np
 from epynet.link import Pipe, Pump
+from epynet.node import Reservoir, Tank
 
 from . import units as u
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Primaire ingang: epynet
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def load_from_epynet(net, simtime: int = 0) -> dict:
     """
@@ -88,19 +90,22 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
     from .hydraulics import _NoSaveHydraulicSolver
 
     # ── 1. Tijdparameters ─────────────────────────────────────────────────────
-    hyd_step_s  = int(net.EN_gettimeparam(u.EN_TimeParameter.EN_HYDSTEP))
-    pat_step_s  = int(net.EN_gettimeparam(u.EN_TimeParameter.EN_PATTERNSTEP))
-    duration_s  = int(net.EN_gettimeparam(u.EN_TimeParameter.EN_DURATION))
+    hyd_step_s = int(net.EN_gettimeparam(u.EN_TimeParameter.EN_HYDSTEP))
+    pat_step_s = int(net.EN_gettimeparam(u.EN_TimeParameter.EN_PATTERNSTEP))
+    duration_s = int(net.EN_gettimeparam(u.EN_TimeParameter.EN_DURATION))
     # Nul-waarden zijn geldig maar onbruikbaar — gebruik veilige defaults
-    if hyd_step_s  <= 0: hyd_step_s  = 3600
-    if pat_step_s  <= 0: pat_step_s  = 3600
-    if duration_s  <= 0: duration_s  = 24 * 3600
+    if hyd_step_s <= 0:
+        hyd_step_s = 3600
+    if pat_step_s <= 0:
+        pat_step_s = 3600
+    if duration_s <= 0:
+        duration_s = 24 * 3600
 
     # ── 2. Flow-eenheden ─────────────────────────────────────────────────────
     flow_units = u.flow_units_label(net)
 
     # ── 3. Knopen ─────────────────────────────────────────────────────────────
-    nodes      = {}
+    nodes = {}
     node_names = []
     node_coords = {}
 
@@ -110,13 +115,13 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         # EPYnetDTD's NodeFactory (Junction/Reservoir/Tank), dus geen
         # membership-check tegen een losse uid-verzameling meer nodig.
         if isinstance(node, Reservoir):
-            ntype = 'reservoir'
+            ntype = "reservoir"
         elif isinstance(node, Tank):
-            ntype = 'tank'
+            ntype = "tank"
         else:
-            ntype = 'junction'
+            ntype = "junction"
 
-        nodes[uid] = {'type': ntype}
+        nodes[uid] = {"type": ntype}
         node_names.append(uid)
 
         # Coördinaten via EN_getcoord
@@ -124,7 +129,7 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
             x, y = net.EN_getcoord(node.index)
             node_coords[uid] = (float(x), float(y))
         except Exception:
-            pass   # knoop zonder coördinaten: overgeslagen
+            pass  # knoop zonder coördinaten: overgeslagen
 
     node_index = {n: i for i, n in enumerate(node_names)}
 
@@ -136,17 +141,20 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
     except Exception as exc:
         warnings.warn(
             f"Hydraulische berekening mislukt ({type(exc).__name__}: {exc}); "
-            f"debieten en snelheden zijn 0.", RuntimeWarning, stacklevel=2)
+            f"debieten en snelheden zijn 0.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     # ── 5. Leidingen + pompen + kleppen ──────────────────────────────────────
-    pipe_ids    = []
-    pipe_raw    = []
+    pipe_ids = []
+    pipe_raw = []
     pipe_starts = []
-    pipe_ends   = []
+    pipe_ends = []
     pipe_lengths = []
-    pipe_diams  = []
-    flow_list   = []
-    vel_list    = []
+    pipe_diams = []
+    flow_list = []
+    vel_list = []
 
     for link in net.links:
         uid = link.uid
@@ -167,11 +175,13 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
             warnings.warn(
                 f"Diameter/lengte van leiding '{getattr(link, 'uid', idx)}' niet "
                 f"leesbaar ({type(exc).__name__}: {exc}); noodwaarden 100 / 1.0.",
-                RuntimeWarning, stacklevel=2)
+                RuntimeWarning,
+                stacklevel=2,
+            )
             diam_raw = 100.0
             length_raw = 1.0
 
-        diam_m   = u.diameter_to_m(diam_raw, flow_units)
+        diam_m = u.diameter_to_m(diam_raw, flow_units)
         length_m = float(u.length_to_m(length_raw, flow_units))
         # Kleppen en pompen krijgen een symbolische minimale lengte
         if length_m <= 0:
@@ -182,31 +192,33 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         # conversie hier volledig (velocity bleef ft/s op een US-netwerk).
         try:
             raw_flow = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_FLOW))
-            raw_vel  = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_VELOCITY))
+            raw_vel = float(net.EN_getlinkvalue(idx, u.EN_LinkProperty.EN_VELOCITY))
         except Exception as exc:
             warnings.warn(
                 f"Debiet/snelheid van leiding '{getattr(link, 'uid', idx)}' niet "
                 f"leesbaar ({type(exc).__name__}: {exc}); waarde 0 gebruikt.",
-                RuntimeWarning, stacklevel=2)
+                RuntimeWarning,
+                stacklevel=2,
+            )
             raw_flow = 0.0
-            raw_vel  = 0.0
+            raw_vel = 0.0
 
         # Stromingsrichting: negatief = omgekeerd t.o.v. from→to
         # NzingaFlow werkt altijd met positieve flow; richting zit in pipe_start/end
         if raw_flow < 0:
-            fn_uid, tn_uid = tn_uid, fn_uid   # draai richting om
+            fn_uid, tn_uid = tn_uid, fn_uid  # draai richting om
 
         flow_m3s = abs(u.flow_to_m3s(raw_flow, flow_units))
-        vel_ms   = abs(u.velocity_to_ms(raw_vel, flow_units))
+        vel_ms = abs(u.velocity_to_ms(raw_vel, flow_units))
 
         # Link-type via isinstance — net.links is al getypeerd door
         # EPYnetDTD's LinkFactory (Pipe/Pump/Valve).
         if isinstance(link, Pipe):
-            ltype = 'pipe'
+            ltype = "pipe"
         elif isinstance(link, Pump):
-            ltype = 'pump'
+            ltype = "pump"
         else:
-            ltype = 'valve'
+            ltype = "valve"
 
         pipe_ids.append(uid)
         pipe_starts.append(node_index[fn_uid])
@@ -215,19 +227,24 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
         pipe_diams.append(diam_m)
         flow_list.append(flow_m3s)
         vel_list.append(vel_ms)
-        pipe_raw.append({
-            'id': uid, 'from': fn_uid, 'to': tn_uid,
-            'length': length_m, 'diameter': diam_m,
-            'type': ltype,
-        })
+        pipe_raw.append(
+            {
+                "id": uid,
+                "from": fn_uid,
+                "to": tn_uid,
+                "length": length_m,
+                "diameter": diam_m,
+                "type": ltype,
+            }
+        )
 
-    pipe_start  = np.array(pipe_starts,  dtype=np.int32)
-    pipe_end    = np.array(pipe_ends,    dtype=np.int32)
+    pipe_start = np.array(pipe_starts, dtype=np.int32)
+    pipe_end = np.array(pipe_ends, dtype=np.int32)
     pipe_length = np.array(pipe_lengths, dtype=np.float64)
-    pipe_diam   = np.array(pipe_diams,   dtype=np.float64)
-    pipe_area   = pi * (pipe_diam / 2.0) ** 2
-    flow        = np.array(flow_list,    dtype=np.float64)
-    velocity    = np.array(vel_list,     dtype=np.float64)
+    pipe_diam = np.array(pipe_diams, dtype=np.float64)
+    pipe_area = pi * (pipe_diam / 2.0) ** 2
+    flow = np.array(flow_list, dtype=np.float64)
+    velocity = np.array(vel_list, dtype=np.float64)
 
     # Waar velocity == 0 maar diameter > 0: bereken uit flow
     zero_vel = (velocity == 0) & (pipe_area > 0)
@@ -238,86 +255,94 @@ def load_from_epynet(net, simtime: int = 0) -> dict:
     n_pat = net.EN_getcount(u.EN_CountType.EN_PATCOUNT)
     for pi_idx in range(1, n_pat + 1):
         try:
-            pat_uid  = net.EN_getpatternid(pi_idx)
-            pat_len  = net.EN_getpatternlen(pi_idx)
-            mults    = [float(net.EN_getpatternvalue(pi_idx, k + 1))
-                        for k in range(pat_len)]
+            pat_uid = net.EN_getpatternid(pi_idx)
+            pat_len = net.EN_getpatternlen(pi_idx)
+            mults = [float(net.EN_getpatternvalue(pi_idx, k + 1)) for k in range(pat_len)]
             patterns[pat_uid] = mults
         except Exception as exc:
             warnings.warn(
                 f"Patroon met index {pi_idx} kon niet worden gelezen "
                 f"({type(exc).__name__}: {exc}); dit patroon wordt overgeslagen.",
-                RuntimeWarning, stacklevel=2)
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     # ── 7. Bronpatronen per reservoir ─────────────────────────────────────────
     source_patterns = {}
     for res in net.reservoirs:
-        uid  = res.uid
+        uid = res.uid
         nidx = res.index
         try:
-            base_q    = float(net.EN_getnodevalue(nidx, u.EN_NodeProperty.EN_SOURCEQUAL))
-            pat_idx   = int(net.EN_getnodevalue(nidx, u.EN_NodeProperty.EN_SOURCEPAT))
+            base_q = float(net.EN_getnodevalue(nidx, u.EN_NodeProperty.EN_SOURCEQUAL))
+            pat_idx = int(net.EN_getnodevalue(nidx, u.EN_NodeProperty.EN_SOURCEPAT))
         except Exception as exc:
             # EPANET-fout 240 = geen [SOURCES]-regel voor dit reservoir: dat is
             # een normale situatie (bewuste standaard base_q=1.0, geen patroon).
             # Elke andere fout is een echte leesfout en wordt gemeld.
-            if 'Error 240' not in str(exc):
+            if "Error 240" not in str(exc):
                 warnings.warn(
                     f"Bronkwaliteit of -patroon van reservoir '{uid}' kon niet worden "
                     f"gelezen ({type(exc).__name__}: {exc}); noodwaarde base_q=1.0 "
-                    f"zonder patroon gebruikt.", RuntimeWarning, stacklevel=2)
+                    f"zonder patroon gebruikt.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             base_q, pat_idx = 1.0, 0
 
         if pat_idx > 0:
             try:
                 pat_uid = net.EN_getpatternid(pat_idx)
-                mults   = patterns.get(pat_uid, [1.0])
+                mults = patterns.get(pat_uid, [1.0])
             except Exception as exc:
                 warnings.warn(
                     f"Bronpatroon (index {pat_idx}) van reservoir '{uid}' kon niet "
                     f"worden gelezen ({type(exc).__name__}: {exc}); constante "
-                    f"vermenigvuldiger 1.0 gebruikt.", RuntimeWarning, stacklevel=2)
+                    f"vermenigvuldiger 1.0 gebruikt.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 mults = [1.0]
         else:
             mults = [1.0]
 
         source_patterns[uid] = {
-            'base_q':  base_q,
-            'pattern': [base_q * m for m in mults],
+            "base_q": base_q,
+            "pattern": [base_q * m for m in mults],
         }
 
     return {
         # ── topologie ──────────────────────────────────────────────────
-        'nodes':           nodes,
-        'node_names':      node_names,
-        'node_index':      node_index,
-        'node_count':      len(node_names),
+        "nodes": nodes,
+        "node_names": node_names,
+        "node_index": node_index,
+        "node_count": len(node_names),
         # ── geometrie ──────────────────────────────────────────────────
-        'pipe_ids':        pipe_ids,
-        'pipe_start':      pipe_start,
-        'pipe_end':        pipe_end,
-        'pipe_length':     pipe_length,
-        'pipe_diam':       pipe_diam,
-        'pipe_area':       pipe_area,
-        'pipe_raw':        pipe_raw,
+        "pipe_ids": pipe_ids,
+        "pipe_start": pipe_start,
+        "pipe_end": pipe_end,
+        "pipe_length": pipe_length,
+        "pipe_diam": pipe_diam,
+        "pipe_area": pipe_area,
+        "pipe_raw": pipe_raw,
         # ── ruimtelijk ─────────────────────────────────────────────────
-        'node_coords':     node_coords,
+        "node_coords": node_coords,
         # ── hydraulica ─────────────────────────────────────────────────
-        'flow':            flow,
-        'velocity':        velocity,
+        "flow": flow,
+        "velocity": velocity,
         # ── tijdparameters ─────────────────────────────────────────────
-        'hyd_step_s':      hyd_step_s,
-        'pat_step_s':      pat_step_s,
-        'duration_s':      duration_s,
+        "hyd_step_s": hyd_step_s,
+        "pat_step_s": pat_step_s,
+        "duration_s": duration_s,
         # ── patronen & bronnen ─────────────────────────────────────────
-        'patterns':        patterns,
-        'source_patterns': source_patterns,
+        "patterns": patterns,
+        "source_patterns": source_patterns,
     }
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Fallback ingang: .inp parser (geen epynet vereist)
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def parse_inp(path) -> dict:
     """
@@ -331,26 +356,28 @@ def parse_inp(path) -> dict:
         velocity = None
     """
     path = Path(path)
-    text = path.read_text(encoding='utf-8', errors='replace')
+    text = path.read_text(encoding="utf-8", errors="replace")
     sections = _split_sections(text)
 
     # ── Knopen ────────────────────────────────────────────────────────────────
-    nodes = {}
-    for line in sections.get('JUNCTIONS', []):
+    nodes: dict[str, dict[str, Any]] = {}
+    for line in sections.get("JUNCTIONS", []):
         parts = line.split()
         if parts:
-            nodes[parts[0]] = {'type': 'junction'}
+            nodes[parts[0]] = {"type": "junction"}
 
-    for line in sections.get('RESERVOIRS', []):
+    for line in sections.get("RESERVOIRS", []):
         parts = line.split()
         if parts:
-            nodes[parts[0]] = {'type': 'reservoir'}
+            nodes[parts[0]] = {"type": "reservoir"}
 
-    for line in sections.get('TANKS', []):
+    for line in sections.get("TANKS", []):
         parts = line.split()
         if parts:
-            nodes[parts[0]] = {'type': 'tank',
-                               'diameter': float(parts[5]) if len(parts) > 5 else 10.0}
+            nodes[parts[0]] = {
+                "type": "tank",
+                "diameter": float(parts[5]) if len(parts) > 5 else 10.0,
+            }
 
     node_names = list(nodes.keys())
     node_index = {n: i for i, n in enumerate(node_names)}
@@ -359,23 +386,26 @@ def parse_inp(path) -> dict:
     pipe_ids, pipe_raw = [], []
     pipe_starts, pipe_ends, pipe_lengths, pipe_diams = [], [], [], []
 
-    for line in sections.get('PIPES', []):
+    for line in sections.get("PIPES", []):
         parts = line.split()
         if len(parts) < 5:
             continue
         pid, frm, to = parts[0], parts[1], parts[2]
         if frm not in node_index or to not in node_index:
             continue
-        leng  = float(parts[3])
+        leng = float(parts[3])
         diam_m = float(parts[4]) * 1e-3
-        pipe_ids.append(pid);     pipe_starts.append(node_index[frm])
-        pipe_ends.append(node_index[to]); pipe_lengths.append(leng)
+        pipe_ids.append(pid)
+        pipe_starts.append(node_index[frm])
+        pipe_ends.append(node_index[to])
+        pipe_lengths.append(leng)
         pipe_diams.append(diam_m)
-        pipe_raw.append({'id': pid, 'from': frm, 'to': to,
-                         'length': leng, 'diameter': diam_m, 'type': 'pipe'})
+        pipe_raw.append(
+            {"id": pid, "from": frm, "to": to, "length": leng, "diameter": diam_m, "type": "pipe"}
+        )
 
     # Kleppen als leidingen met symbolische lengte
-    for line in sections.get('VALVES', []):
+    for line in sections.get("VALVES", []):
         parts = line.split()
         if len(parts) < 4:
             continue
@@ -383,21 +413,24 @@ def parse_inp(path) -> dict:
         if frm not in node_index or to not in node_index:
             continue
         diam_m = float(parts[3]) * 1e-3
-        pipe_ids.append(pid);     pipe_starts.append(node_index[frm])
-        pipe_ends.append(node_index[to]); pipe_lengths.append(0.1)
+        pipe_ids.append(pid)
+        pipe_starts.append(node_index[frm])
+        pipe_ends.append(node_index[to])
+        pipe_lengths.append(0.1)
         pipe_diams.append(diam_m)
-        pipe_raw.append({'id': pid, 'from': frm, 'to': to,
-                         'length': 0.1, 'diameter': diam_m, 'type': 'valve'})
+        pipe_raw.append(
+            {"id": pid, "from": frm, "to": to, "length": 0.1, "diameter": diam_m, "type": "valve"}
+        )
 
-    pipe_start  = np.array(pipe_starts,  dtype=np.int32)
-    pipe_end    = np.array(pipe_ends,    dtype=np.int32)
+    pipe_start = np.array(pipe_starts, dtype=np.int32)
+    pipe_end = np.array(pipe_ends, dtype=np.int32)
     pipe_length = np.array(pipe_lengths, dtype=np.float64)
-    pipe_diam   = np.array(pipe_diams,   dtype=np.float64)
-    pipe_area   = pi * (pipe_diam / 2.0) ** 2
+    pipe_diam = np.array(pipe_diams, dtype=np.float64)
+    pipe_area = pi * (pipe_diam / 2.0) ** 2
 
     # ── Coördinaten ───────────────────────────────────────────────────────────
     node_coords = {}
-    for line in sections.get('COORDINATES', []):
+    for line in sections.get("COORDINATES", []):
         parts = line.split()
         if len(parts) >= 3:
             try:
@@ -407,69 +440,75 @@ def parse_inp(path) -> dict:
 
     # ── Patronen ──────────────────────────────────────────────────────────────
     patterns: dict[str, list[float]] = {}
-    for line in sections.get('PATTERNS', []):
+    for line in sections.get("PATTERNS", []):
         parts = line.split()
         if len(parts) >= 2:
-            pid   = parts[0]
+            pid = parts[0]
             mults = [float(v) for v in parts[1:]]
             patterns.setdefault(pid, []).extend(mults)
 
     # ── Tijdparameters uit [TIMES] ─────────────────────────────────────────────
-    hyd_step_s = 3600; pat_step_s = 3600; duration_s = 24 * 3600
-    for line in sections.get('TIMES', []):
+    hyd_step_s = 3600
+    pat_step_s = 3600
+    duration_s = 24 * 3600
+    for line in sections.get("TIMES", []):
         lo = line.lower()
         val = _parse_time_value(line)
         if val is None:
             continue
-        if   'hydraulic timestep' in lo: hyd_step_s = val
-        elif 'pattern timestep'   in lo: pat_step_s = val
-        elif 'duration'           in lo: duration_s = val
+        if "hydraulic timestep" in lo:
+            hyd_step_s = val
+        elif "pattern timestep" in lo:
+            pat_step_s = val
+        elif "duration" in lo:
+            duration_s = val
 
     # ── Bronpatronen uit [SOURCES] ────────────────────────────────────────────
     source_patterns = {}
-    for line in sections.get('SOURCES', []):
+    for line in sections.get("SOURCES", []):
         parts = line.split()
         if len(parts) < 3:
             continue
-        res_uid  = parts[0]
+        res_uid = parts[0]
         # src_type = parts[1]  # CONCEN / MASS / FLOW / SETPOINT
         try:
             base_q = float(parts[2])
         except ValueError:
             continue
-        pat_id   = parts[3] if len(parts) > 3 else None
-        mults    = patterns.get(pat_id, [1.0]) if pat_id else [1.0]
+        pat_id = parts[3] if len(parts) > 3 else None
+        mults = patterns.get(pat_id, [1.0]) if pat_id else [1.0]
         source_patterns[res_uid] = {
-            'base_q':  base_q,
-            'pattern': [base_q * m for m in mults],
+            "base_q": base_q,
+            "pattern": [base_q * m for m in mults],
         }
 
     return {
-        'nodes':           nodes,
-        'node_names':      node_names,
-        'node_index':      node_index,
-        'node_count':      len(node_names),
-        'pipe_ids':        pipe_ids,
-        'pipe_start':      pipe_start,
-        'pipe_end':        pipe_end,
-        'pipe_length':     pipe_length,
-        'pipe_diam':       pipe_diam,
-        'pipe_area':       pipe_area,
-        'pipe_raw':        pipe_raw,
-        'node_coords':     node_coords,
-        'flow':            None,   # gebruik estimate_hydraulics()
-        'velocity':        None,
-        'hyd_step_s':      hyd_step_s,
-        'pat_step_s':      pat_step_s,
-        'duration_s':      duration_s,
-        'patterns':        patterns,
-        'source_patterns': source_patterns,
+        "nodes": nodes,
+        "node_names": node_names,
+        "node_index": node_index,
+        "node_count": len(node_names),
+        "pipe_ids": pipe_ids,
+        "pipe_start": pipe_start,
+        "pipe_end": pipe_end,
+        "pipe_length": pipe_length,
+        "pipe_diam": pipe_diam,
+        "pipe_area": pipe_area,
+        "pipe_raw": pipe_raw,
+        "node_coords": node_coords,
+        "flow": None,  # gebruik estimate_hydraulics()
+        "velocity": None,
+        "hyd_step_s": hyd_step_s,
+        "pat_step_s": pat_step_s,
+        "duration_s": duration_s,
+        "patterns": patterns,
+        "source_patterns": source_patterns,
     }
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Hydraulica-schatter (fallback zonder epynet)
 # ═════════════════════════════════════════════════════════════════════════════
+
 
 def estimate_hydraulics(topo: dict, base_flow: float = 1e-3) -> tuple:
     """
@@ -483,7 +522,7 @@ def estimate_hydraulics(topo: dict, base_flow: float = 1e-3) -> tuple:
     flow     : (n,) float64  m³/s
     velocity : (n,) float64  m/s
     """
-    area = topo['pipe_area']
+    area = topo["pipe_area"]
     if area.max() > 0:
         flow = base_flow * area / area.max()
     else:
@@ -496,16 +535,17 @@ def estimate_hydraulics(topo: dict, base_flow: float = 1e-3) -> tuple:
 # Hulpfuncties
 # ═════════════════════════════════════════════════════════════════════════════
 
+
 def _split_sections(text: str) -> dict[str, list[str]]:
     """Splits .inp tekst op secties; geeft {SECTIENAAM: [regels]} terug."""
     sections: dict[str, list[str]] = {}
     current = None
     for line in text.splitlines():
-        line = re.sub(r';.*', '', line).strip()
+        line = re.sub(r";.*", "", line).strip()
         if not line:
             continue
-        if line.startswith('['):
-            current = line.strip('[]').upper()
+        if line.startswith("["):
+            current = line.strip("[]").upper()
             sections[current] = []
         elif current is not None:
             sections[current].append(line)
@@ -520,10 +560,10 @@ def _parse_time_value(line: str) -> int | None:
     """
     parts = line.split()
     # Tijdwaarde staat na de label (laatste token)
-    val_str = parts[-1] if parts else ''
+    val_str = parts[-1] if parts else ""
     try:
-        if ':' in val_str:
-            h, m = val_str.split(':', 1)
+        if ":" in val_str:
+            h, m = val_str.split(":", 1)
             return int(h) * 3600 + int(m) * 60
         else:
             return int(float(val_str) * 3600)

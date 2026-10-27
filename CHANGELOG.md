@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Review: silent failures, stale test, dead module, docs, lint and types
+
+- **Changed: alkalinity fallback no longer returns 0.** `_sol_value(sol, 'Alk')` raises a `RuntimeError` when the speciation of a solution is not available, instead of silently returning 0. A failing species lookup inside the sum is no longer swallowed either. This path is only used when the exact PHREEQC `ALK` (`_alk_batch`) fails; the normal path is unchanged.
+- **Changed: failing saturation indices are visible.** `saturation_indices()` returns `NaN` for a mineral that cannot be computed and logs a warning, instead of leaving the key out of the result.
+- **Changed: validation test no longer skips silently.** In `test_validation.py` the steady-state test used `pytest.skip` when no segments were in the steady-state window, so it checked nothing and only showed as "skipped". It now fails with a message.
+- **Removed: `tests/test_inzingaflow.py`.** It was an outdated copy of `tests/test_validation.py` (about 60 tests) with the pre-v1.1.0 Sherwood formula (`Sh = 3.65`) and a local copy of that formula instead of the code under test. The current tests live in `test_validation.py`.
+- **Removed: `nzingaflow/inp_sources.py`.** The entry above already said it was removed; the file was still in the package. It was not imported anywhere.
+- **Added: lint, format and type checks in CI.** New workflow `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check` and `mypy` on every push and pull request. It needs no private epynet and no secrets. The release build runs the same checks before the tests.
+- **Changed: code formatted and lint-clean.** `ruff format` applied to the whole package and test suite (formatting only; the 151 tests give the same result). Unused imports, unused variables and outdated type syntax fixed. `E402`/`F811` are allowed in `tests/` (pytest fixture imports and `importorskip`).
+- **Changed: type annotations.** Attributes that start as `None` are now annotated (`_pipe_list`, `_units`, `_k_wall_vol`, `SegmentStore.on_resize`); `nodes` in `parse_inp` is typed as `dict[str, dict[str, Any]]`; the CSR cache in `SegmentStore` also checks `_csr_ptr`; `MsxSimulation.run` raises a clear error when no state is loaded. `mypy nzingaflow` passes.
+- **Known limit (mypy):** `geochemistry` and `solver` (arrays and PHREEQC objects that only exist after the first solve) and `lta`/`merging` (numba) have documented, per-module error-code exceptions in `pyproject.toml`. All other modules are fully checked.
+- **Fixed: dead code and a weak test.** Removed the unused `v_max` in `stability.check_dt`. `test_mass_conservation_in_mixing` now checks the output of `node_mixing_multi` (flow-weighted mass balance) instead of recomputing the result in the test. `test_series_decay_bolus` now asserts the arrival time (never early, at most one `dt` of delay per pipe in the test loop).
+- **Added: optional extras `[msx]` and `[pandas]`.** `scipy` (only for the `rk45`/`radau` solvers of `MsxReactionSystem`) and `pandas` (only for `MsxSimulationResult.to_dataframe()`) were imported lazily but not listed anywhere, so a plain install failed with a bare `ModuleNotFoundError`. Both now have an extra, and `[all]` includes them.
+- **Changed: clear error when `scipy` or `pandas` is missing.** The `ImportError` now names the extra to install (`pip install nzingaflow[msx]` / `[pandas]`). The `euler`, `rk4` and `ros2` solvers still work without `scipy`.
+- **Added: module dependency diagram.** `nzingaflow/documentation/module-dependencies.svg` (EN) and `module-afhankelijkheden.svg` (NL), shown in the README under *Module Overview*. Drawn from the real imports: the solver imports its seven helper modules lazily, `eps` and `geochemistry` are linked through objects, and `msx`, `msxlibrary`, `parse_inp` and `locale_guard` stand alone. `parse_inp.py` is not imported by any module and is only used by tests.
+- **Tests:** new `tests/test_geochem_foutafhandeling.py` (3 tests) for the two geochemistry changes, and `tests/test_optionele_afhankelijkheden.py` (5 tests) for the missing-`scipy`/`pandas` errors. The suite runs 156 tests (it was 208 at the start of this review, before the stale duplicate `test_inzingaflow.py` was removed).
+- **Docs:** the module table lists `network_sources.py`, `parse_inp.py` and `locale_guard.py`; the `NzingaFlowSolver` parameter table lists `auto_reservoir_sources`; broken anchors fixed. The copies in `nzingaflow/documentation/` match the root READMEs again.
+
 ### Sources from the loaded epynet network (replaces `inp_sources.py`)
 
 - **Changed:** reservoir and junction sources, and their patterns and pattern timing, are read from the loaded epynet network (`nzingaflow/network_sources.py`) instead of parsing the `.inp` text. epynet reads the file with the EPANET kernel, so pattern start and timestep follow EPANET's own interpretation.
@@ -78,18 +96,11 @@
 - Tests: `tests/test_foutafhandeling.py`; stale expectation in `test_mass_balance_tank` aligned
   with the (correct) `Q_in` formula.
 
-### PHREEQC-route: chemie van doorstromende segmenten bijhouden
+### PHREEQC-route: keep chemistry of flowing-through segments
 
-- `solver._record_pipe_out_chem()` (nieuw): per pijp de pH, alkaliniteit en koolstof
-  van het laatste segment dat de pijp volledig doorliep, of tot stilstand kwam aan het eind.
-  Tegenhanger van `_pipe_out_C` voor de PhreeqSolutionMode-route.
-- Aangeroepen in `_cascade_thru` (doorgang en eindplaatsing) en in de splitsingstak.
-- Reden: bij een doorgaande knoop (bijv. een doelknoop met een uitgaande leiding in een
-  deelnetwerk) gaan segmenten door de knoop heen in de cascade en komen nooit op de
-  inkomende pijp te staan. Met de uitgangen van de pijp was de pH dan niet uit te lezen.
-- Gecontroleerd: FRL-10, doelknoop 164593422, 48 u: deelnetwerk en volledig netwerk
-  geven exact dezelfde pH per uur (verschil 0,0).
-
+- **`solver._record_pipe_out_chem()` (new).** For each pipe, the pH, alkalinity and carbon are kept from the last segment that fully passed through the pipe, or that came to rest at its end. This is the PHREEQC counterpart of `_pipe_out_C`. Called in `_cascade_thru` (pass-through and end placement) and in the splitting branch.
+- Reason: at a pass-through node (for example a target node with an outgoing pipe in a subnetwork), segments move through the node in the cascade and never end up on the incoming pipe. The pH could then not be read from the pipe outlets.
+- Checked: FRL-10, target node 164593422, 48 h: subnetwork and full network give exactly the same pH per hour (difference 0.0).
 
 ### Transport: a segment may cross several short through-pipes in one time step
 
@@ -229,6 +240,7 @@ Regression: `tests/test_pulse4_regression.py` (RMSE ≤ 1.5 mg/L per node vs EPA
 
 ### Docs
 
+- README's (EN and NL, in the root and in `nzingaflow/documentation/`) updated: step 6 of the calculation steps describes the travel time over consecutive pass-through nodes; signatures of `NzingaFlowSolver` and `HydraulicModel` complete (`skip_short_valves`, `cache_links`, `reversal_deadband`); new section on the flow-reversal dead band, `merge_span`, `set_source_quality()` and the experimental `set_mixed_pipes()`.
 - `README.md`, `README_NL.md` and `nzingaflow/documentation/README*.md` brought in line with the code: version badge (1.3.1); root READMEs now contain the `PhreeqSolutionMode` section (previously only in `documentation/`); tank model, LTA phase list (incl. tank release and overshoot carry-over), `set_initial_quality()`, `EPSRunner.time_axis()` semantics, `recommended_dt()` zero-length handling, `MassBalanceTracker` report keys (`in_tanks`, `leakage`, `accounted`) and the FAQ on mass-balance errors; the in-README changelog now lists 1.3.1, 1.3.0 and the batch-1/2 fixes (the 1.3.0 items were still listed as "Unreleased"); MSX bridge version wording made consistent (introduced 1.2.0, bundled binaries 1.2.2); missing `### Stability Functions` heading restored in the Dutch README (broken ToC anchor); relative links in `documentation/` fixed (`../LICENSE`, `../CHANGELOG*.md`); `PKG-INFO` description regenerated from the root README.
 - Docstrings updated: `MassBalanceTracker` (usage example had a stale `record_step` signature; `report()` keys), `NzingaFlowSolver` class and `step()` (tank source, overshoot, phase 7b), `units.py` (`length_to_m`, `volume_to_m3`).
 

@@ -8,6 +8,7 @@ hebben als in EPANET (inclusief patroonstart en -stap).
 Gebruikt door NzingaFlowSolver voor de automatische reservoir- en junctionbronnen
 (``auto_reservoir_sources=True``).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,18 +19,19 @@ from epynet.enum import EN_SourceType, EN_TimeParameter
 @dataclass(frozen=True)
 class ReservoirSource:
     """Een ingeschakeld reservoir (head > 0) met optioneel een bron."""
-    name:     str
-    head:     float
-    kind:     str | None      # 'CONCEN', 'MASS', 'SETPOINT', 'FLOWPACED' of None (geen bron)
-    strength: float | None    # bronsterkte [mg/L] voor CONCEN, anders None
-    pattern:  str | None      # patroonnaam of None (constant)
+
+    name: str
+    head: float
+    kind: str | None  # 'CONCEN', 'MASS', 'SETPOINT', 'FLOWPACED' of None (geen bron)
+    strength: float | None  # bronsterkte [mg/L] voor CONCEN, anders None
+    pattern: str | None  # patroonnaam of None (constant)
 
 
 def _source_of(node):
     """(kind, sterkte, patroonnaam) van een knoop, of (None, None, None) zonder bron."""
     try:
         kind = EN_SourceType(int(node.source_type)).name.replace("EN_", "")
-    except Exception:          # EPANET fout 240: knoop heeft geen bron
+    except Exception:  # EPANET fout 240: knoop heeft geen bron
         return None, None, None
     strength = float(node.source_quality)
     pat = node.source_pattern
@@ -60,10 +62,15 @@ def reservoir_sources(net) -> list[ReservoirSource]:
         if head <= 0.0:
             continue
         kind, strength, pat = _source_of(r)
-        out.append(ReservoirSource(
-            name=r.uid, head=head, kind=kind,
-            strength=strength if kind == "CONCEN" else None,
-            pattern=pat))
+        out.append(
+            ReservoirSource(
+                name=r.uid,
+                head=head,
+                kind=kind,
+                strength=strength if kind == "CONCEN" else None,
+                pattern=pat,
+            )
+        )
     return out
 
 
@@ -74,10 +81,15 @@ def junction_sources(net) -> list[ReservoirSource]:
         kind, strength, pat = _source_of(j)
         if kind is None:
             continue
-        out.append(ReservoirSource(
-            name=j.uid, head=0.0, kind=kind,
-            strength=strength if kind == "CONCEN" else None,
-            pattern=pat))
+        out.append(
+            ReservoirSource(
+                name=j.uid,
+                head=0.0,
+                kind=kind,
+                strength=strength if kind == "CONCEN" else None,
+                pattern=pat,
+            )
+        )
     return out
 
 

@@ -32,47 +32,51 @@ from __future__ import annotations
 
 import ctypes
 import platform
-from ctypes import c_char_p, c_int, c_double, POINTER, byref
+from ctypes import POINTER, byref, c_char_p, c_double, c_int
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Constanten (identiek aan epanetmsx.h, maar benoemd naar NzingaFlow-stijl)
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class _ObjectType:
-    NODE      = 0
-    LINK      = 1
-    TANK      = 2
-    SPECIES   = 3
-    TERM      = 4
+    NODE = 0
+    LINK = 1
+    TANK = 2
+    SPECIES = 3
+    TERM = 4
     PARAMETER = 5
-    CONSTANT  = 6
-    PATTERN   = 7
+    CONSTANT = 6
+    PATTERN = 7
+
 
 class _SpeciesKind:
     BULK = 0
     WALL = 1
 
+
 class _SourceKind:
-    NONE       = -1
-    FIXED_CONC = 0   # CONCEN in MSX-dialect
-    MASS_FLUX  = 1   # MASS
-    SETPOINT   = 2
-    FLOW_PACED = 3   # FLOWPACED
+    NONE = -1
+    FIXED_CONC = 0  # CONCEN in MSX-dialect
+    MASS_FLUX = 1  # MASS
+    SETPOINT = 2
+    FLOW_PACED = 3  # FLOWPACED
+
 
 class _EnCountType:
     """EN_* objecttypes voor ENgetcount() — komen uit de EPANET (niet-MSX)
     toolkit. MSXgetcount()/MSXgetID() ondersteunen alléén SPECIES/CONSTANT/
     PARAMETER/PATTERN; node-, link- en tank-aantallen en -namen moeten via
     de onderliggende epanet2-bibliotheek worden opgevraagd."""
+
     NODECOUNT = 0
     TANKCOUNT = 1
     LINKCOUNT = 2
+
 
 EN_MAXID = 31  # max. aantal tekens in een EPANET ID-naam (epanet2_enums.h)
 
@@ -81,6 +85,7 @@ EN_MAXID = 31  # max. aantal tekens in een EPANET ID-naam (epanet2_enums.h)
 #  Hulpfuncties
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def _encode(s: str) -> bytes:
     return s.encode("utf-8")
 
@@ -88,7 +93,7 @@ def _encode(s: str) -> bytes:
 def _default_lib_path() -> str:
     """Zoek de MSX-bibliotheek in de gebruikelijke installatiemappen."""
     system = platform.system()
-    candidates: List[str] = []
+    candidates: list[str] = []
 
     if system == "Windows":
         candidates = [
@@ -139,6 +144,7 @@ def _default_lib_path() -> str:
 #  Laag 1: MsxNativeLib — ctypes-wrapper
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class MsxNativeLib:
     """
     Dunne wrapper rond de EPANET-MSX gedeelde bibliotheek.
@@ -156,7 +162,7 @@ class MsxNativeLib:
         Als ``True``, gooit niet-nul retourwaarden een ``MsxError``.
     """
 
-    def __init__(self, lib_path: Optional[str] = None, strict: bool = True):
+    def __init__(self, lib_path: str | None = None, strict: bool = True):
         path = lib_path or _default_lib_path()
         self._lib = ctypes.cdll.LoadLibrary(path)
         self._strict = strict
@@ -226,21 +232,21 @@ class MsxNativeLib:
 
     def _bind_en_signatures(self):
         EN = self._en
-        EN.ENopen.restype   = c_int
-        EN.ENopen.argtypes  = [c_char_p, c_char_p, c_char_p]
-        EN.ENclose.restype  = c_int
+        EN.ENopen.restype = c_int
+        EN.ENopen.argtypes = [c_char_p, c_char_p, c_char_p]
+        EN.ENclose.restype = c_int
         EN.ENclose.argtypes = []
-        EN.ENgetcount.restype   = c_int
-        EN.ENgetcount.argtypes  = [c_int, POINTER(c_int)]
-        EN.ENgetnodeid.restype  = c_int
+        EN.ENgetcount.restype = c_int
+        EN.ENgetcount.argtypes = [c_int, POINTER(c_int)]
+        EN.ENgetnodeid.restype = c_int
         EN.ENgetnodeid.argtypes = [c_int, c_char_p]
-        EN.ENgetlinkid.restype  = c_int
+        EN.ENgetlinkid.restype = c_int
         EN.ENgetlinkid.argtypes = [c_int, c_char_p]
-        EN.ENgeterror.restype   = c_int
-        EN.ENgeterror.argtypes  = [c_int, c_char_p, c_int]
-        EN.ENgetnodeindex.restype  = c_int
+        EN.ENgeterror.restype = c_int
+        EN.ENgeterror.argtypes = [c_int, c_char_p, c_int]
+        EN.ENgetnodeindex.restype = c_int
         EN.ENgetnodeindex.argtypes = [c_char_p, POINTER(c_int)]
-        EN.ENgetlinkindex.restype  = c_int
+        EN.ENgetlinkindex.restype = c_int
         EN.ENgetlinkindex.argtypes = [c_char_p, POINTER(c_int)]
 
     def _check_en(self, code: int, context: str = "") -> int:
@@ -307,50 +313,58 @@ class MsxNativeLib:
 
         def _fn(name, restype, *argtypes):
             fn = getattr(L, name)
-            fn.restype  = restype
+            fn.restype = restype
             fn.argtypes = list(argtypes)
             return fn
 
-        self._open        = _fn("MSXopen",        c_int, c_char_p)
-        self._solve_hyd   = _fn("MSXsolveH",       c_int)
-        self._use_hyd     = _fn("MSXusehydfile",   c_int, c_char_p)
-        self._solve_qual  = _fn("MSXsolveQ",        c_int)
-        self._init_run    = _fn("MSXinit",          c_int, c_int)
+        self._open = _fn("MSXopen", c_int, c_char_p)
+        self._solve_hyd = _fn("MSXsolveH", c_int)
+        self._use_hyd = _fn("MSXusehydfile", c_int, c_char_p)
+        self._solve_qual = _fn("MSXsolveQ", c_int)
+        self._init_run = _fn("MSXinit", c_int, c_int)
         # MSXstep gebruikt double* voor t/tleft sinds EPANET-MSX 2.0
         # (was long* in de 1.1-header waar deze wrapper oorspronkelijk op
         # was gebaseerd — c_long op de verkeerde grootte zou op Windows
         # geheugencorruptie geven en op Linux/macOS stille foutieve
         # tijdwaarden opleveren).
-        self._step        = _fn("MSXstep",          c_int, POINTER(c_double), POINTER(c_double))
-        self._save_out    = _fn("MSXsaveoutfile",   c_int, c_char_p)
-        self._save_msx    = _fn("MSXsavemsxfile",   c_int, c_char_p)
-        self._report      = _fn("MSXreport",        c_int)
-        self._close       = _fn("MSXclose",         c_int)
+        self._step = _fn("MSXstep", c_int, POINTER(c_double), POINTER(c_double))
+        self._save_out = _fn("MSXsaveoutfile", c_int, c_char_p)
+        self._save_msx = _fn("MSXsavemsxfile", c_int, c_char_p)
+        self._report = _fn("MSXreport", c_int)
+        self._close = _fn("MSXclose", c_int)
 
-        self._get_index   = _fn("MSXgetindex",      c_int, c_int, c_char_p, POINTER(c_int))
-        self._get_idlen   = _fn("MSXgetIDlen",      c_int, c_int, c_int, POINTER(c_int))
-        self._get_id      = _fn("MSXgetID",         c_int, c_int, c_int, c_char_p, c_int)
-        self._get_count   = _fn("MSXgetcount",      c_int, c_int, POINTER(c_int))
+        self._get_index = _fn("MSXgetindex", c_int, c_int, c_char_p, POINTER(c_int))
+        self._get_idlen = _fn("MSXgetIDlen", c_int, c_int, c_int, POINTER(c_int))
+        self._get_id = _fn("MSXgetID", c_int, c_int, c_int, c_char_p, c_int)
+        self._get_count = _fn("MSXgetcount", c_int, c_int, POINTER(c_int))
 
-        self._get_species = _fn("MSXgetspecies",    c_int, c_int,
-                                POINTER(c_int), c_char_p, POINTER(c_double), POINTER(c_double))
-        self._get_const   = _fn("MSXgetconstant",   c_int, c_int, POINTER(c_double))
-        self._get_param   = _fn("MSXgetparameter",  c_int, c_int, c_int, c_int, POINTER(c_double))
-        self._get_source  = _fn("MSXgetsource",     c_int, c_int, c_int,
-                                POINTER(c_int), POINTER(c_double), POINTER(c_int))
-        self._get_patlen  = _fn("MSXgetpatternlen", c_int, c_int, POINTER(c_int))
-        self._get_patval  = _fn("MSXgetpatternvalue", c_int, c_int, c_int, POINTER(c_double))
-        self._get_initq   = _fn("MSXgetinitqual",   c_int, c_int, c_int, c_int, POINTER(c_double))
-        self._get_qual    = _fn("MSXgetqual",       c_int, c_int, c_int, c_int, POINTER(c_double))
-        self._get_error   = _fn("MSXgeterror",      c_int, c_int, c_char_p, c_int)
+        self._get_species = _fn(
+            "MSXgetspecies",
+            c_int,
+            c_int,
+            POINTER(c_int),
+            c_char_p,
+            POINTER(c_double),
+            POINTER(c_double),
+        )
+        self._get_const = _fn("MSXgetconstant", c_int, c_int, POINTER(c_double))
+        self._get_param = _fn("MSXgetparameter", c_int, c_int, c_int, c_int, POINTER(c_double))
+        self._get_source = _fn(
+            "MSXgetsource", c_int, c_int, c_int, POINTER(c_int), POINTER(c_double), POINTER(c_int)
+        )
+        self._get_patlen = _fn("MSXgetpatternlen", c_int, c_int, POINTER(c_int))
+        self._get_patval = _fn("MSXgetpatternvalue", c_int, c_int, c_int, POINTER(c_double))
+        self._get_initq = _fn("MSXgetinitqual", c_int, c_int, c_int, c_int, POINTER(c_double))
+        self._get_qual = _fn("MSXgetqual", c_int, c_int, c_int, c_int, POINTER(c_double))
+        self._get_error = _fn("MSXgeterror", c_int, c_int, c_char_p, c_int)
 
-        self._set_const   = _fn("MSXsetconstant",   c_int, c_int, c_double)
-        self._set_param   = _fn("MSXsetparameter",  c_int, c_int, c_int, c_int, c_double)
-        self._set_initq   = _fn("MSXsetinitqual",   c_int, c_int, c_int, c_int, c_double)
-        self._set_source  = _fn("MSXsetsource",     c_int, c_int, c_int, c_int, c_double, c_int)
-        self._set_patval  = _fn("MSXsetpatternvalue", c_int, c_int, c_int, c_double)
-        self._set_pat     = _fn("MSXsetpattern",    c_int, c_int, POINTER(c_double), c_int)
-        self._add_pat     = _fn("MSXaddpattern",    c_int, c_char_p)
+        self._set_const = _fn("MSXsetconstant", c_int, c_int, c_double)
+        self._set_param = _fn("MSXsetparameter", c_int, c_int, c_int, c_int, c_double)
+        self._set_initq = _fn("MSXsetinitqual", c_int, c_int, c_int, c_int, c_double)
+        self._set_source = _fn("MSXsetsource", c_int, c_int, c_int, c_int, c_double, c_int)
+        self._set_patval = _fn("MSXsetpatternvalue", c_int, c_int, c_int, c_double)
+        self._set_pat = _fn("MSXsetpattern", c_int, c_int, POINTER(c_double), c_int)
+        self._add_pat = _fn("MSXaddpattern", c_int, c_char_p)
 
     # ── Controle-hulper ───────────────────────────────────────────────────────
 
@@ -382,7 +396,7 @@ class MsxNativeLib:
         """Bereid stapsgewijze kwaliteitsberekening voor."""
         self._check(self._init_run(int(save_to_file)), "initialize_run")
 
-    def advance(self) -> Tuple[int, int]:
+    def advance(self) -> tuple[int, int]:
         """
         Zet de kwaliteitsoplossing één tijdstap vooruit.
 
@@ -391,7 +405,7 @@ class MsxNativeLib:
         t      : verstreken simulatietijd (s)
         tleft  : resterende tijd (s); 0 betekent klaar
         """
-        t     = c_double(0)
+        t = c_double(0)
         tleft = c_double(0)
         self._check(self._step(byref(t), byref(tleft)), "advance")
         return int(t.value), int(tleft.value)
@@ -435,16 +449,18 @@ class MsxNativeLib:
 
         Geeft terug: {'kind': int, 'units': str, 'atol': float, 'rtol': float}
         """
-        kind  = c_int(0)
+        kind = c_int(0)
         units = ctypes.create_string_buffer(16)
-        atol  = c_double(0)
-        rtol  = c_double(0)
-        self._check(self._get_species(index, byref(kind), units, byref(atol), byref(rtol)), "species_info")
+        atol = c_double(0)
+        rtol = c_double(0)
+        self._check(
+            self._get_species(index, byref(kind), units, byref(atol), byref(rtol)), "species_info"
+        )
         return {
-            "kind":  kind.value,
+            "kind": kind.value,
             "units": units.value.decode("utf-8").strip(),
-            "atol":  atol.value,
-            "rtol":  rtol.value,
+            "atol": atol.value,
+            "rtol": rtol.value,
         }
 
     def constant_value(self, index: int) -> float:
@@ -462,9 +478,12 @@ class MsxNativeLib:
         Geeft bron-type, niveau en patroon-index voor (knoop, stof)-paar.
         """
         src_type = c_int(0)
-        level    = c_double(0)
-        pat      = c_int(0)
-        self._check(self._get_source(node, species, byref(src_type), byref(level), byref(pat)), "source_info")
+        level = c_double(0)
+        pat = c_int(0)
+        self._check(
+            self._get_source(node, species, byref(src_type), byref(level), byref(pat)),
+            "source_info",
+        )
         return {"type": src_type.value, "level": level.value, "pattern": pat.value}
 
     def pattern_length(self, pat: int) -> int:
@@ -502,7 +521,9 @@ class MsxNativeLib:
         self._check(self._set_param(obj_type, obj_index, param, c_double(value)), "set_parameter")
 
     def set_initial_quality(self, obj_type: int, index: int, species: int, value: float) -> None:
-        self._check(self._set_initq(obj_type, index, species, c_double(value)), "set_initial_quality")
+        self._check(
+            self._set_initq(obj_type, index, species, c_double(value)), "set_initial_quality"
+        )
 
     def set_source(self, node: int, species: int, src_type: int, level: float, pat: int) -> None:
         self._check(self._set_source(node, species, src_type, c_double(level), pat), "set_source")
@@ -510,7 +531,7 @@ class MsxNativeLib:
     def set_pattern_value(self, pat: int, period: int, value: float) -> None:
         self._check(self._set_patval(pat, period, c_double(value)), "set_pattern_value")
 
-    def set_pattern(self, pat: int, multipliers: List[float]) -> None:
+    def set_pattern(self, pat: int, multipliers: list[float]) -> None:
         arr = (c_double * len(multipliers))(*multipliers)
         self._check(self._set_pat(pat, arr, len(multipliers)), "set_pattern")
 
@@ -522,11 +543,12 @@ class MsxNativeLib:
 #  Foutklasse
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class MsxError(RuntimeError):
     """Fout afkomstig van de EPANET-MSX C-bibliotheek."""
 
     def __init__(self, code: int, message: str, context: str = ""):
-        self.code    = code
+        self.code = code
         self.context = context
         super().__init__(f"MSX fout {code} ({context}): {message}")
 
@@ -535,15 +557,17 @@ class MsxError(RuntimeError):
 #  Laag 2: MsxNetworkState — leesobject na simulatie
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 @dataclass
 class MsxSpecies:
     """Metadata van één chemische stof."""
-    index : int
-    name  : str
-    kind  : int    # 0 = bulk, 1 = wand
-    units : str
-    atol  : float
-    rtol  : float
+
+    index: int
+    name: str
+    kind: int  # 0 = bulk, 1 = wand
+    units: str
+    atol: float
+    rtol: float
 
     @property
     def is_bulk(self) -> bool:
@@ -557,13 +581,14 @@ class MsxSpecies:
 @dataclass
 class MsxSourceRecord:
     """Bron-definitie op één knoop voor één stof."""
-    node_index    : int
-    node_name     : str
-    species_index : int
-    species_name  : str
-    kind          : int    # _SourceKind.*
-    level         : float
-    pattern_index : int
+
+    node_index: int
+    node_name: str
+    species_index: int
+    species_name: str
+    kind: int  # _SourceKind.*
+    level: float
+    pattern_index: int
 
 
 @dataclass
@@ -574,32 +599,36 @@ class MsxNetworkState:
     Bevat stoffen, constanten, bronnen, initiële kwaliteiten en patronen.
     Wordt aangemaakt door ``MsxSimulation.load()``.
     """
-    species      : List[MsxSpecies]         = field(default_factory=list)
-    constants    : Dict[str, float]         = field(default_factory=dict)
-    sources      : List[MsxSourceRecord]    = field(default_factory=list)
-    node_initq   : np.ndarray              = field(default_factory=lambda: np.empty(0))
-    link_initq   : np.ndarray              = field(default_factory=lambda: np.empty(0))
-    equations    : Dict[str, Dict]          = field(default_factory=dict)
-    patterns     : Dict[int, List[float]]   = field(default_factory=dict)
+
+    species: list[MsxSpecies] = field(default_factory=list)
+    constants: dict[str, float] = field(default_factory=dict)
+    sources: list[MsxSourceRecord] = field(default_factory=list)
+    node_initq: np.ndarray = field(default_factory=lambda: np.empty(0))
+    link_initq: np.ndarray = field(default_factory=lambda: np.empty(0))
+    equations: dict[str, dict] = field(default_factory=dict)
+    patterns: dict[int, list[float]] = field(default_factory=dict)
 
     # Naam → index opzoektabellen
-    _species_by_name : Dict[str, MsxSpecies] = field(default_factory=dict, repr=False)
+    _species_by_name: dict[str, MsxSpecies] = field(default_factory=dict, repr=False)
 
     def species_by_name(self, name: str) -> MsxSpecies:
         if name not in self._species_by_name:
-            raise KeyError(f"Stof '{name}' niet gevonden. Beschikbaar: {list(self._species_by_name)}")
+            raise KeyError(
+                f"Stof '{name}' niet gevonden. Beschikbaar: {list(self._species_by_name)}"
+            )
         return self._species_by_name[name]
 
-    def bulk_species(self) -> List[MsxSpecies]:
+    def bulk_species(self) -> list[MsxSpecies]:
         return [s for s in self.species if s.is_bulk]
 
-    def wall_species(self) -> List[MsxSpecies]:
+    def wall_species(self) -> list[MsxSpecies]:
         return [s for s in self.species if s.is_wall]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Laag 2b: simulatieresultaat
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 @dataclass
 class MsxSimulationResult:
@@ -615,12 +644,13 @@ class MsxSimulationResult:
     node_names      : lijst van knoopnamen
     link_names      : lijst van leidingnamen
     """
-    time_s       : np.ndarray
-    node_quality : np.ndarray
-    link_quality : np.ndarray
-    species      : List[MsxSpecies]
-    node_names   : List[str]
-    link_names   : List[str]
+
+    time_s: np.ndarray
+    node_quality: np.ndarray
+    link_quality: np.ndarray
+    species: list[MsxSpecies]
+    node_names: list[str]
+    link_names: list[str]
 
     def time_hours(self) -> np.ndarray:
         return self.time_s / 3600.0
@@ -649,12 +679,18 @@ class MsxSimulationResult:
         species_name : naam van de stof
         element      : ``'node'`` of ``'link'``
         """
-        import pandas as pd
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError(
+                "to_dataframe() vereist pandas. Installeer met: pip install nzingaflow[pandas]"
+            ) from exc
+
         if element == "node":
-            data  = self.node_concentrations(species_name)
+            data = self.node_concentrations(species_name)
             names = self.node_names
         else:
-            data  = self.link_concentrations(species_name)
+            data = self.link_concentrations(species_name)
             names = self.link_names
         df = pd.DataFrame(data, index=self.time_hours(), columns=names)
         df.index.name = "tijd_h"
@@ -664,6 +700,7 @@ class MsxSimulationResult:
 # ══════════════════════════════════════════════════════════════════════════════
 #  Laag 3: MsxSimulation — hoog-niveau orchestrator
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class MsxSimulation:
     """
@@ -691,28 +728,28 @@ class MsxSimulation:
     """
 
     _SOURCE_KIND_MAP = {
-        "CONCEN":    _SourceKind.FIXED_CONC,
-        "CONC":      _SourceKind.FIXED_CONC,
-        "MASS":      _SourceKind.MASS_FLUX,
-        "SETPOINT":  _SourceKind.SETPOINT,
+        "CONCEN": _SourceKind.FIXED_CONC,
+        "CONC": _SourceKind.FIXED_CONC,
+        "MASS": _SourceKind.MASS_FLUX,
+        "SETPOINT": _SourceKind.SETPOINT,
         "FLOWPACED": _SourceKind.FLOW_PACED,
-        "FLOW":      _SourceKind.FLOW_PACED,
-        "NOSOURCE":  _SourceKind.NONE,
+        "FLOW": _SourceKind.FLOW_PACED,
+        "NOSOURCE": _SourceKind.NONE,
     }
 
     def __init__(
         self,
-        inp_path : str,
-        msx_path : str,
-        lib_path : Optional[str] = None,
-        strict   : bool = True,
+        inp_path: str,
+        msx_path: str,
+        lib_path: str | None = None,
+        strict: bool = True,
     ):
         self.inp_path = str(inp_path)
         self.msx_path = str(msx_path)
-        self._lib     = MsxNativeLib(lib_path, strict=strict)
-        self._loaded  = False
+        self._lib = MsxNativeLib(lib_path, strict=strict)
+        self._loaded = False
         self._en_opened = False
-        self._state   : Optional[MsxNetworkState] = None
+        self._state: MsxNetworkState | None = None
 
         # Laad EPANET netwerk (hydraulica); MSX vereist dat dit eerst gebeurt
         self._epanet_open()
@@ -745,11 +782,11 @@ class MsxSimulation:
         """
         self._lib.open(self.msx_path)
         self._loaded = True
-        self._state  = self._build_state()
+        self._state = self._build_state()
         return self._state
 
     def _build_state(self) -> MsxNetworkState:
-        lib   = self._lib
+        lib = self._lib
         state = MsxNetworkState()
 
         # ── Stoffen ───────────────────────────────────────────────────────────
@@ -757,13 +794,13 @@ class MsxSimulation:
         for i in range(1, n_species + 1):
             name = lib.object_id(_ObjectType.SPECIES, i)
             info = lib.species_info(i)
-            sp   = MsxSpecies(
-                index = i,
-                name  = name,
-                kind  = info["kind"],
-                units = info["units"],
-                atol  = info["atol"],
-                rtol  = info["rtol"],
+            sp = MsxSpecies(
+                index=i,
+                name=name,
+                kind=info["kind"],
+                units=info["units"],
+                atol=info["atol"],
+                rtol=info["rtol"],
             )
             state.species.append(sp)
             state._species_by_name[name] = sp
@@ -771,28 +808,24 @@ class MsxSimulation:
         # ── Constanten ────────────────────────────────────────────────────────
         n_const = lib.object_count(_ObjectType.CONSTANT)
         for i in range(1, n_const + 1):
-            name  = lib.object_id(_ObjectType.CONSTANT, i)
+            name = lib.object_id(_ObjectType.CONSTANT, i)
             value = lib.constant_value(i)
             state.constants[name] = value
 
         # ── Initiële kwaliteit: knopen ────────────────────────────────────────
         n_nodes = lib.en_node_count()
-        n_sp    = len(state.species)
+        n_sp = len(state.species)
         state.node_initq = np.zeros((n_nodes, n_sp))
         for ni in range(1, n_nodes + 1):
             for si, sp in enumerate(state.species, start=1):
-                state.node_initq[ni - 1, si - 1] = lib.initial_quality(
-                    _ObjectType.NODE, ni, si
-                )
+                state.node_initq[ni - 1, si - 1] = lib.initial_quality(_ObjectType.NODE, ni, si)
 
         # ── Initiële kwaliteit: leidingen ─────────────────────────────────────
         n_links = lib.en_link_count()
         state.link_initq = np.zeros((n_links, n_sp))
         for li in range(1, n_links + 1):
             for si, sp in enumerate(state.species, start=1):
-                state.link_initq[li - 1, si - 1] = lib.initial_quality(
-                    _ObjectType.LINK, li, si
-                )
+                state.link_initq[li - 1, si - 1] = lib.initial_quality(_ObjectType.LINK, li, si)
 
         # ── Bronnen ───────────────────────────────────────────────────────────
         for ni in range(1, n_nodes + 1):
@@ -800,15 +833,17 @@ class MsxSimulation:
             for si, sp in enumerate(state.species, start=1):
                 info = lib.source_info(ni, si)
                 if info["type"] != _SourceKind.NONE:
-                    state.sources.append(MsxSourceRecord(
-                        node_index    = ni,
-                        node_name     = node_name,
-                        species_index = si,
-                        species_name  = sp.name,
-                        kind          = info["type"],
-                        level         = info["level"],
-                        pattern_index = info["pattern"],
-                    ))
+                    state.sources.append(
+                        MsxSourceRecord(
+                            node_index=ni,
+                            node_name=node_name,
+                            species_index=si,
+                            species_name=sp.name,
+                            kind=info["type"],
+                            level=info["level"],
+                            pattern_index=info["pattern"],
+                        )
+                    )
 
         # ── Patronen ──────────────────────────────────────────────────────────
         n_pat = lib.object_count(_ObjectType.PATTERN)
@@ -823,8 +858,8 @@ class MsxSimulation:
 
     def run(
         self,
-        save_to_file : bool = False,
-        hyd_file     : Optional[str] = None,
+        save_to_file: bool = False,
+        hyd_file: str | None = None,
     ) -> MsxSimulationResult:
         """
         Voer de volledige simulatie uit en geef gestructureerde resultaten terug.
@@ -851,18 +886,20 @@ class MsxSimulation:
 
         lib.initialize_run(save_to_file)
 
-        state    = self._state
-        n_nodes  = lib.en_node_count()
-        n_links  = lib.en_link_count()
-        n_sp     = len(state.species)
+        state = self._state
+        if state is None:
+            raise RuntimeError("MSX-toestand ontbreekt: load() is niet geslaagd")
+        n_nodes = lib.en_node_count()
+        n_links = lib.en_link_count()
+        n_sp = len(state.species)
 
         node_names = [lib.en_node_id(i) for i in range(1, n_nodes + 1)]
         link_names = [lib.en_link_id(i) for i in range(1, n_links + 1)]
 
         # Pre-alloceer opslag (grote stap): schat tijdstappen
-        time_list  : List[int]       = [0]
-        node_frames: List[np.ndarray] = [state.node_initq.copy()]
-        link_frames: List[np.ndarray] = [state.link_initq.copy()]
+        time_list: list[int] = [0]
+        node_frames: list[np.ndarray] = [state.node_initq.copy()]
+        link_frames: list[np.ndarray] = [state.link_initq.copy()]
 
         # Stapsgewijze simulatielus
         t, tleft = 0, 1
@@ -874,35 +911,31 @@ class MsxSimulation:
 
             for ni in range(1, n_nodes + 1):
                 for si in range(1, n_sp + 1):
-                    node_snap[ni - 1, si - 1] = lib.concentration(
-                        _ObjectType.NODE, ni, si
-                    )
+                    node_snap[ni - 1, si - 1] = lib.concentration(_ObjectType.NODE, ni, si)
 
             for li in range(1, n_links + 1):
                 for si in range(1, n_sp + 1):
-                    link_snap[li - 1, si - 1] = lib.concentration(
-                        _ObjectType.LINK, li, si
-                    )
+                    link_snap[li - 1, si - 1] = lib.concentration(_ObjectType.LINK, li, si)
 
             time_list.append(t)
             node_frames.append(node_snap)
             link_frames.append(link_snap)
 
         return MsxSimulationResult(
-            time_s       = np.array(time_list, dtype=float),
-            node_quality = np.stack(node_frames, axis=0),   # (T, N, S)
-            link_quality = np.stack(link_frames, axis=0),   # (T, L, S)
-            species      = state.species,
-            node_names   = node_names,
-            link_names   = link_names,
+            time_s=np.array(time_list, dtype=float),
+            node_quality=np.stack(node_frames, axis=0),  # (T, N, S)
+            link_quality=np.stack(link_frames, axis=0),  # (T, L, S)
+            species=state.species,
+            node_names=node_names,
+            link_names=link_names,
         )
 
     # ── Schrijfhulpers ────────────────────────────────────────────────────────
 
     def update_initial_quality(
         self,
-        node_values : Optional[Dict[str, Dict[str, float]]] = None,
-        link_values : Optional[Dict[str, Dict[str, float]]] = None,
+        node_values: dict[str, dict[str, float]] | None = None,
+        link_values: dict[str, dict[str, float]] | None = None,
     ) -> None:
         """
         Pas initiële concentraties aan voor knopen en/of leidingen.
@@ -914,15 +947,17 @@ class MsxSimulation:
         """
         if not self._loaded:
             raise RuntimeError("Laad eerst het MSX-bestand via .load().")
-        lib   = self._lib
+        lib = self._lib
 
         def _set(obj_type, items):
             if not items:
                 return
             for name, sp_dict in items.items():
                 idx = (
-                    lib.en_node_index(name) if obj_type == _ObjectType.NODE
-                    else lib.en_link_index(name) if obj_type == _ObjectType.LINK
+                    lib.en_node_index(name)
+                    if obj_type == _ObjectType.NODE
+                    else lib.en_link_index(name)
+                    if obj_type == _ObjectType.LINK
                     else lib.object_index(obj_type, name)
                 )
                 for sp_name, value in sp_dict.items():
@@ -934,11 +969,11 @@ class MsxSimulation:
 
     def configure_source(
         self,
-        node_name    : str,
-        species_name : str,
-        kind         : str,
-        level        : float,
-        pattern_name : Optional[str] = None,
+        node_name: str,
+        species_name: str,
+        kind: str,
+        level: float,
+        pattern_name: str | None = None,
     ) -> None:
         """
         Configureer of overschrijf een externe bron op een knoop.
@@ -954,13 +989,13 @@ class MsxSimulation:
         """
         if not self._loaded:
             raise RuntimeError("Laad eerst het MSX-bestand via .load().")
-        lib      = self._lib
+        lib = self._lib
         kind_map = self._SOURCE_KIND_MAP
         src_code = kind_map.get(kind.upper(), _SourceKind.NONE)
 
         node_idx = lib.en_node_index(node_name)
-        sp_idx   = lib.object_index(_ObjectType.SPECIES, species_name)
-        pat_idx  = 0
+        sp_idx = lib.object_index(_ObjectType.SPECIES, species_name)
+        pat_idx = 0
         if pattern_name:
             pat_idx = lib.object_index(_ObjectType.PATTERN, pattern_name)
 
@@ -973,7 +1008,7 @@ class MsxSimulation:
         idx = self._lib.object_index(_ObjectType.CONSTANT, name)
         self._lib.set_constant(idx, value)
 
-    def add_time_pattern(self, name: str, multipliers: List[float]) -> None:
+    def add_time_pattern(self, name: str, multipliers: list[float]) -> None:
         """Voeg een nieuw tijdpatroon toe en stel de vermenigvuldigers in."""
         if not self._loaded:
             raise RuntimeError("Laad eerst het MSX-bestand via .load().")
@@ -1014,11 +1049,12 @@ class MsxSimulation:
 #  Gemaksfunctie
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 def run_msx(
-    inp_path    : str,
-    msx_path    : str,
-    lib_path    : Optional[str] = None,
-    hyd_file    : Optional[str] = None,
+    inp_path: str,
+    msx_path: str,
+    lib_path: str | None = None,
+    hyd_file: str | None = None,
 ) -> MsxSimulationResult:
     """
     Voer een MSX-simulatie in één aanroep uit.
@@ -1029,4 +1065,5 @@ def run_msx(
     >>> df = result.to_dataframe("CL2")
     """
     with MsxSimulation(inp_path, msx_path, lib_path) as sim:
-        return sim.run(hyd_file=hyd_file)
+        result: MsxSimulationResult = sim.run(hyd_file=hyd_file)
+        return result

@@ -105,7 +105,16 @@ cd nzingaflow
 pip install -e ".[dev]"
 ```
 
-Optionele extra's: `[numba]` (JIT-compilatie), `[geochem]` (PhreeqPython) en `[all]` (alles).
+Optionele extra's: `[numba]` (JIT-compilatie), `[geochem]` (PhreeqPython), `[msx]` (SciPy, voor de MSX-solvers `rk45`/`radau`), `[pandas]` (`to_dataframe()`) en `[all]` (alles).
+
+Controles die CI bij elke push draait (dezelfde commando's werken lokaal):
+
+```bash
+ruff check nzingaflow tests
+ruff format --check nzingaflow tests
+mypy nzingaflow
+pytest
+```
 
 > **Vereisten:** Python ≥ 3.10, NumPy ≥ 1.24, epynet ≥ 2.0 (zie stap 1)
 
@@ -272,6 +281,10 @@ Stappen 1–4 worden uitgevoerd door Numba JIT-kernels als Numba is geïnstallee
 
 ### Modulaire opbouw
 
+![Afhankelijkheden tussen de modules van nzingaflow](nzingaflow/documentation/module-afhankelijkheden.svg)
+
+*Doorgetrokken pijlen: imports in de code (allemaal binnen functies, dus ze worden pas bij gebruik geladen). Gestippelde pijlen: een object dat je zelf meegeeft, zonder import (`EPSRunner(solver, ...)` en `NzingaFlowSolver(..., geochem=...)`). `parse_inp.py` wordt door geen enkele module geïmporteerd en alleen in tests gebruikt. `scipy` en `pandas` zijn alleen nodig voor de solvers `rk45`/`radau` en voor `to_dataframe()`.*
+
 | Module | Klasse / Functie | Verantwoordelijkheid |
 |---|---|---|
 | `solver.py` | `NzingaFlowSolver` | Volledige LTA-solver; koppeling van alle onderdelen |
@@ -285,6 +298,9 @@ Stappen 1–4 worden uitgevoerd door Numba JIT-kernels als Numba is geïnstallee
 | `msx.py` | `MsxReactionSystem` | Pure-Python MSX reactielaag: ODE-solvers + expressieparser (v1.1.0) |
 | `msxlibrary.py` | `MsxSimulation`, `MsxNativeLib` | Directe ctypes-brug naar `libepanetmsx` (EPANET-MSX 2.0); laadt `.msx`-bestanden ongewijzigd; native libs meegeleverd (v1.2.2) |
 | `units.py` | `length_to_m`, `volume_to_m3`, … | EPANET-eenhedenconversies (debiet, diameter, snelheid, leidinglengte, tankvolume) en -enums, gedeeld door `hydraulics.py`, `parse_inp.py` en `solver.py` |
+| `network_sources.py` | `reservoir_sources`, `junction_sources`, `pattern_timing` | Leest reservoir- en junction-bronnen, hun patronen en patroontiming uit het geladen epynet-netwerk (vervangt het vroegere `inp_sources.py`) |
+| `parse_inp.py` | `load_from_epynet`, `parse_inp` | Laadt een netwerk uit epynet, of leest een `.inp`-bestand rechtstreeks (knoop- en leidingtypen, EPANET-eenheidsconversies) |
+| `locale_guard.py` | (bijeffect bij import) | Forceert de C-locale bij elke PHREEQC-aanroep, zodat het decimaalteken altijd `.` is; wordt eenmaal bij het importeren van het pakket geladen |
 
 ### SegmentStore (Structure-of-Arrays)
 
@@ -343,6 +359,7 @@ NzingaFlowSolver(
 | `skip_short_valves` | `bool` | Bij `include_valves=True` worden open korte afsluiters overgeslagen in de transporttopologie. *(v1.2.1)* |
 | `cache_links` | `bool` | Link-gegevens in het hydraulische model cachen (zie `HydraulicModel`). Standaard `False`. |
 | `reversal_deadband` | `float` | Dode zone voor stroomrichting [m³/s]: leidingen met een debiet onder deze waarde behouden hun vorige richting. Standaard `1e-5`; `0` schakelt uit. Zie [Stroomrichting-deadband](#stroomrichting-deadband-en-externe-instroom). |
+| `auto_reservoir_sources` | `bool` | Bij `True` (standaard) worden reservoirs met head > 0 automatisch gevoed vanuit `[SOURCES]`. Zet op `False` als je reservoirs al met `inject()` voedt. Zie [Automatische reservoirbronnen](#automatische-reservoirbronnen) |
 
 **Methoden**
 
@@ -683,7 +700,7 @@ print(sol.pH, sol.total_element('Ca'))
 
 MSX-compatibele multi-species reactielaag die de vier EPANET-MSX 2.0 concepten implementeert: `RATE`, `EQUIL`, `FORMULA` en oppervlaktesoorten (`WALL`). Geef een `MsxReactionSystem`-instantie mee als `geochem`-argument aan `NzingaFlowSolver`.
 
-> Vereist: geen extra afhankelijkheid (scipy nodig voor de `rk45`/`radau`-solvers)
+> Vereist: geen extra afhankelijkheid (scipy nodig voor de `rk45`/`radau`-solvers: `pip install nzingaflow[msx]`)
 
 ```python
 from nzingaflow.msx import MsxReactionSystem

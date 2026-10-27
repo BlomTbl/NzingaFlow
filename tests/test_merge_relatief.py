@@ -6,18 +6,20 @@ M2  rel_tol merged wel, en de totale massa per stof blijft exact behouden
 M3  De drempel schaalt met de concentratie (zelfde absolute verschil, ander effect)
 M4  Numba-kernel en NumPy-fallback geven hetzelfde resultaat
 """
+
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from nzingaflow.segments import SegmentStore
 import nzingaflow.merging as merging
 from nzingaflow.merging import merge_segments
+from nzingaflow.segments import SegmentStore
 
 
-def _store_linear(n: int, spread: float, c0: float = 1.0,
-                  n_species: int = 1, vol: float = 1.0) -> SegmentStore:
+def _store_linear(
+    n: int, spread: float, c0: float = 1.0, n_species: int = 1, vol: float = 1.0
+) -> SegmentStore:
     """n segmenten in één leiding, concentratie loopt lineair op over `spread`."""
     st = SegmentStore(capacity=max(4 * n, 64), n_species=n_species)
     for i in range(n):
@@ -33,7 +35,7 @@ def _mass(st: SegmentStore) -> np.ndarray:
 
 def test_m1_default_is_unchanged():
     st = _store_linear(50, 0.003)
-    merge_segments(st, tol=1e-6, n_pipes=1)          # rel_tol default = 0
+    merge_segments(st, tol=1e-6, n_pipes=1)  # rel_tol default = 0
     assert st.n == 50
 
 
@@ -48,7 +50,7 @@ def test_m2_relative_merges_and_conserves_mass():
 
 def test_m3_threshold_scales_with_concentration():
     # Zelfde absoluut verschil (0,02 mg/L), andere relatieve grootte
-    st_low = _store_linear(2, 0.02, c0=1.0)     # 2% van C -> boven 0,5%: niet mergen
+    st_low = _store_linear(2, 0.02, c0=1.0)  # 2% van C -> boven 0,5%: niet mergen
     st_high = _store_linear(2, 0.02, c0=100.0)  # 0,02% van C -> onder 0,5%: mergen
     assert merge_segments(st_low, tol=1e-6, n_pipes=1, rel_tol=0.005) == 0
     assert merge_segments(st_high, tol=1e-6, n_pipes=1, rel_tol=0.005) == 1
@@ -67,5 +69,5 @@ def test_m4_numba_and_numpy_paths_agree(monkeypatch):
     merge_segments(st_numpy, tol=1e-6, n_pipes=1, rel_tol=0.003)
 
     assert st_numba.n == st_numpy.n
-    np.testing.assert_allclose(st_numba.C[:st_numba.n], st_numpy.C[:st_numpy.n])
-    np.testing.assert_allclose(st_numba.volume[:st_numba.n], st_numpy.volume[:st_numpy.n])
+    np.testing.assert_allclose(st_numba.C[: st_numba.n], st_numpy.C[: st_numpy.n])
+    np.testing.assert_allclose(st_numba.volume[: st_numba.n], st_numpy.volume[: st_numpy.n])

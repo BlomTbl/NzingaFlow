@@ -23,11 +23,13 @@ Per tijdstap of cumulatief:
 """
 
 from __future__ import annotations
+
 import warnings
+
 import numpy as np
 
-
 # ── Tijdstapcontrole ──────────────────────────────────────────────────────────
+
 
 def _cfl_times(pipe_length: np.ndarray, velocity: np.ndarray) -> np.ndarray:
     """
@@ -43,13 +45,13 @@ def _cfl_times(pipe_length: np.ndarray, velocity: np.ndarray) -> np.ndarray:
 
 
 def recommended_dt(
-    pipe_length:  np.ndarray,   # (n_pipes,) [m]
-    velocity:     np.ndarray,   # (n_pipes,) [m/s]
-    k_bulk:       np.ndarray,   # (n_species,) bulk [1/s]
-    k_wall_vol:   np.ndarray | None = None,  # (n_pipes, n_species) [1/s]
-    safety:       float = 0.9,
-    min_dt:       float = 0.1,
-    max_dt:       float = 3600.0,
+    pipe_length: np.ndarray,  # (n_pipes,) [m]
+    velocity: np.ndarray,  # (n_pipes,) [m/s]
+    k_bulk: np.ndarray,  # (n_species,) bulk [1/s]
+    k_wall_vol: np.ndarray | None = None,  # (n_pipes, n_species) [1/s]
+    safety: float = 0.9,
+    min_dt: float = 0.1,
+    max_dt: float = 3600.0,
 ) -> float:
     """
     Bereken de maximale stabiele tijdstap.
@@ -72,7 +74,7 @@ def recommended_dt(
 
     # CFL: geen segment mag zijn leiding overspringen
     dt_cfl = np.min(_cfl_times(pipe_length, velocity))
-    limits['CFL']  = dt_cfl
+    limits["CFL"] = dt_cfl
 
     # Reactiestabiliteit: 10% verandering per stap als grens
     k_total = np.asarray(k_bulk, dtype=float)
@@ -81,7 +83,7 @@ def recommended_dt(
     k_max = k_total.max()
     if k_max > 0:
         dt_rxn = 0.1 / k_max
-        limits['reaction'] = dt_rxn
+        limits["reaction"] = dt_rxn
 
     dt_rec = min(limits.values()) * safety
 
@@ -90,7 +92,7 @@ def recommended_dt(
     # onrealistisch klein wordt voor praktisch stilstaande leidingen,
     # maar als de CFL-grens zelf al kleiner is dan min_dt, dan is
     # min_dt niet van toepassing en hanteren we de CFL-grens.
-    dt_cfl_safe = limits.get('CFL', np.inf) * safety
+    dt_cfl_safe = limits.get("CFL", np.inf) * safety
     effective_min = min(min_dt, dt_cfl_safe)
     dt_rec = float(np.clip(dt_rec, effective_min, max_dt))
 
@@ -98,12 +100,12 @@ def recommended_dt(
 
 
 def check_dt(
-    dt:           float,
-    pipe_length:  np.ndarray,
-    velocity:     np.ndarray,
-    k_bulk:       np.ndarray,
-    k_wall_vol:   np.ndarray | None = None,
-    warn:         bool = True,
+    dt: float,
+    pipe_length: np.ndarray,
+    velocity: np.ndarray,
+    k_bulk: np.ndarray,
+    k_wall_vol: np.ndarray | None = None,
+    warn: bool = True,
 ) -> dict:
     """
     Controleer of een opgegeven tijdstap stabiel is.
@@ -118,20 +120,20 @@ def check_dt(
         'cfl_ratio'   : dt / dt_CFL  (< 1 is veilig)
         'violations'  : list[str] beschrijvingen van schendingen
     """
-    dt_rec = recommended_dt(pipe_length, velocity, k_bulk, k_wall_vol,
-                            safety=1.0, min_dt=0.0, max_dt=1e9)
+    dt_rec = recommended_dt(
+        pipe_length, velocity, k_bulk, k_wall_vol, safety=1.0, min_dt=0.0, max_dt=1e9
+    )
 
-    v_max   = np.maximum(velocity, 1e-10)
-    cfl_t   = _cfl_times(pipe_length, velocity)
-    dt_cfl  = np.min(cfl_t)
-    cfl_ok  = dt <= dt_cfl
+    cfl_t = _cfl_times(pipe_length, velocity)
+    dt_cfl = np.min(cfl_t)
+    cfl_ok = dt <= dt_cfl
 
     k_total = np.asarray(k_bulk, dtype=float)
     if k_wall_vol is not None:
         k_total = k_total + np.max(k_wall_vol, axis=0)
-    k_max      = k_total.max()
-    dt_rxn     = (0.1 / k_max) if k_max > 0 else np.inf
-    rxn_ok     = dt <= dt_rxn
+    k_max = k_total.max()
+    dt_rxn = (0.1 / k_max) if k_max > 0 else np.inf
+    rxn_ok = dt <= dt_rxn
 
     violations = []
     if not cfl_ok:
@@ -142,26 +144,24 @@ def check_dt(
             f"v={velocity[worst_pipe]:.3f}m/s)"
         )
     if not rxn_ok:
-        violations.append(
-            f"Reactie: dt={dt:.1f}s > dt_rxn={dt_rxn:.1f}s "
-            f"(k_max={k_max:.4f}/s)"
-        )
+        violations.append(f"Reactie: dt={dt:.1f}s > dt_rxn={dt_rxn:.1f}s (k_max={k_max:.4f}/s)")
 
     if warn and violations:
         for v in violations:
             warnings.warn(f"Tijdstap instabiliteit: {v}", RuntimeWarning, stacklevel=2)
 
     return {
-        'cfl_ok':      cfl_ok,
-        'reaction_ok': rxn_ok,
-        'stable':      cfl_ok and rxn_ok,
-        'dt_rec':      dt_rec,
-        'cfl_ratio':   dt / dt_cfl,
-        'violations':  violations,
+        "cfl_ok": cfl_ok,
+        "reaction_ok": rxn_ok,
+        "stable": cfl_ok and rxn_ok,
+        "dt_rec": dt_rec,
+        "cfl_ratio": dt / dt_cfl,
+        "violations": violations,
     }
 
 
 # ── Massabalans ───────────────────────────────────────────────────────────────
+
 
 class MassBalanceTracker:
     """
@@ -190,14 +190,14 @@ class MassBalanceTracker:
     """
 
     def __init__(self, n_species: int):
-        self.n_species    = n_species
-        self.injected     = np.zeros(n_species)
-        self.bulk_decay   = np.zeros(n_species)
-        self.wall_decay   = np.zeros(n_species)
-        self.outflow      = np.zeros(n_species)
-        self.leakage      = np.zeros(n_species)
-        self._prev_mass   = np.zeros(n_species)
-        self._step        = 0
+        self.n_species = n_species
+        self.injected = np.zeros(n_species)
+        self.bulk_decay = np.zeros(n_species)
+        self.wall_decay = np.zeros(n_species)
+        self.outflow = np.zeros(n_species)
+        self.leakage = np.zeros(n_species)
+        self._prev_mass = np.zeros(n_species)
+        self._step = 0
 
     def record_injection(self, C_vector, volume: float) -> None:
         """Registreer een injectie-segment."""
@@ -219,12 +219,12 @@ class MassBalanceTracker:
     def record_step(
         self,
         store,
-        decay_k:     np.ndarray,           # (n_species,) bulk [1/s]
-        dt:          float,
-        k_wall_vol:  np.ndarray | None = None,  # (n_pipes, n_species) [1/s]
-        exited_C:    np.ndarray | None = None,  # (n_exit, n_species)
-        exited_V:    np.ndarray | None = None,  # (n_exit,)
-        decay_loss:  tuple | None = None,       # (bulk, wall) exact, (n_species,)
+        decay_k: np.ndarray,  # (n_species,) bulk [1/s]
+        dt: float,
+        k_wall_vol: np.ndarray | None = None,  # (n_pipes, n_species) [1/s]
+        exited_C: np.ndarray | None = None,  # (n_exit, n_species)
+        exited_V: np.ndarray | None = None,  # (n_exit,)
+        decay_loss: tuple | None = None,  # (bulk, wall) exact, (n_species,)
     ) -> None:
         """
         Registreer één tijdstap voor de massabalans.
@@ -265,11 +265,11 @@ class MassBalanceTracker:
             # consistent met de bulk-schatting hierboven. De wandreactiesnelheid
             # varieert per leiding, dus we berekenen een gewogen gemiddelde k_wall
             # over alle actieve segmenten en passen dat toe op _prev_mass.
-            k_w_seg = k_wall_vol[store.pipe[:n]]          # (n, n_species)
-            vol_n   = store.volume[:n, np.newaxis]        # (n, 1)
+            k_w_seg = k_wall_vol[store.pipe[:n]]  # (n, n_species)
+            vol_n = store.volume[:n, np.newaxis]  # (n, 1)
             tot_vol = vol_n.sum()
             if tot_vol > 0:
-                k_w_mean = (k_w_seg * vol_n).sum(axis=0) / tot_vol   # (n_species,)
+                k_w_mean = (k_w_seg * vol_n).sum(axis=0) / tot_vol  # (n_species,)
                 mass_wall = self._prev_mass * (1 - np.exp(-k_w_mean * dt))
                 self.wall_decay += mass_wall
 
@@ -277,14 +277,14 @@ class MassBalanceTracker:
             self.outflow += (exited_C * exited_V[:, np.newaxis]).sum(axis=0)
 
         self._prev_mass = curr_mass
-        self._step     += 1
+        self._step += 1
 
     def current_mass(self, store) -> np.ndarray:
         """Huidige massa in het systeem [mass-eenheid]."""
         n = store.n
         if n == 0:
             return np.zeros(self.n_species)
-        return (store.C[:n] * store.volume[:n, np.newaxis]).sum(axis=0)
+        return np.asarray((store.C[:n] * store.volume[:n, np.newaxis]).sum(axis=0))
 
     def report(self, store=None, tank_mass=None) -> dict:
         """
@@ -312,14 +312,18 @@ class MassBalanceTracker:
         """
         in_sys = self.current_mass(store) if store is not None else np.zeros(self.n_species)
 
-        in_tanks = (np.zeros(self.n_species) if tank_mass is None
-                    else np.asarray(tank_mass, dtype=np.float64))
-        accounted = (in_sys + in_tanks + self.bulk_decay + self.wall_decay
-                     + self.outflow + self.leakage)
-        total_in  = self.injected
+        in_tanks = (
+            np.zeros(self.n_species)
+            if tank_mass is None
+            else np.asarray(tank_mass, dtype=np.float64)
+        )
+        accounted = (
+            in_sys + in_tanks + self.bulk_decay + self.wall_decay + self.outflow + self.leakage
+        )
+        total_in = self.injected
 
         # Relatieve fout per stof
-        with np.errstate(divide='ignore', invalid='ignore'):
+        with np.errstate(divide="ignore", invalid="ignore"):
             rel_err = np.where(
                 total_in > 0,
                 np.abs(total_in - accounted) / total_in,
@@ -327,24 +331,24 @@ class MassBalanceTracker:
             )
 
         return {
-            'injected':     self.injected.copy(),
-            'in_system':    in_sys,
-            'in_tanks':     in_tanks,
-            'bulk_decay':   self.bulk_decay.copy(),
-            'wall_decay':   self.wall_decay.copy(),
-            'outflow':      self.outflow.copy(),
-            'leakage':      self.leakage.copy(),
-            'accounted':    accounted,
-            'balance_error': rel_err,
-            'ok':           bool((rel_err < 0.01).all()),
+            "injected": self.injected.copy(),
+            "in_system": in_sys,
+            "in_tanks": in_tanks,
+            "bulk_decay": self.bulk_decay.copy(),
+            "wall_decay": self.wall_decay.copy(),
+            "outflow": self.outflow.copy(),
+            "leakage": self.leakage.copy(),
+            "accounted": accounted,
+            "balance_error": rel_err,
+            "ok": bool((rel_err < 0.01).all()),
         }
 
     def reset(self) -> None:
         """Reset alle tellers."""
-        self.injected[:]   = 0.0
+        self.injected[:] = 0.0
         self.bulk_decay[:] = 0.0
         self.wall_decay[:] = 0.0
-        self.outflow[:]    = 0.0
-        self.leakage[:]    = 0.0
+        self.outflow[:] = 0.0
+        self.leakage[:] = 0.0
         self._prev_mass[:] = 0.0
-        self._step         = 0
+        self._step = 0

@@ -4,7 +4,9 @@ WAARSCHUWING (zie migratieopdracht): een dicht grid is geen representatieve
 topologie voor het _handle_exits()-splitsingspad in solver.py — gebruik dit
 alleen voor hydraulica-schaal-metingen (EN_openH, property-read-kosten).
 """
+
 import sys
+
 
 def generate_grid_inp(n_side: int, path: str) -> None:
     """n_side x n_side grid van junctions, plus 1 reservoir aan de rand."""
@@ -30,11 +32,11 @@ def generate_grid_inp(n_side: int, path: str) -> None:
         for j in range(n_side):
             uid = f"J{i}_{j}"
             if j + 1 < n_side:
-                uid2 = f"J{i}_{j+1}"
+                uid2 = f"J{i}_{j + 1}"
                 lines.append(f" PIPE{pipe_id}    {uid}    {uid2}    100    150    100    0    Open")
                 pipe_id += 1
             if i + 1 < n_side:
-                uid2 = f"J{i+1}_{j}"
+                uid2 = f"J{i + 1}_{j}"
                 lines.append(f" PIPE{pipe_id}    {uid}    {uid2}    100    150    100    0    Open")
                 pipe_id += 1
     lines.append("")
@@ -49,7 +51,7 @@ def generate_grid_inp(n_side: int, path: str) -> None:
     for i in range(n_side):
         for j in range(n_side):
             uid = f"J{i}_{j}"
-            lines.append(f" {uid}  {i*10}  {j*10}")
+            lines.append(f" {uid}  {i * 10}  {j * 10}")
     lines.append("")
     lines.append("[REPORT]")
     lines.append(" Status  No")

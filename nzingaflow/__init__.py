@@ -46,43 +46,51 @@ Met geochemie (PhreeqPython):
     results = runner.run(decay_k=np.zeros(6), ...)
 """
 
-from .solver      import NzingaFlowSolver
-from .eps         import EPSRunner
-from .hydraulics  import HydraulicModel
-from .segments    import SegmentStore
-from .stability   import recommended_dt, check_dt, MassBalanceTracker
-from .lta         import (
-    bulk_first_order_multi,
-    wall_first_order_multi,
-    compute_wall_k,
+from .eps import EPSRunner
+from .geochemistry import (
+    GeochemSolver,
+    PhreeqSolutionMode,
+    SpeciesMap,
+    chlorine_decay_geochem,
+    full_water_chemistry,
+)
+from .hydraulics import HydraulicModel
+from .lta import (
+    USE_NUMBA,
     advect,
+    build_combined_exp,
+    bulk_first_order_multi,
+    combined_decay_multi,
+    compute_wall_k,
     exit_detect,
     node_mixing_multi,
     tank_step_implicit,
+    wall_first_order_multi,
+    warmup_numba,
 )
-from .merging     import merge_segments
-from .geochemistry import GeochemSolver, SpeciesMap, chlorine_decay_geochem, full_water_chemistry, PhreeqSolutionMode
+from .merging import merge_segments, warmup_numba_merging
 from .msx import (
     MsxReactionSystem,
+    arsenic_oxidation_msx,
     chloramine_decay_msx,
     chlorine_nom_msx,
-    arsenic_oxidation_msx,
 )
 from .msxlibrary import (
+    MsxError,
     MsxNativeLib,
     MsxNetworkState,
     MsxSimulation,
     MsxSimulationResult,
-    MsxSpecies,
     MsxSourceRecord,
-    MsxError,
+    MsxSpecies,
     run_msx,
 )
-from .lta          import warmup_numba, USE_NUMBA, combined_decay_multi, build_combined_exp
-from .merging      import warmup_numba_merging
+from .segments import SegmentStore
+from .solver import NzingaFlowSolver
+from .stability import MassBalanceTracker, check_dt, recommended_dt
 
 __version__ = "1.3.1"
-__author__  = "NzingaFlow"
+__author__ = "NzingaFlow"
 
 __all__ = [
     # Hoofd-API

@@ -6,12 +6,13 @@ P2  Zonder reacties: apply_geochemistry roept PHREEQC niet aan
 P3  Met een kinetiek-script: apply_geochemistry verwerkt de segmenten wel
 P4  apply_mixing blijft werken (initialiseert PHREEQC) ook zonder reacties
 """
+
 from __future__ import annotations
 
 import numpy as np
 
-from nzingaflow.segments import SegmentStore
 from nzingaflow.geochemistry import GeochemSolver, SpeciesMap
+from nzingaflow.segments import SegmentStore
 
 
 def _solver(**kwargs) -> GeochemSolver:

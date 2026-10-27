@@ -27,6 +27,7 @@ Alle tests zijn gemarkeerd met @pytest.mark.requires_msx en slaan zichzelf
 over (skip) als de native bibliotheken niet gevonden kunnen worden, zodat
 de rest van de testsuite op een machine zonder deze binaries blijft draaien.
 """
+
 from __future__ import annotations
 
 import textwrap

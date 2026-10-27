@@ -37,7 +37,6 @@ correctie hoeft maar op één plek.
 """
 
 from __future__ import annotations
-import numpy as np
 
 # Native EPYnetDTD-enums worden hier herexporteerd zodat andere modules
 # (`hydraulics.py`, `parse_inp.py`) niet zelf magische ints hoeven te
@@ -53,20 +52,41 @@ from epynet.enum import (
 )
 
 __all__ = [
-    "EN_CountType", "EN_InitHydOption", "EN_LinkProperty",
-    "EN_NodeProperty", "EN_StatusReport", "EN_TimeParameter",
-    "FLOW_CODE_TO_LABEL", "FLOW_TO_M3S", "US_UNITS",
-    "INCH_TO_M", "FT_S_TO_M_S", "FT_TO_M",
-    "flow_units_label", "diameter_to_m", "velocity_to_ms", "flow_to_m3s",
-    "length_to_m", "volume_to_m3", "FT3_TO_M3",
+    "EN_CountType",
+    "EN_InitHydOption",
+    "EN_LinkProperty",
+    "EN_NodeProperty",
+    "EN_StatusReport",
+    "EN_TimeParameter",
+    "FLOW_CODE_TO_LABEL",
+    "FLOW_TO_M3S",
+    "US_UNITS",
+    "INCH_TO_M",
+    "FT_S_TO_M_S",
+    "FT_TO_M",
+    "flow_units_label",
+    "diameter_to_m",
+    "velocity_to_ms",
+    "flow_to_m3s",
+    "length_to_m",
+    "volume_to_m3",
+    "FT3_TO_M3",
 ]
 
 # ── Flow-eenheden ────────────────────────────────────────────────────────────
 
 # Codes zoals geretourneerd door EN_getflowunits() — vaste EPANET-volgorde.
 FLOW_CODE_TO_LABEL: dict[int, str] = {
-    0: 'CFS', 1: 'GPM', 2: 'MGD', 3: 'IMGD', 4: 'AFD',
-    5: 'LPS', 6: 'LPM', 7: 'MLD', 8: 'CMH', 9: 'CMD',
+    0: "CFS",
+    1: "GPM",
+    2: "MGD",
+    3: "IMGD",
+    4: "AFD",
+    5: "LPS",
+    6: "LPM",
+    7: "MLD",
+    8: "CMH",
+    9: "CMD",
 }
 
 # Conversiefactor flow-eenheid → m³/s. Herleid uit de exacte SI-definities
@@ -84,25 +104,25 @@ FLOW_CODE_TO_LABEL: dict[int, str] = {
 #   CMH  : 1 m³/uur                                           → 2.77778e-4
 #   CMD  : 1 m³/dag                                           → 1.15740741e-5
 FLOW_TO_M3S: dict[str, float] = {
-    'CFS':  0.0283168466,
-    'GPM':  6.30901964e-5,
-    'MGD':  0.0438126364,
-    'IMGD': 0.0526167824,
-    'AFD':  0.0142764102,
-    'LPS':  0.001,
-    'LPM':  1.0 / 60_000.0,
-    'MLD':  1.0 / 86.4,
-    'CMH':  1.0 / 3_600.0,
-    'CMD':  1.0 / 86_400.0,
+    "CFS": 0.0283168466,
+    "GPM": 6.30901964e-5,
+    "MGD": 0.0438126364,
+    "IMGD": 0.0526167824,
+    "AFD": 0.0142764102,
+    "LPS": 0.001,
+    "LPM": 1.0 / 60_000.0,
+    "MLD": 1.0 / 86.4,
+    "CMH": 1.0 / 3_600.0,
+    "CMD": 1.0 / 86_400.0,
 }
 
 # US-eenheden: diameter in inch, snelheid in ft/s (i.p.v. mm / m/s bij SI).
-US_UNITS: frozenset[str] = frozenset({'CFS', 'GPM', 'MGD', 'IMGD', 'AFD'})
+US_UNITS: frozenset[str] = frozenset({"CFS", "GPM", "MGD", "IMGD", "AFD"})
 
 INCH_TO_M: float = 0.0254
 FT_S_TO_M_S: float = 0.3048
-FT_TO_M: float = 0.3048   # leidinglengte: ft → m (US-eenheden)
-FT3_TO_M3: float = FT_TO_M ** 3   # tankvolume: ft³ → m³ (US-eenheden)
+FT_TO_M: float = 0.3048  # leidinglengte: ft → m (US-eenheden)
+FT3_TO_M3: float = FT_TO_M**3  # tankvolume: ft³ → m³ (US-eenheden)
 
 
 def flow_units_label(net) -> str:
@@ -116,8 +136,8 @@ def flow_units_label(net) -> str:
     try:
         code = int(net.EN_getflowunits())
     except Exception:
-        return 'CMH'
-    return FLOW_CODE_TO_LABEL.get(code, 'CMH')
+        return "CMH"
+    return FLOW_CODE_TO_LABEL.get(code, "CMH")
 
 
 def flow_to_m3s(flow, units: str):

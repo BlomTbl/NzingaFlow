@@ -2,7 +2,7 @@
 """
 Integratietests tegen echte EPANET .inp-netwerken via epynet.
 
-In tegenstelling tot tests/test_inzingaflow.py en tests/test_validation.py
+In tegenstelling tot tests/test_validation.py
 (die volledig op synthetische numpy-topologieën draaien) laden deze tests
 daadwerkelijke .inp-bestanden via HydraulicModel/NzingaFlowSolver, zodat
 epynet-specifieke edge cases worden gedekt die met arrays-only tests niet
@@ -57,15 +57,17 @@ E5  Sessie-hergebruik (EN_openH één keer per sessie) — numerieke regressie
 
 Alle tests zijn gemarkeerd met @pytest.mark.requires_epynet.
 """
+
 from __future__ import annotations
+
 import math
 import textwrap
 
 import numpy as np
 import pytest
 
-from nzingaflow.hydraulics import HydraulicModel
 from nzingaflow import NzingaFlowSolver
+from nzingaflow.hydraulics import HydraulicModel
 
 pytestmark = pytest.mark.requires_epynet
 
@@ -263,8 +265,9 @@ class TestIncludeValvesTopology:
     def test_valve_included_with_zero_length(self, valve_inp):
         hm = HydraulicModel(valve_inp, include_valves=True)
         hm.solve()
-        (pipe_start, pipe_end, pipe_length, pipe_area,
-         node_count, pipe_ids, node_names) = hm.get_topology()
+        (pipe_start, pipe_end, pipe_length, pipe_area, node_count, pipe_ids, node_names) = (
+            hm.get_topology()
+        )
 
         assert "V1" in pipe_ids
         v_idx = pipe_ids.index("V1")
@@ -274,7 +277,7 @@ class TestIncludeValvesTopology:
         assert pipe_area[v_idx] > 0.0
 
     def test_valve_excluded_by_default(self, valve_inp):
-        hm = HydraulicModel(valve_inp)   # include_valves=False (standaard)
+        hm = HydraulicModel(valve_inp)  # include_valves=False (standaard)
         hm.solve()
         _, _, _, _, _, pipe_ids, _ = hm.get_topology()
         assert "V1" not in pipe_ids
@@ -293,7 +296,9 @@ class TestIncludeValvesTransport:
     """E2 — end-to-end stoftransport door een klep."""
 
     def test_tracer_reaches_downstream_deadend(self, valve_inp):
-        solver = NzingaFlowSolver(valve_inp, n_species=1, include_valves=True, auto_reservoir_sources=False)
+        solver = NzingaFlowSolver(
+            valve_inp, n_species=1, include_valves=True, auto_reservoir_sources=False
+        )
         solver.inject("R1", C_vector=[1.0], volume=0.0005)
 
         j3 = solver.node_index["J3"]
@@ -315,7 +320,9 @@ class TestIncludeValvesTransport:
     def test_no_transport_when_valves_excluded(self, valve_inp):
         # Zonder include_valves is J1→J2 topologisch niet verbonden, dus
         # een injectie bij R1 kan J2/J3 nooit bereiken.
-        solver = NzingaFlowSolver(valve_inp, n_species=1, include_valves=False, auto_reservoir_sources=False)
+        solver = NzingaFlowSolver(
+            valve_inp, n_species=1, include_valves=False, auto_reservoir_sources=False
+        )
         solver.inject("R1", C_vector=[1.0], volume=0.0005)
 
         j3 = solver.node_index["J3"]
@@ -331,8 +338,9 @@ class TestIncludePumpsDiameterFallback:
         hm = HydraulicModel(pump_inp, include_pumps=True)
         hm.solve()
         # Voor de fix: AttributeError('Nonexistant Attribute', 'diameter')
-        (pipe_start, pipe_end, pipe_length, pipe_area,
-         node_count, pipe_ids, node_names) = hm.get_topology()
+        (pipe_start, pipe_end, pipe_length, pipe_area, node_count, pipe_ids, node_names) = (
+            hm.get_topology()
+        )
 
         assert "PU1" in pipe_ids
         pu_idx = pipe_ids.index("PU1")
@@ -341,7 +349,7 @@ class TestIncludePumpsDiameterFallback:
         assert pipe_area[pu_idx] == 0.0
 
     def test_pump_excluded_by_default(self, pump_inp):
-        hm = HydraulicModel(pump_inp)   # include_pumps=False (standaard)
+        hm = HydraulicModel(pump_inp)  # include_pumps=False (standaard)
         hm.solve()
         _, _, _, _, _, pipe_ids, _ = hm.get_topology()
         assert pipe_ids == []
@@ -395,12 +403,12 @@ class TestSessionReuse:
                 vels_fresh.append(vel.copy())
 
         for i, st in enumerate(self._SIMTIMES):
-            assert np.allclose(
-                flows_reused[i], flows_fresh[i], rtol=1e-9, atol=1e-12
-            ), f"flow-mismatch bij simtime={st}: {flows_reused[i]} vs {flows_fresh[i]}"
-            assert np.allclose(
-                vels_reused[i], vels_fresh[i], rtol=1e-9, atol=1e-12
-            ), f"velocity-mismatch bij simtime={st}"
+            assert np.allclose(flows_reused[i], flows_fresh[i], rtol=1e-9, atol=1e-12), (
+                f"flow-mismatch bij simtime={st}: {flows_reused[i]} vs {flows_fresh[i]}"
+            )
+            assert np.allclose(vels_reused[i], vels_fresh[i], rtol=1e-9, atol=1e-12), (
+                f"velocity-mismatch bij simtime={st}"
+            )
 
     def test_solve_is_memoized_for_identical_simtime(self, eps_tank_inp):
         # Tweede solve() met dezelfde simtime moet een no-op zijn (geen
