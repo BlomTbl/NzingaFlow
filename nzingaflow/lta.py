@@ -91,7 +91,8 @@ def _combined_decay_kernel(C, n, n_species, pipe, combined_exp):
     Elimineert de tweede pass over C t.o.v. aparte bulk + wall aanroepen:
     - Één gather van combined_exp per segment (was: twee)
     - Één schrijfoperatie naar C per element (was: twee)
-    Verwachte winst: ~28 µs per stap (n=5000, n_species=2).
+    Gemeten (zie benchmarks/bench_kernels.py): ~1.8x (NumPy) en ~2x (Numba, 1.3-2.8x
+    tussen runs) sneller dan aparte bulk- en wandaanroepen (n=5000, n_species=2).
     """
     for i in range(n):
         p = pipe[i]

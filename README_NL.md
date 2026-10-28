@@ -41,7 +41,7 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
 ## Kenmerken
 
 - **Vectorized LTA-solver** — geen Python-lussen over segmenten; alle berekeningen via NumPy
-- **Numba JIT-kernels** — optionele ~4–5× versnelling via `pip install numba`
+- **Numba JIT-kernels** — optionele versnelling via `pip install numba` (ongeveer 4–9× per kernel, 1,4–1,9× voor een volledige tijdstap; zie Prestatiecijfers)
 - **Multi-species** — meerdere stoffen simultaan in één `C`-matrix `(n_segmenten × n_stoffen)`
 - **Gecombineerd verval** — bulk- en wandverval samengevoegd in één geheugenpass (`combined_decay_multi`)
 - **Wandreacties** — twee-film-model per leiding met drieregime Sherwood-correlatie (v1.1.0)
@@ -57,17 +57,23 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
 - **Massabalansregistratie** — via `MassBalanceTracker` (opt-in)
 - **Flow reversal** — detectie en correcte segmentspiegeling
 - **Pre-allocated buffers** — geen heap-allocaties in de hot-path
-- **CSR pipe-index** — gecachede gesorteerde index in `SegmentStore`; lexsort overgeslagen indien geldig
+- **CSR pipe-index** — gesorteerde leidingindex in `SegmentStore`, opgebouwd met een snelle sortering voor (bijna) gesorteerde stores (zelfde volgorde als `np.lexsort`); `merge_segments()` markeert hem daarna als ongeldig, dus hij wordt bij elke merge opnieuw opgebouwd
 
 ### Prestatiecijfers
 
-| Operatie | Grootte | Zonder Numba | Met Numba |
-|---|---|---|---|
-| `combined_decay_multi()` | 5.000 segs, 200 leidingen, 2 stoffen | ~63 µs | ~12 µs |
-| `advect()` | 5.000 segs | ~15 µs | ~4 µs |
-| `node_mixing_multi()` | 5.000 segs, 150 knopen | ~32 µs | ~8 µs |
-| `merge_segments()` | 5.000 segs, 2 stoffen | ~2.200 µs | ~90 µs |
-| **Volledige tijdstap** | 5.000 segs, 200 leidingen, 2 stoffen | **~280 µs** | **~60–90 µs** |
+| Operatie | Grootte | Zonder Numba | Met Numba | Versnelling |
+|---|---|---|---|---|
+| `combined_decay_multi()` | 5.000 segs, 200 leidingen, 2 stoffen | ~58 µs | ~10 µs | 4–6× |
+| `advect()` | 5.000 segs | ~16 µs | ~4 µs | ~4× |
+| `node_mixing_multi()` | 5.000 segs, 150 knopen, 10% bereikt een knoop | ~52 µs | ~6 µs | 7–9× |
+| `merge_segments()` | 5.000 segs, 200 leidingen, 2 stoffen, gesorteerde store, niets samen te voegen | ~285 µs | ~185 µs | 1,5–1,6× |
+| **Volledige tijdstap** | 5.000 segs, keten van 200 leidingen, 2 stoffen | **~350 µs** | **~235 µs** | **1,4–1,9×** |
+
+Andere scenario's: `node_mixing_multi()` waarbij alle segmenten een knoop bereiken ~165 → ~22 µs; de keten `advect` + verval + exit + menging ~158 → ~25 µs (6–7×); `merge_segments()` met alles samenvoegbaar ~1.410 → ~750 µs (1,7–1,9×); `merge_segments()` op een store in willekeurige volgorde (slechtste geval) ~630 → ~490 µs (1,1–1,3×); volledige tijdstap op een dicht 10×10-grid (181 leidingen, elke knoop splitst) ~530 → ~370 µs (1,3–1,5×).
+
+*Numba versnelt de afzonderlijke kernels ongeveer 4–9×, maar `merge_segments()` en een volledige tijdstap slechts ongeveer 1,4–1,9×: wat daar overblijft is vooral NumPy-kopieer- en gatherwerk rond de Numba-kernels en bookkeeping in Python, die Numba niet versnelt. De leidingsortering in `merge_segments()` heeft een snel pad voor een (bijna) gesorteerde store (ongeveer 30 µs in plaats van ongeveer 500 µs voor `np.lexsort`) en geeft exact dezelfde volgorde. `combined_decay_multi()` is ongeveer 1,8× (NumPy) en ongeveer 2× (Numba, 1,3–2,8× tussen runs) sneller dan aparte bulk- en wandaanroepen.*
+
+*Gemeten met `benchmarks/bench_kernels.py` (mediaan van drie runs; kernels: mediaan van 7 reeksen; volledige tijdstap: gemiddelde over 500 stappen, inclusief de merge-stap die elke 10e stap draait) op een gedeelde cloud-VM met 1 vCPU, Python 3.12, NumPy 2.4 en Numba 0.68. De absolute tijden varieerden op die VM ongeveer ±30% tussen runs en meer dan 1,5× tussen sessies; de versnellingsfactoren zijn stabieler. Draai `python benchmarks/bench_kernels.py --compare` op je eigen hardware voordat je absolute cijfers noemt.*
 
 ---
 
@@ -110,8 +116,8 @@ Optionele extra's: `[numba]` (JIT-compilatie), `[geochem]` (PhreeqPython), `[msx
 Controles die CI bij elke push draait (dezelfde commando's werken lokaal):
 
 ```bash
-ruff check nzingaflow tests
-ruff format --check nzingaflow tests
+ruff check nzingaflow tests benchmarks
+ruff format --check nzingaflow tests benchmarks
 mypy nzingaflow
 pytest
 ```
@@ -1359,7 +1365,7 @@ Details: zie [CHANGELOG_NL.md](CHANGELOG_NL.md).
 - MassBalanceTracker, CFL-controle
 - Parallel-reductie segmentmerging (O(n log n))
 - Flow reversal detectie en segmentspiegeling
-- Numba JIT-kernels voor alle hot-path operaties (~4–5× sneller)
+- Numba JIT-kernels voor de hot-path kernels (ongeveer 4–9× per kernel; 1,4–1,9× voor `merge_segments()` en een volledige tijdstap)
 - Gecombineerd bulk + wandverval in één geheugenpass (`combined_decay_multi` / `build_combined_exp`)
 - Vectorized junction-routing via `_node_type` / `_node_out0`-cache (~734× t.o.v. Python-lus)
 - CSR pipe-index in `SegmentStore` (gecachede lexsort voor `merge_segments`)

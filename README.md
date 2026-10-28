@@ -41,7 +41,7 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 ## Features
 
 - **Vectorized LTA solver** — no Python loops over segments; all calculations via NumPy
-- **Numba JIT kernels** — optional ~4–5× speedup via `pip install numba`
+- **Numba JIT kernels** — optional speed-up via `pip install numba` (about 4–9× per kernel, 1.4–1.9× for a full time step; see Performance Benchmarks)
 - **Multi-species** — multiple species simultaneously in a single `C` matrix `(n_segments × n_species)`
 - **Combined decay** — bulk and wall decay fused into one memory pass (`combined_decay_multi`)
 - **Wall reactions** — two-film model per pipe with three-regime Sherwood correlation (v1.1.0)
@@ -57,17 +57,23 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 - **Mass balance tracking** — via `MassBalanceTracker` (opt-in)
 - **Flow reversal** — detection and correct segment mirroring
 - **Pre-allocated buffers** — zero heap allocations in the hot path
-- **CSR pipe-index** — cached sorted index in `SegmentStore`; lexsort skipped when valid
+- **CSR pipe-index** — sorted pipe index in `SegmentStore`, built with a fast sort for (nearly) sorted stores (same order as `np.lexsort`); `merge_segments()` marks it dirty afterwards, so it is rebuilt on every merge
 
 ### Performance Benchmarks
 
-| Operation | Scale | Without Numba | With Numba |
-|---|---|---|---|
-| `combined_decay_multi()` | 5,000 segs, 200 pipes, 2 species | ~63 µs | ~12 µs |
-| `advect()` | 5,000 segs | ~15 µs | ~4 µs |
-| `node_mixing_multi()` | 5,000 segs, 150 nodes | ~32 µs | ~8 µs |
-| `merge_segments()` | 5,000 segs, 2 species | ~2,200 µs | ~90 µs |
-| **Full time step** | 5,000 segs, 200 pipes, 2 species | **~280 µs** | **~60–90 µs** |
+| Operation | Scale | Without Numba | With Numba | Speed-up |
+|---|---|---|---|---|
+| `combined_decay_multi()` | 5,000 segs, 200 pipes, 2 species | ~58 µs | ~10 µs | 4–6× |
+| `advect()` | 5,000 segs | ~16 µs | ~4 µs | ~4× |
+| `node_mixing_multi()` | 5,000 segs, 150 nodes, 10% reach a node | ~52 µs | ~6 µs | 7–9× |
+| `merge_segments()` | 5,000 segs, 200 pipes, 2 species, sorted store, nothing to merge | ~285 µs | ~185 µs | 1.5–1.6× |
+| **Full time step** | 5,000 segs, 200-pipe chain, 2 species | **~350 µs** | **~235 µs** | **1.4–1.9×** |
+
+Other scenarios: `node_mixing_multi()` with all segments reaching a node ~165 → ~22 µs; the chain `advect` + decay + exit + mixing ~158 → ~25 µs (6–7×); `merge_segments()` with everything mergeable ~1,410 → ~750 µs (1.7–1.9×); `merge_segments()` on a store in random order (worst case) ~630 → ~490 µs (1.1–1.3×); full time step on a dense 10×10 grid (181 pipes, every node splits) ~530 → ~370 µs (1.3–1.5×).
+
+*Numba speeds up the individual kernels by about 4–9×, but `merge_segments()` and a full time step only by about 1.4–1.9×: what remains there is mostly NumPy copying and gathering around the Numba kernels and Python-level bookkeeping, which Numba does not speed up. The pipe sort in `merge_segments()` has a fast path for a (nearly) sorted store (about 30 µs instead of about 500 µs for `np.lexsort`) and gives exactly the same order. `combined_decay_multi()` is about 1.8× (NumPy) and about 2× (Numba, 1.3–2.8× between runs) faster than separate bulk and wall calls.*
+
+*Measured with `benchmarks/bench_kernels.py` (median of three runs; kernels: median of 7 series; full time step: mean over 500 steps, including the merge step that runs every 10th step) on a shared cloud VM with 1 vCPU, Python 3.12, NumPy 2.4 and Numba 0.68. Absolute times varied by about ±30% between runs and by more than 1.5× between sessions on that VM; the speed-up factors are more stable. Run `python benchmarks/bench_kernels.py --compare` on your own hardware before quoting absolute numbers.*
 
 ---
 
@@ -110,8 +116,8 @@ Optional extras: `[numba]` (JIT compilation), `[geochem]` (PhreeqPython), `[msx]
 Checks that CI runs on every push (the same commands work locally):
 
 ```bash
-ruff check nzingaflow tests
-ruff format --check nzingaflow tests
+ruff check nzingaflow tests benchmarks
+ruff format --check nzingaflow tests benchmarks
 mypy nzingaflow
 pytest
 ```
@@ -1357,7 +1363,7 @@ Details: see [CHANGELOG.md](CHANGELOG.md).
 - MassBalanceTracker, CFL stability check
 - Parallel-reduction segment merging (O(n log n))
 - Flow reversal detection and segment mirroring
-- Numba JIT kernels for all hot-path operations (~4–5× speedup)
+- Numba JIT kernels for the hot-path kernels (about 4–9× per kernel; 1.4–1.9× for `merge_segments()` and a full time step)
 - Combined bulk + wall decay in one memory pass (`combined_decay_multi` / `build_combined_exp`)
 - Vectorized junction routing via `_node_type` / `_node_out0` cache (~734× vs Python loop)
 - CSR pipe-index in `SegmentStore` (cached lexsort for `merge_segments`)
