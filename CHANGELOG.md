@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- **Added: FIFO and LIFO tanks.** Tanks with `FIFO` or `LIFO` in the `[MIXING]` section are no longer computed as a fully mixed (CSTR) tank. The tank content is stored as parcels (volume, concentration, PHREEQC solution number). Arriving segments join the back of the queue; outflow leaves from the front (FIFO) or the back (LIFO) and is distributed over the outlet pipes by flow. `_tank_V` is the sum of the parcel volumes, so the hydraulic tank volume does not overwrite it. `MIXED` is unchanged. `2COMP` still falls back to `MIXED` with a warning. Tests: `tests/test_tank_fifo_lifo.py`.
+- **Added: `set_source_solution()` for external inflow in `PhreeqSolutionMode`.** Water entering a node with negative demand now takes part in node mixing with its own PHREEQC solution, and the water released from that node gets the mixed solution. Before, it was ignored in the PHREEQC-based mixing, which gave the wrong pH on such nodes. Without a call to `set_source_solution()` a `UserWarning` is given and the background solution is used. Tests: `tests/test_ph_externe_instroom.py`.
 ### Review: silent failures, stale test, dead module, docs, lint and types, performance
 
 - **Changed: alkalinity fallback no longer returns 0.** `_sol_value(sol, 'Alk')` raises a `RuntimeError` when the speciation of a solution is not available, instead of silently returning 0. A failing species lookup inside the sum is no longer swallowed either. This path is only used when the exact PHREEQC `ALK` (`_alk_batch`) fails; the normal path is unchanged.
