@@ -21,14 +21,21 @@ Zonder Numba: numpy fallbacks (identiek gedrag, langzamer).
 
 Complexiteit
 ------------
-  Sorting         O(n log n)  via lexsort — overgeslagen via CSR-cache
+  Sorting         O(n log n)  stabiele sortering op samengestelde sleutel (~O(n) voor
+                              een bijna gesorteerde store; zie segments._sort_by_pipe_x).
+                              merge_segments markeert de index na afloop als ongeldig,
+                              dus hij wordt bij elke aanroep opnieuw opgebouwd.
   Per pass        O(n)        één kernel-aanroep
   Totaal          O(n log n)  door sort; reductie O(n × passes)
 
-Performance (n=5000, 2 stoffen, 30% mergeable)
------------------------------------------------
-  zonder Numba:   ~2600 µs
-  met Numba:        ~90 µs   (~29x sneller)
+Performance (n=5000, 200 leidingen, 2 stoffen; zie benchmarks/bench_kernels.py)
+-------------------------------------------------------------------------------
+  niets samen te voegen (gesorteerde store):  ~285 µs zonder Numba, ~185 µs met Numba
+  alles samenvoegbaar:                       ~1400 µs zonder Numba, ~750 µs met Numba
+  willekeurige volgorde (slechtste geval):    ~630 µs zonder Numba, ~490 µs met Numba
+  De sortering van de CSR-index is goedkoop voor een (bijna) gesorteerde store (~30 µs,
+  tegen ~500 µs voor np.lexsort); de rest is NumPy-werk rond de Numba-kernels.
+  Absolute tijden hangen sterk van de hardware af.
 """
 
 from __future__ import annotations

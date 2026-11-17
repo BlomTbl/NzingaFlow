@@ -13,7 +13,7 @@ Nieuw in deze versie
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import numpy as np
 
@@ -22,8 +22,8 @@ def _read_tank_mix_models(inp_path: str) -> dict:
     """
     Lees het [MIXING]-blok van een .inp: {tanknaam: model} (model in hoofdletters).
 
-    NzingaFlow rekent elke tank als MIXED (CSTR). Andere modellen (FIFO, LIFO,
-    2COMP) worden hier wel gelezen zodat de solver kan waarschuwen.
+    MIXED (CSTR) en FIFO/LIFO worden ondersteund; 2COMP wordt hier gelezen zodat
+    de solver kan waarschuwen dat dat model als MIXED wordt gerekend.
     """
     models: dict = {}
     try:
@@ -150,7 +150,7 @@ class NzingaFlowSolver:
 
         self.tank_mix_models = _read_tank_mix_models(inp_path)
         for _tk, _mdl in self.tank_mix_models.items():
-            if _mdl != "MIXED":
+            if _mdl not in ("MIXED", "FIFO", "LIFO"):
                 _warnings.warn(
                     f"Tank {_tk!r}: tankmodel {_mdl} in het .inp wordt niet ondersteund; "
                     f"NzingaFlow rekent deze tank als MIXED (CSTR). Resultaten "
@@ -194,6 +194,18 @@ class NzingaFlowSolver:
         self._tank_nodes = self._detect_tank_nodes()
         self._tank_V = self._get_tank_volumes()  # (n_tanks,) m³ — gecached
         self._tank_C = np.zeros((len(self._tank_nodes), n_species))  # CSTR toestand
+        # Tankmodel per tank uit [MIXING]: MIXED (CSTR, standaard), FIFO of LIFO.
+        # FIFO/LIFO-tanks bewaren hun inhoud als parcels [volume, C, oplossingnummer],
+        # oudste vooraan (FIFO leegt van voren, LIFO van achteren).
+        self._tank_models = [
+            self.tank_mix_models.get(n.uid, "MIXED")
+            for n in self.hyd.net.tanks
+            if n.uid in self.node_index
+        ]
+        self._tank_parcels: list[deque] = [deque() for _ in self._tank_nodes]
+        # Cumulatief volume dat per FIFO/LIFO-tank binnenkomt en vertrekt [m³] (controle/balans)
+        self._parcel_in = np.zeros(len(self._tank_nodes))
+        self._parcel_out = np.zeros(len(self._tank_nodes))
 
         # Automatische reservoir- en junctionbronnen (zie network_sources.py)
         self._qual_clock: float = 0.0  # kwaliteitstijd [s], telt mee met elke step()
@@ -224,6 +236,10 @@ class NzingaFlowSolver:
         # SOURCE). Zie set_source_quality().
         self._node_demand: np.ndarray | None = None  # (node_count,) m³/s, + = uit
         self._ext_C: np.ndarray | None = None  # (node_count, n_species)
+        # PhreeqSolutionMode: PHREEQC-oplossingnummer van externe instroom per knoop
+        # (zie set_source_solution). Ontbreekt een nummer, dan de achtergrondoplossing.
+        self._ext_sol: dict[int, int] = {}
+        self._ext_sol_warned: set[int] = set()
         # Persistente knoopconcentratie (laatste aankomst) en aankomstvlag
         self._node_C_hold: np.ndarray | None = None  # (node_count, n_species)
         self._res_init_C: np.ndarray | None = (
@@ -425,6 +441,9 @@ class NzingaFlowSolver:
                     ((C_t_new - self._tank_C) * self._tank_V[:, np.newaxis]).sum(axis=0)
                 )
             self._tank_C[:] = C_t_new
+            for ti in range(len(self._tank_nodes)):
+                if self._tank_models[ti] in ("FIFO", "LIFO"):
+                    self._init_parcel_tank(ti)
 
         # Persistente knoopconcentratie start met de beginconditie (punt 5):
         # knopen die pas later een aankomst krijgen, tonen tot dan deze waarde.
@@ -516,6 +535,9 @@ class NzingaFlowSolver:
         # Tankvolumes kunnen veranderen tijdens EPS (peil varieert)
         if len(self._tank_nodes) > 0:
             new_V = self._get_tank_volumes()
+            for ti, mdl in enumerate(self._tank_models):
+                if mdl in ("FIFO", "LIFO"):
+                    new_V[ti] = self._tank_V[ti]  # volume = som van de parcels
             if self._tracker and len(new_V) == len(self._tank_V):
                 # EPANET zet het tankvolume terug op de eigen waarde: dat is water
                 # dat met de tankconcentratie bijkomt/verdwijnt → als injectie boeken.
@@ -1186,7 +1208,7 @@ class NzingaFlowSolver:
                 # PhreeqSolutionMode.apply_mixing) — die moeten we hier zelf
                 # opbouwen uit de PHREEQC-oplossingnummers van de segmenten
                 # die deze stap een knoop bereiken.
-                node_inflows = self._build_node_inflows(exit_mask, flow, n)
+                node_inflows = self._build_node_inflows(exit_mask, flow, n, ext_V=ext_V, dt=dt)
                 self._geochem.apply_mixing(
                     node_C,
                     node_flow,
@@ -1397,10 +1419,12 @@ class NzingaFlowSolver:
         V_in = np.zeros(n_tanks)
         C_in = np.zeros((n_tanks, self.n_species))
         Q_out = np.zeros(n_tanks)
+        arrivals: list = [np.empty(0, dtype=np.int64)] * n_tanks
         for ti, tank_node in enumerate(self._tank_nodes):
             op = self._tank_out_pipes[ti]
             Q_out[ti] = flow[op].sum() if len(op) else 0.0
             idx = exit_idx[exit_end == tank_node] if exit_idx.size else exit_idx
+            arrivals[ti] = idx
             if idx.size:
                 vols = self.segments.volume[idx]
                 v_tot = float(vols.sum())
@@ -1414,28 +1438,128 @@ class NzingaFlowSolver:
         denom = 1.0 + (Q_out * dt / V_after)[:, np.newaxis] + decay_k[np.newaxis, :] * dt
         M_new = (M_old + V_in[:, np.newaxis] * C_in) / denom
         C_new = M_new / V_after[:, np.newaxis]
+        parcel_ti = [ti for ti in range(n_tanks) if self._tank_models[ti] in ("FIFO", "LIFO")]
+        cstr_mask = np.array([0.0 if ti in parcel_ti else 1.0 for ti in range(n_tanks)])
 
         if self._tracker:
-            self._tracker.record_tank_decay((decay_k[np.newaxis, :] * M_new * dt).sum(axis=0))
+            self._tracker.record_tank_decay(
+                (decay_k[np.newaxis, :] * M_new * dt * cstr_mask[:, np.newaxis]).sum(axis=0)
+            )
 
         self._tank_C[:] = C_new
         self._tank_V = V_after
+
+        # FIFO/LIFO-tanks: eigen parcelberekening (overschrijft de CSTR-waarden)
+        for ti in parcel_ti:
+            avg, vol_tot = self._parcel_step(ti, arrivals[ti], flow, dt, decay_k)
+            self._tank_C[ti] = avg
+            self._tank_V[ti] = vol_tot
+
         node_C[self._tank_nodes] = self._tank_C
 
         # Afgifte wordt na _handle_exits toegevoegd (segmentarrays mogen tijdens
         # de exitverwerking niet groeien: exit_mask hoort bij de oude n).
+        # FIFO/LIFO-afgifte staat al in _tank_release (_parcel_step).
         for ti in range(n_tanks):
+            if ti in parcel_ti:
+                continue
             for p in self._tank_out_pipes[ti]:
                 vol = float(flow[p]) * dt
                 if vol > 0.0:
-                    self._tank_release.append((int(p), vol, C_new[ti].copy()))
+                    self._tank_release.append((int(p), vol, C_new[ti].copy(), None))
         return node_C
+
+    def _init_parcel_tank(self, ti: int) -> None:
+        """Vul een FIFO/LIFO-tank met één parcel: het beginwater op het tankvolume."""
+        v = float(self._tank_V[ti])
+        geo = self._geochem
+        sol = geo.background_number if (geo is not None and hasattr(geo, "sol_ids")) else None
+        self._tank_parcels[ti] = deque([[v, self._tank_C[ti].copy(), sol]]) if v > 0.0 else deque()
+
+    def _parcel_step(
+        self,
+        ti: int,
+        arrivals: np.ndarray,
+        flow: np.ndarray,
+        dt: float,
+        decay_k: np.ndarray,
+    ) -> tuple[np.ndarray, float]:
+        """
+        FIFO/LIFO-tank voor één stap.
+
+        Aankomst: elk aangekomen segment wordt een parcel achteraan (volume, C en
+        oplossingnummer worden overgenomen). Afgifte: er gaat Q_out·dt uit de tank,
+        bij FIFO van voren (oudste eerst), bij LIFO van achteren (nieuwste eerst).
+        Elk afgegeven stuk wordt verdeeld over de uitgaande leidingen naar debiet
+        en komt in _tank_release terecht, met het oplossingnummer van het parcel.
+
+        Geeft de volumegewogen gemiddelde concentratie en het totale volume terug.
+        Bij een lege tank gaat er niets uit, ook al zegt het hydraulische model iets anders.
+        """
+        parcels = self._tank_parcels[ti]
+        lifo = self._tank_models[ti] == "LIFO"
+        geo = self._geochem
+        has_sol = geo is not None and hasattr(geo, "sol_ids")
+
+        # aankomst
+        for i in np.asarray(arrivals, dtype=np.int64):
+            v = float(self.segments.volume[i])
+            if v <= 0.0:
+                continue
+            sol = int(geo.sol_ids[i]) if has_sol else None
+            parcels.append([v, self.segments.C[i].copy(), sol])
+            self._parcel_in[ti] += v
+
+        # chemisch verval (C-ruimte; in PhreeqSolutionMode doet PHREEQC dit)
+        if parcels and np.any(decay_k):
+            factor = np.exp(-np.asarray(decay_k, dtype=np.float64) * dt)
+            mass_before = sum(p[0] * p[1] for p in parcels)
+            for p in parcels:
+                p[1] = p[1] * factor
+            if self._tracker:
+                self._tracker.record_tank_decay(mass_before - sum(p[0] * p[1] for p in parcels))
+
+        # afgifte
+        op = self._tank_out_pipes[ti]
+        q_tot = float(flow[op].sum()) if len(op) else 0.0
+        remaining = q_tot * dt
+        pieces: list = []
+        while remaining > 0.0 and parcels:
+            p = parcels[-1] if lifo else parcels[0]
+            take = min(p[0], remaining)
+            pieces.append((take, p[1].copy(), p[2]))
+            p[0] -= take
+            remaining -= take
+            self._parcel_out[ti] += take
+            if p[0] <= 1e-12:
+                parcels.pop() if lifo else parcels.popleft()
+
+        if q_tot > 0.0:
+            for vol_piece, C_piece, sol in pieces:
+                for p in op:
+                    share = float(flow[p]) / q_tot
+                    if share > 0.0:
+                        self._tank_release.append((int(p), vol_piece * share, C_piece, sol))
+
+        vol_tot = float(sum(p[0] for p in parcels))
+        if vol_tot > 0.0:
+            avg = sum(p[0] * p[1] for p in parcels) / vol_tot
+        else:
+            avg = self._tank_C[ti].copy()
+        return np.asarray(avg, dtype=np.float64), vol_tot
 
     def _release_tanks(self, flow: np.ndarray, dt: float) -> None:
         """Voeg het door _update_tanks berekende tankwater toe als segmenten (x = 0)."""
-        for p, vol, C in getattr(self, "_tank_release", ()):
+        for item in getattr(self, "_tank_release", ()):
+            p, vol, C = item[0], item[1], item[2]
+            sol = item[3] if len(item) > 3 else None
             self.segments.add(pipe=p, x=0.0, volume=vol, C_vector=C)
-            self._sync_geochem_new_segment()
+            if sol is not None and self._geochem is not None and hasattr(self._geochem, "sol_ids"):
+                self._geochem.on_segment_added(
+                    self.segments.n - 1, self._geochem.copy_solution(sol)
+                )
+            else:
+                self._sync_geochem_new_segment()
         self._tank_release = []
 
     # ── Oplossingnummer-modus (PhreeqSolutionMode) ─────────────────────────────
@@ -1445,6 +1569,8 @@ class NzingaFlowSolver:
         exit_mask: np.ndarray,
         flow: np.ndarray,
         n: int,
+        ext_V: np.ndarray | None = None,
+        dt: float | None = None,
     ) -> list[list[tuple[int, float]]]:
         """
         Bouw per knoop een lijst van (oplossingnummer, debiet)-paren voor
@@ -1472,9 +1598,6 @@ class NzingaFlowSolver:
         """
         node_inflows: list[list[tuple[int, float]]] = [[] for _ in range(self.node_count)]
         em = exit_mask[:n]
-        if not em.any():
-            return node_inflows
-
         sol_ids = self._geochem.sol_ids
         exit_idx = np.where(em)[0]
         for i in exit_idx:
@@ -1482,6 +1605,16 @@ class NzingaFlowSolver:
             nd = int(self.pipe_end[p])
             w = float(flow[p])
             node_inflows[nd].append((int(sol_ids[i]), w))
+
+        # Externe instroom (negatieve vraag) telt mee in de menging, met zijn eigen
+        # oplossing. ext_V is een volume per stap; /dt geeft een debiet, dezelfde
+        # eenheid als de segmentdebieten hierboven.
+        if ext_V is not None and dt:
+            for nd in np.where(ext_V > 0.0)[0]:
+                nd = int(nd)
+                if not self._node_active_out.get(nd):
+                    continue
+                node_inflows[nd].append((self._ext_solution_for(nd), float(ext_V[nd]) / float(dt)))
         return node_inflows
 
     def _phreeq_mixed_number(self, node_idx: int) -> int | None:
@@ -1525,6 +1658,40 @@ class NzingaFlowSolver:
         if self._ext_C is None:
             self._ext_C = np.zeros((self.node_count, self.n_species), dtype=np.float64)
         self._ext_C[idx] = np.asarray(C_vector, dtype=np.float64)
+
+    def set_source_solution(self, node_uid: str, sol_num: int) -> None:
+        """
+        PhreeqSolutionMode: stel de PHREEQC-oplossing in van water dat via een
+        externe instroom (negatieve vraag) een knoop binnenkomt.
+
+        Zonder deze aanroep wordt de achtergrondoplossing van de geochemie-modus
+        gebruikt (en daarvoor gewaarschuwd). Geldt tot de volgende aanroep.
+        """
+        idx = self.node_index.get(node_uid)
+        if idx is None:
+            raise KeyError(f"set_source_solution: onbekende knoopnaam {node_uid!r}")
+        self._ext_sol[int(idx)] = int(sol_num)
+
+    def _ext_solution_for(self, nd: int) -> int:
+        """Oplossingnummer van de externe instroom van knoop nd (of achtergrond + waarschuwing)."""
+        if nd in self._ext_sol:
+            return self._ext_sol[nd]
+        bg = getattr(self._geochem, "background_number", None)
+        if nd not in self._ext_sol_warned:
+            self._ext_sol_warned.add(nd)
+            import warnings
+
+            warnings.warn(
+                f"Knoop {self.node_names[nd]!r} heeft externe instroom maar geen "
+                "set_source_solution(): de achtergrondoplossing wordt gebruikt.",
+                UserWarning,
+                stacklevel=3,
+            )
+        if bg is None:
+            raise ValueError(
+                f"Geen oplossing voor externe instroom van knoop {self.node_names[nd]!r}"
+            )
+        return int(bg)
 
     def _has_external_inflow(self) -> bool:
         """True als er een knoop met externe instroom en uitgaande leiding is."""
@@ -1728,10 +1895,16 @@ class NzingaFlowSolver:
                 w = np.ones(len(outs), dtype=np.float64)
             w = w / w.sum()
             C_nd = node_C[nd]
+            mixed = self._phreeq_mixed_number(int(nd))  # na apply_mixing: knoopoplossing
             for p, wp in zip(outs, w):
                 tp = int(self._skip_target[p]) if self._skip_target is not None else int(p)
                 self.segments.add(pipe=tp, x=0.0, volume=float(ext_V[nd] * wp), C_vector=C_nd)
-                self._sync_geochem_new_segment()
+                if mixed is not None and hasattr(self._geochem, "sol_ids"):
+                    self._geochem.on_segment_added(
+                        self.segments.n - 1, self._geochem.copy_solution(mixed)
+                    )
+                else:
+                    self._sync_geochem_new_segment()
             if self._ext_C is not None:
                 mass_in += ext_V[nd] * self._ext_C[nd]
         if self._tracker and np.any(mass_in != 0.0):

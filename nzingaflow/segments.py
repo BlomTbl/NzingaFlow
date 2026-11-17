@@ -7,6 +7,36 @@ from collections.abc import Callable
 import numpy as np
 
 
+def _sort_by_pipe_x(pipe: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """
+    Indices die (pipe, x) oplopend sorteren; identiek aan ``np.lexsort((x, pipe))``.
+
+    ``np.lexsort`` kost ~500 µs voor 5000 segmenten, ongeacht de volgorde. Een store
+    die net gemerged is (of waarin segmenten alleen verschoven zijn) is al bijna
+    gesorteerd. Een stabiele sortering op één samengestelde sleutel
+    (``pipe * span + x``) benut dat (timsort): ~30 µs bij gesorteerde data en nog
+    steeds sneller dan lexsort bij willekeurige data.
+
+    De samengestelde sleutel is een float64 en kan bij een heel groot netwerk of
+    vrijwel gelijke posities afronden. Daarom wordt de uitkomst gecontroleerd
+    (O(n)) en valt de functie terug op ``np.lexsort`` als de volgorde niet exact
+    klopt, of als x NaN/inf bevat. Het resultaat is dus altijd gelijk aan lexsort.
+    """
+    if pipe.shape[0] < 2:
+        return np.lexsort((x, pipe))
+    with np.errstate(invalid="ignore", over="ignore"):
+        xmin = x.min()
+        span = x.max() - xmin + 1.0
+        key = pipe * span + (x - xmin)
+        order = np.argsort(key, kind="stable")
+        p = pipe[order]
+        xs = x[order]
+        in_orde = bool(np.all((p[1:] > p[:-1]) | ((p[1:] == p[:-1]) & (xs[1:] >= xs[:-1]))))
+    if in_orde:
+        return order
+    return np.lexsort((x, pipe))
+
+
 class SegmentStore:
     """
     Hoge-performance segment-opslag (Structure-of-Arrays).
@@ -21,11 +51,19 @@ class SegmentStore:
 
     CSR pipe-index
     --------------
-    Voor merge_segments is een gesorteerde index per leiding nodig (lexsort op
-    (pipe, x)).  Die sort kost ~500 µs voor 5000 segmenten.  De CSR-index
-    (pipe_ptr, pipe_order) slaat dit resultaat op en markeert zichzelf dirty
-    na elke add()/remove().  merge_segments roept build_csr() aan om de index
-    op te bouwen; als hij nog geldig is (not dirty) wordt de sort overgeslagen.
+    Voor merge_segments is een gesorteerde index per leiding nodig (sortering op
+    (pipe, x), zie _sort_by_pipe_x).  De CSR-index (pipe_ptr, pipe_order) slaat
+    dit resultaat op en markeert zichzelf dirty na elke add()/remove().
+    merge_segments roept build_csr() aan; als de index nog geldig is (not dirty)
+    wordt de sort overgeslagen.
+
+    LET OP: de vlag is geen betrouwbare indicator. De solver past pipe en x op
+    enkele plekken rechtstreeks aan (stroomomkering, doorstroming via een knoop,
+    splitsing) zonder add()/remove(), en merge_segments zet de index na afloop
+    altijd op dirty. In de praktijk wordt de index dus bij elke merge opnieuw
+    opgebouwd. Dat is veilig en met de snelle sortering goedkoop (~30 µs bij een
+    gesorteerde store, tegen ~500 µs voor np.lexsort). Wie de index wil hergebruiken,
+    moet eerst elke directe schrijfactie op pipe/x laten invalideren.
 
     on_resize callback
     ------------------
@@ -153,7 +191,7 @@ class SegmentStore:
             self._csr_dirty = False
             return self._csr_order, self._csr_ptr
 
-        order = np.lexsort((self.x[:n], self.pipe[:n])).astype(np.int64)
+        order = _sort_by_pipe_x(self.pipe[:n], self.x[:n]).astype(np.int64, copy=False)
         counts = np.bincount(self.pipe[:n], minlength=n_pipes)
         ptr = np.zeros(n_pipes + 1, dtype=np.int64)
         np.cumsum(counts, out=ptr[1:])
