@@ -102,7 +102,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -1201,9 +1201,21 @@ class PhreeqSolutionMode:
         self.auto_gc_interval = auto_gc_interval
         self.background_number = background_number
         self._step = 0
+        # Aanbieders van oplossingnummers die buiten de SegmentStore leven (bijv. de parcels van
+        # FIFO/LIFO-tanks) en dus niet door garbage_collect() verwijderd mogen worden.
+        self._protected_providers: list[Callable[[], Iterable[int]]] = []
         # sol_ids: parallel aan SegmentStore; ingevuld door fill() of bij add
         self.sol_ids: np.ndarray | None = None
         self._capacity: int = 0
+
+    def register_protected(self, provider: Callable[[], Iterable[int]]) -> None:
+        """
+        Registreer een aanbieder van oplossingnummers die in gebruik blijven buiten de
+        SegmentStore. ``garbage_collect()`` roept de aanbieder aan en slaat die nummers over.
+
+        De solver doet dit zelf voor het water in FIFO/LIFO-tanks.
+        """
+        self._protected_providers.append(provider)
 
     # ── Initialisatie ─────────────────────────────────────────────────────────
 
@@ -1552,7 +1564,10 @@ class PhreeqSolutionMode:
         store : SegmentStore
         keep : sequence of int | None
             Extra oplossingnummers die niet verwijderd mogen worden
-            (bijv. bronoplossingen, achtergrondoplossing).
+            (bijv. bronoplossingen, achtergrondoplossing). Oplossingen die je zelf steeds
+            opnieuw aan segmenten koppelt (bijv. een bronoplossing voor ``inject()``) moeten
+            hier in staan: ze zitten zelf niet in de store. Het water in FIFO/LIFO-tanks
+            wordt door de solver automatisch beschermd.
 
         Returns
         -------
@@ -1570,6 +1585,8 @@ class PhreeqSolutionMode:
             active.update(keep)
         if self.background_number is not None:
             active.add(self.background_number)
+        for provider in self._protected_providers:
+            active.update(int(x) for x in provider() if x)
 
         all_sols = set(pp.get_solution_list())
         to_remove = list(all_sols - active)

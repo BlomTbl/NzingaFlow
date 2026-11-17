@@ -50,7 +50,7 @@ NzingaFlow simulates water quality in drinking water distribution networks using
 - **MSX reaction system** — EPANET-MSX 2.0 compatible multi-species reaction layer (v1.1.0)
 - **MSX native library bridge** — direct ctypes binding to `libepanetmsx` (EPANET-MSX 2.0); runs an existing `.msx` file unchanged through the official C solver; native libraries bundled for Linux/Windows (introduced in v1.2.0; functional with bundled binaries since v1.2.2)
 - **Valve topology support** — PRV, PSV, PBV, TCV, FCV, GPV and PCV included in transport via `include_valves=True` (v1.2.1)
-- **Tanks** — mass-conserving CSTR model with implicit Euler integration (unconditionally stable); tanks absorb arriving segments and release water to their outflow pipes as new segments
+- **Tanks** — mass-conserving CSTR model with implicit Euler integration (unconditionally stable); tanks absorb arriving segments and release water to their outflow pipes as new segments. `FIFO` or `LIFO` in `[MIXING]` keeps the tank content as parcels instead (oldest or newest water leaves first); `2COMP` falls back to `MIXED` with a warning
 - **Extended Period Simulation (EPS)** — automatic hydraulic updates every `hyd_dt` seconds
 - **Full geochemistry** — optional PhreeqPython/PHREEQC integration
 - **CFL stability check** — automatic warning and `recommended_dt()`
@@ -276,7 +276,8 @@ Each time step `dt`, the solver executes the following phases:
 2. Advection       x += v[pipe] * dt
 3. Exit detection  x >= L[pipe]  →  segment leaves pipe
 4. Node mixing     flow-weighted  →  node_C (n_nodes × n_species)
-5. Tank model      mass-conserving CSTR (implicit Euler): arriving segments are absorbed, tank state (V, M) updated  →  node_C updated
+5. Tank model      MIXED: mass-conserving CSTR (implicit Euler), tank state (V, M) updated  →  node_C updated;
+                   FIFO/LIFO: arriving segments join a parcel queue, outflow leaves from the front (FIFO) or back (LIFO)
 6. Pipe routing    vectorized: through-nodes updated in one pass; splits in small loop;
                    distance travelled beyond the pipe end (overshoot) is carried as time across consecutive
                    through-nodes within the same step (a segment may cross several short pipes per step)
@@ -647,8 +648,11 @@ after mixing two waters), instead of `GeochemSolver`'s linear concentration
 mixing. Use it when exact pH after mixing matters, or when downstream code
 needs direct PHREEQC solution objects (e.g. Victoria-style workflows).
 About ~2× slower than `GeochemSolver`; PHREEQC memory grows with the number
-of unique solutions, so call `garbage_collect()` regularly (or set
-`auto_gc_interval`). Water released by tanks enters the pipes with the background solution.
+of unique solutions, so call `garbage_collect()` yourself: `NzingaFlowSolver.step()` does not
+run the automatic collection (`auto_gc_interval` only acts inside `apply_geochemistry()` when a `kinetics_fn`
+is given). Pass solutions that you attach to segments yourself (e.g. an `inject()` source solution) in `keep`;
+the water in FIFO/LIFO tanks is protected automatically. `MIXED` tanks release water with the background
+solution; FIFO/LIFO tanks release the solution of the parcel that leaves.
 
 ```python
 PhreeqSolutionMode(
@@ -669,7 +673,8 @@ PhreeqSolutionMode(
 | `copy_solution(sol_num)` | Independent PHREEQC copy of a solution — needed when one segment splits into several |
 | `get_solution(store, seg_idx)` | PhreeqPython solution object for one segment |
 | `get_conc(store, element, units='mg/L')` | Concentrations for all active segments as a NumPy array |
-| `garbage_collect(store, keep=None)` | Remove PHREEQC solutions no longer referenced by any active segment |
+| `garbage_collect(store, keep=None)` | Remove PHREEQC solutions no longer referenced by any active segment. `keep` must hold solutions you attach to segments yourself; FIFO/LIFO tank parcels are protected automatically |
+| `register_protected(provider)` | Register a callable that returns solution numbers `garbage_collect()` must keep (the solver does this for its tank parcels) |
 
 Used via `NzingaFlowSolver(..., geochem=psm)`: `step()` recognises this mode
 (by the presence of `sol_ids`) and handles the bookkeeping above
