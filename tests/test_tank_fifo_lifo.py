@@ -113,9 +113,9 @@ def _model_file(tmp_path, model):
     return str(p)
 
 
-def _run(net_path, *, geochem=None, sol_in=None, sol_bg=None, extra_hook=None):
+def _run(net_path, *, geochem=None, sol_in=None, sol_bg=None, extra_hook=None, recorder=None):
     """Simuleer 3 h. Instroom uit R1: C = 1 (of sol_in[0]) vóór SWITCH, daarna C = 0 (of sol_in[1])."""
-    s = Recorder(
+    s = (recorder or Recorder)(
         net_path, n_species=1, include_valves=True, auto_reservoir_sources=False, geochem=geochem
     )
     s.set_initial_quality(np.zeros((s.node_count, 1)), simtime=0, dt=DT)
@@ -238,3 +238,49 @@ def test_t5_psm_oplossing_per_parcel(tmp_path):
 def _pH_at(log, t_target, half_width=600.0):
     vals = [ph for t, v, c, ph in log if abs(t - t_target) <= half_width and v > 0 and ph == ph]
     return float(np.mean(vals)) if vals else float("nan")
+
+
+def test_t6_garbage_collect_beschermt_tankparcels(tmp_path):
+    """Handmatige garbage_collect(keep=[achtergrond]) mag het water in de tank niet verwijderen."""
+    pytest.importorskip("phreeqpython")
+    import phreeqpython
+
+    from nzingaflow.geochemistry import PhreeqSolutionMode
+
+    protect: list[int] = []  # bronoplossingen die de test zelf steeds opnieuw injecteert
+
+    class GCRecorder(Recorder):
+        def step(self, *args, **kwargs):
+            self._gc_n = getattr(self, "_gc_n", 0) + 1
+            if self._gc_n % 20 == 0:
+                self._geochem.garbage_collect(self.segments, keep=protect)
+            return super().step(*args, **kwargs)
+
+    pp = phreeqpython.PhreeqPython()
+    A = {
+        "pH": 7.0,
+        "temp": 15,
+        "units": "mmol/L",
+        "Alkalinity": 3.0,
+        "Na": 2.0,
+        "Cl": 1.0,
+        "Ca": 0.5,
+    }
+    B = {
+        "pH": 8.2,
+        "temp": 15,
+        "units": "mmol/L",
+        "Alkalinity": 1.0,
+        "Na": 1.0,
+        "Cl": 2.0,
+        "Ca": 1.5,
+    }
+    sA, sB = pp.add_solution(A).number, pp.add_solution(B).number
+    protect.extend([sA, sB])
+    psm = PhreeqSolutionMode(pp, auto_gc_interval=0, background_number=sB)
+    s, _ = _run(
+        _model_file(tmp_path, "FIFO"), geochem=psm, sol_in=(sA, sB), sol_bg=sB, recorder=GCRecorder
+    )
+    assert _pH_at(s.log, 1.0 * 3600) == pytest.approx(8.2, abs=0.05)
+    assert _pH_at(s.log, 2.7 * 3600) == pytest.approx(7.0, abs=0.05)
+    assert s._tank_parcel_solutions()  # er zit nog water met een oplossingnummer in de tank

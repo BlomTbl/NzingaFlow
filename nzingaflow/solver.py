@@ -295,6 +295,10 @@ class NzingaFlowSolver:
 
         # Geochemie (PhreeqPython)
         self._geochem = geochem  # GeochemSolver of None
+        if geochem is not None and hasattr(geochem, "register_protected"):
+            # Het water in FIFO/LIFO-tanks staat niet in de SegmentStore; zonder deze aanmelding
+            # zou garbage_collect() de oplossingen van de tankparcels verwijderen.
+            geochem.register_protected(self._tank_parcel_solutions)
 
         self._step_counter = 0
         self._last_dt: float = 1.0  # bijgehouden per step()-aanroep; gebruikt door booster_inject()
@@ -1469,6 +1473,10 @@ class NzingaFlowSolver:
                     self._tank_release.append((int(p), vol, C_new[ti].copy(), None))
         return node_C
 
+    def _tank_parcel_solutions(self) -> list[int]:
+        """PHREEQC-oplossingnummers van het water in FIFO/LIFO-tanks (voor garbage_collect)."""
+        return [int(p[2]) for dq in self._tank_parcels for p in dq if p[2] is not None]
+
     def _init_parcel_tank(self, ti: int) -> None:
         """Vul een FIFO/LIFO-tank met één parcel: het beginwater op het tankvolume."""
         v = float(self._tank_V[ti])
@@ -1510,8 +1518,9 @@ class NzingaFlowSolver:
             parcels.append([v, self.segments.C[i].copy(), sol])
             self._parcel_in[ti] += v
 
-        # chemisch verval (C-ruimte; in PhreeqSolutionMode doet PHREEQC dit)
-        if parcels and np.any(decay_k):
+        # chemisch verval (C-ruimte). In PhreeqSolutionMode krijgen de segmenten geen C-verval
+        # (de solver geeft geen kinetiek aan PHREEQC door), dus de parcels ook niet.
+        if parcels and not has_sol and np.any(decay_k):
             factor = np.exp(-np.asarray(decay_k, dtype=np.float64) * dt)
             mass_before = sum(p[0] * p[1] for p in parcels)
             for p in parcels:
@@ -1610,8 +1619,8 @@ class NzingaFlowSolver:
         # oplossing. ext_V is een volume per stap; /dt geeft een debiet, dezelfde
         # eenheid als de segmentdebieten hierboven.
         if ext_V is not None and dt:
-            for nd in np.where(ext_V > 0.0)[0]:
-                nd = int(nd)
+            for nd_np in np.where(ext_V > 0.0)[0]:
+                nd = int(nd_np)
                 if not self._node_active_out.get(nd):
                     continue
                 node_inflows[nd].append((self._ext_solution_for(nd), float(ext_V[nd]) / float(dt)))

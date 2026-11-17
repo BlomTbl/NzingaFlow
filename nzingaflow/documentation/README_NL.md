@@ -50,7 +50,7 @@ NzingaFlow simuleert waterchemische kwaliteit in drinkwaterdistributienetwerken 
 - **MSX-reactiesysteem** — EPANET-MSX 2.0-compatibele multi-species reactielaag (v1.1.0)
 - **MSX native library bridge** — directe ctypes-koppeling met `libepanetmsx`; laadt `.msx`-bestanden ongewijzigd (v1.2.0; meegeleverde binaries sinds v1.2.2)
 - **Afsluiters in topologie** — PRV, PSV, PBV, TCV, FCV, GPV en PCV worden meegenomen in transport via `include_valves=True` (v1.2.1)
-- **Tanks** — massabehoudend CSTR-model met impliciet Euler (onvoorwaardelijk stabiel); tanks nemen aankomende segmenten op en geven water als nieuwe segmenten af aan hun uitgaande leidingen
+- **Tanks** — massabehoudend CSTR-model met impliciet Euler (onvoorwaardelijk stabiel); tanks nemen aankomende segmenten op en geven water als nieuwe segmenten af aan hun uitgaande leidingen. `FIFO` of `LIFO` in `[MIXING]` bewaart de tankinhoud als parcels (oudste of nieuwste water gaat eerst uit); `2COMP` valt met een waarschuwing terug op `MIXED`
 - **Extended Period Simulation (EPS)** — automatische hydraulica-updates elke `hyd_dt` seconden
 - **Volledige geochemie** — optionele PhreeqPython/PHREEQC-integratie
 - **CFL-stabiliteitscontrole** — automatische waarschuwing en `recommended_dt()`
@@ -275,7 +275,8 @@ Elke tijdstap `dt` doorloopt de solver de volgende fasen:
 2. Advectie             x += v[pipe] * dt
 3. Exit-detectie        x >= L[pipe]  →  segment verlaat leiding
 4. Knoopmenging         debietgewogen  →  node_C (n_knopen × n_stoffen)
-5. Tankmodel            massabehoudend CSTR (impliciet Euler): aankomende segmenten worden opgenomen, tanktoestand (V, M) bijgewerkt  →  node_C bijgewerkt
+5. Tankmodel            MIXED: massabehoudend CSTR (impliciet Euler), tanktoestand (V, M) bijgewerkt  →  node_C bijgewerkt;
+                         FIFO/LIFO: aankomende segmenten sluiten aan in een parcelrij, uitstroom van voren (FIFO) of achteren (LIFO)
 6. Pipe-routing         vectorized: doorgaande knopen in één pass; splitsingen in kleine lus;
                         afstand voorbij het leidingeinde (overshoot) gaat als tijd mee over opeenvolgende
                         doorgaande knopen binnen dezelfde stap (een segment kan meerdere korte leidingen per stap passeren)
@@ -647,7 +648,10 @@ concentratiemenging. Gebruik dit wanneer exacte pH na menging cruciaal is,
 of wanneer downstream code direct PHREEQC-oplossingsobjecten nodig heeft
 (bijv. Victoria-stijl workflows). Ongeveer 2× trager dan `GeochemSolver`;
 PHREEQC-geheugen groeit met het aantal unieke oplossingen, roep dus
-regelmatig `garbage_collect()` aan (of stel `auto_gc_interval` in). Water dat uit tanks komt, gaat met de achtergrondoplossing de leidingen in.
+`garbage_collect()` zelf aan: `NzingaFlowSolver.step()` voert de automatische opruiming niet uit (`auto_gc_interval`
+werkt alleen binnen `apply_geochemistry()` als er een `kinetics_fn` is). Geef oplossingen die je zelf aan segmenten koppelt (bijv. een
+bronoplossing voor `inject()`) mee in `keep`; het water in FIFO/LIFO-tanks wordt automatisch beschermd. `MIXED`-tanks geven water af
+met de achtergrondoplossing; FIFO/LIFO-tanks met de oplossing van het parcel dat vertrekt.
 
 ```python
 PhreeqSolutionMode(
@@ -668,7 +672,8 @@ PhreeqSolutionMode(
 | `copy_solution(sol_num)` | Onafhankelijke PHREEQC-kopie van een oplossing — nodig wanneer één segment opsplitst in meerdere |
 | `get_solution(store, seg_idx)` | PhreeqPython-oplossingsobject voor één segment |
 | `get_conc(store, element, units='mg/L')` | Concentraties voor alle actieve segmenten als NumPy-array |
-| `garbage_collect(store, keep=None)` | Verwijder PHREEQC-oplossingen die niet meer door enig actief segment worden gerefereerd |
+| `garbage_collect(store, keep=None)` | Verwijder PHREEQC-oplossingen die niet meer door enig actief segment worden gerefereerd. `keep` moet oplossingen bevatten die je zelf aan segmenten koppelt; parcels van FIFO/LIFO-tanks worden automatisch beschermd |
+| `register_protected(provider)` | Registreer een callable die oplossingnummers teruggeeft die `garbage_collect()` moet behouden (de solver doet dit voor zijn tankparcels) |
 
 Gebruik via `NzingaFlowSolver(..., geochem=psm)`: `step()` herkent deze
 modus (aan de aanwezigheid van `sol_ids`) en verzorgt de bovenstaande
